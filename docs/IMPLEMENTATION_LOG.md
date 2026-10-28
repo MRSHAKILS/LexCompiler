@@ -406,6 +406,22 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - **TypeScript:** interfaces and object type aliases with PII properties become `PII_COLLECTION_MODEL` findings. All model findings carry `piiFieldEvidence` per field.
 - **Precision/recall test** (`server/piiClassifier.test.ts`): a labelled SQL + Pydantic + TypeScript corpus of 24 fields (14 PII). Names alone find 4 (recall 0.29); the classifier finds all 14 with no false positives. The demo fixture's findings and both gates are unchanged.
 
+### Step 32 · External MCP servers running locally (L-12)
+- **Bug fix (Windows):**
+  - The stdio transport spawned `npx` directly, which fails on Windows (`spawn npx ENOENT`): `npx` is a `.cmd` shim.
+  - `server/util/spawnCommand.ts` resolves the command through `PATH`/`PATHEXT`, spawns `.exe` files directly, and runs `.cmd`/`.bat` shims through `cmd.exe /d /s /c`, with every argument quoted and its metacharacters escaped (the cross-spawn rules).
+  - `server/spawnCommand.test.ts` round-trips spaces, `&`, `|`, `%PATH%`, quotes, `^`, trailing backslashes and a connection URL through a real `.cmd` script; nothing changes on other platforms.
+- **Config fix:**
+  - The example pointed MotherDuck/DuckDB at `./data/ledger.duckdb`, which nothing creates (the ledger is SQLite), so the read-only server could not open it.
+  - It now runs in memory (`--db-path :memory: --read-write`) and reads the ledger with `ATTACH … (TYPE sqlite, READ_ONLY)`.
+  - README notes that `uvx` servers need one warm-up run, because the first package download can exceed the 20 s `initialize` timeout.
+- **Run** (`probeExternalMcpServers` against a local `mcp-servers.json`):
+  - `ONLINE` with live tools: PostgreSQL (`@modelcontextprotocol/server-postgres` on the local pgvector container), Neo4j Cypher (`mcp-neo4j-cypher`), filesystem (`@modelcontextprotocol/server-filesystem` on `./target-repo`), and DuckDB (`mcp-server-motherduck`).
+  - Tool calls returned real data: pgvector 0.8.7, 28 Neo4j nodes, the fixture's directories, and the two ledger tables through DuckDB.
+- **Not run:**
+  - The GitHub MCP needs a GitHub token.
+  - n8n needs its image and a workflow with an MCP Server Trigger at `/mcp/lexcompiler`, set up in n8n's own UI.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -423,7 +439,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | ✅ Done (Steps 21, 25): `verify:realworld` passes inside `lexcompiler-sandbox:1` with `isolation: container`; gVisor is optional and was not available on this host. |
 | L-10 | **Real PostgreSQL execution (X2)** | — | ✅ Done (Steps 12, 25): also verified against real PostgreSQL 17 and Redis servers. |
 | L-11 | **Tree-sitter queries (L3)** | — | ✅ Done (Steps 9, 14): Python, TypeScript and SQL grammars. |
-| L-12 | **External MCP servers** | The external services are not available here | Client implemented and tested (Step 20). Remaining: copy `mcp-servers.example.json` to `mcp-servers.json`, start the services (PostgreSQL, Neo4j, n8n; uvx/npx for the stdio servers; a GitHub token), and check that `/api/mcp/servers` lists each as `ONLINE`. |
+| L-12 | **External MCP servers** | The external services are not available here | Client implemented and tested (Step 20); four of six servers verified `ONLINE` with working tool calls, plus a Windows spawn fix (Step 32). Remaining: the GitHub MCP (needs `GITHUB_TOKEN`) and n8n (needs an n8n instance with the MCP Server Trigger workflow). |
 | L-15 | **GitHub code-scanning upload** | Code scanning is a repository setting | Reusable workflow added (Step 20). Remaining: enable code scanning on a real repository and call `mrshakils/lexcompiler/.github/workflows/lexcompiler-scan.yml@main` from it with a `clauses-file`. |
 | L-16 | **Symbolic program semantics (V3)** | — | ✅ Done (Step 16): path-sensitive symbolic execution for TypeScript and Python, Z3 counterexamples, inter-procedural taint within a module. |
 | L-17 | **More rule categories (L2)** | — | ✅ Done (Step 15). Optional local check: write a real DPIA for `services/ai_credit_triage.ts` and reference it with `DPIA_REFERENCE`. |

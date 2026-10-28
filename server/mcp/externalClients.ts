@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { resolveSpawnCommand } from '../util/spawnCommand.js';
 
 /** `mcpServers` entry, in the format Claude Desktop / Cursor use. */
 export interface ExternalMcpConfig {
@@ -41,7 +42,9 @@ class StdioTransport implements Transport {
   private stderr = '';
 
   constructor(cfg: ExternalMcpConfig, private timeoutMs: number) {
-    this.child = spawn(cfg.command!, cfg.args || [], { cwd: cfg.cwd, env: { ...process.env, ...(cfg.env || {}) }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const env = { ...process.env, ...(cfg.env || {}) };
+    const target = resolveSpawnCommand(cfg.command!, cfg.args || [], env);
+    this.child = spawn(target.command, target.args, { cwd: cfg.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, windowsVerbatimArguments: target.windowsVerbatimArguments });
     this.child.stderr.on('data', (d) => (this.stderr = `${this.stderr}${d}`.slice(-2000)));
     this.child.on('exit', (code) => this.failAll(new Error(`process exited (${code})${this.stderr ? `: ${this.stderr.trim().slice(-300)}` : ''}`)));
     this.child.on('error', (err) => this.failAll(err));

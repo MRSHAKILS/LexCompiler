@@ -19,7 +19,7 @@
     },
     "duckdb-lakehouse-mcp": {
       "command": "uvx",
-      "args": ["mcp-server-motherduck", "--db-path", "./data/ledger.duckdb"]
+      "args": ["mcp-server-motherduck", "--db-path", ":memory:", "--read-write"]
     },
     "n8n-webhook-bridge-mcp": {
       "url": "http://localhost:5678/mcp/lexcompiler"

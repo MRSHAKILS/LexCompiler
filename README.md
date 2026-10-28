@@ -245,6 +245,8 @@ cd agents && python -m lexcompiler_agents agent-contextual-graph-rag
 
 Copy `mcp-servers.example.json` to `mcp-servers.json` (or point `LEXCOMPILER_EXTERNAL_MCP_CONFIG` at another file) to connect external MCP servers over stdio or streamable HTTP. `/api/mcp/servers` shows each one as `ONLINE` with its live tools once it answers `initialize`, and `POST /api/mcp/external/:id/call` calls its tools.
 
+The DuckDB server runs in memory; it reads the SQLite ledger with `ATTACH 'data/lexcompiler_enterprise.db' AS ledger (TYPE sqlite, READ_ONLY)`. `uvx` servers download their packages on first start, which can exceed the 20 s `initialize` timeout, so run each once (for example `uvx mcp-neo4j-cypher --help`) before the first probe. On Windows, `npx` and other `.cmd` commands are started through `cmd.exe` with every argument escaped.
+
 ### Scanning Repositories in GitHub Actions
 
 ```yaml
