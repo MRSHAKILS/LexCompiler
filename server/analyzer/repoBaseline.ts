@@ -230,9 +230,25 @@ export function readTargetRepoFiles(): TargetRepoFile[] {
   return result;
 }
 
+export class TargetRepoPathError extends Error {}
+
+/**
+ * Only the tracked target-repo files can be written: they are the only files the
+ * analyzer reads, and confining writes to them rules out path traversal.
+ */
 export function writeTargetRepoFile(relPath: string, newContent: string): void {
-  const normalized = relPath.replace(/^\/+/, '');
-  const absPath = path.join(TARGET_REPO_ROOT, normalized);
+  const normalized = path.posix.normalize(relPath.replace(/\\/g, '/').replace(/^\/+/, ''));
+  if (!Object.prototype.hasOwnProperty.call(INITIAL_REPO_FILES, normalized)) {
+    throw new TargetRepoPathError(
+      `Refusing to write "${relPath}": only tracked target-repo files can be modified (${Object.keys(
+        INITIAL_REPO_FILES
+      ).join(', ')}).`
+    );
+  }
+  const absPath = path.resolve(TARGET_REPO_ROOT, normalized);
+  if (!absPath.startsWith(TARGET_REPO_ROOT + path.sep)) {
+    throw new TargetRepoPathError(`Refusing to write "${relPath}": path escapes target-repo/.`);
+  }
   fs.mkdirSync(path.dirname(absPath), { recursive: true });
   fs.writeFileSync(absPath, newContent, 'utf8');
 }

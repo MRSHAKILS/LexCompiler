@@ -73,6 +73,11 @@ export interface LegalClause {
   version: string;
   lastAmended: string;
   sourceUrl?: string;
+  /**
+   * Built-in demo text: a paraphrase whose numeric thresholds are scenario
+   * parameters, not wording from the cited law.
+   */
+  illustrative?: boolean;
   deontic: DeonticExtraction;
   compiled: CompiledPolicyArtifacts;
 }
@@ -342,7 +347,8 @@ export interface RemediationPullRequest {
   title: string;
   branchName: string;
   baseBranch: string;
-  status: 'READY_TO_MERGE' | 'APPLIED_TO_REPO';
+  /** READY_TO_MERGE only when every clause is SAT_COMPLIANT after patching. */
+  status: 'READY_TO_MERGE' | 'BLOCKED_UNRESOLVED' | 'APPLIED_TO_REPO';
   createdAt: string;
   triggeredBy: string;
   addressedViolationsCount: number;
@@ -384,6 +390,8 @@ export interface LiveRegulatoryFeedItem {
   excerpt: string;
   url: string;
   suggestedFramework: ComplianceFrameworkId;
+  /** Curated or offline demo text that is not (or not only) the official publication. */
+  illustrative?: boolean;
 }
 
 // ============================================================================

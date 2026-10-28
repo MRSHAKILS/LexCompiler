@@ -49,7 +49,9 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
     'DIFF_VIEW' | 'LIVE_RUNTIME' | 'LIVE_EDITOR' | 'PROOF_WITNESS' | 'FULL_PR'
   >('DIFF_VIEW');
   const [runtimeReport, setRuntimeReport] = useState<any | null>(null);
+  const [runtimeDisabledReason, setRuntimeDisabledReason] = useState<string | null>(null);
   const [isRunningSandbox, setIsRunningSandbox] = useState(false);
+  const prBlocked = remediationPR?.postPatchZ3Status !== 'SAT_COMPLIANT';
 
   const fetchRuntimeSandbox = async () => {
     setIsRunningSandbox(true);
@@ -58,6 +60,13 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
       if (res.ok) {
         const data = await res.json();
         setRuntimeReport(data);
+        setRuntimeDisabledReason(null);
+      } else if (res.status === 403) {
+        const data = await res.json().catch(() => ({}));
+        if (data.disabled) {
+          setRuntimeReport(null);
+          setRuntimeDisabledReason(data.error || 'Runtime sandbox is disabled.');
+        }
       }
     } finally {
       setIsRunningSandbox(false);
@@ -125,7 +134,8 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
           {nodePatch && (
             <button
               type="button"
-              disabled={isApplyingPatch}
+              disabled={isApplyingPatch || prBlocked}
+              title={prBlocked ? 'Blocked: the post-patch Z3 check did not pass' : undefined}
               onClick={() => onApplyNodePatch(selectedNode.id)}
               className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-mono font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-[0_0_15px_rgba(16,185,129,0.35)] transition-all cursor-pointer disabled:opacity-50"
             >
@@ -139,7 +149,8 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
           {remediationPR && (
             <button
               type="button"
-              disabled={isApplyingPatch}
+              disabled={isApplyingPatch || prBlocked}
+              title={prBlocked ? 'Blocked: the post-patch Z3 check did not pass' : undefined}
               onClick={onApplyFullPR}
               className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-mono font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-all cursor-pointer disabled:opacity-50"
             >
@@ -327,6 +338,12 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
               </div>
             )}
           </>
+        )}
+
+        {activeTab === 'LIVE_RUNTIME' && !runtimeReport && runtimeDisabledReason && (
+          <div className="p-3 rounded-lg bg-[#0D131F] border border-amber-500/40 text-xs font-mono text-amber-200">
+            {runtimeDisabledReason}
+          </div>
         )}
 
         {activeTab === 'LIVE_RUNTIME' && runtimeReport && (
@@ -625,11 +642,14 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
 
                   <button
                     type="button"
+                    disabled={prBlocked}
                     onClick={onApplyFullPR}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-semibold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-semibold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Check className="w-3.5 h-3.5" />
-                    Apply All {remediationPR.filePatches.length} Patches & Verify SAT
+                    {prBlocked
+                      ? 'Blocked by Z3 Gate'
+                      : `Apply All ${remediationPR.filePatches.length} Patches`}
                   </button>
                 </div>
 
@@ -642,10 +662,21 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
                     Pre-Patch Z3: {remediationPR.prePatchZ3Status}
                   </span>
                   <span className="text-slate-500">→</span>
-                  <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  <span
+                    className={`px-2 py-0.5 rounded border ${
+                      prBlocked
+                        ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                        : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                    }`}
+                  >
                     Post-Patch Z3 Sandbox: {remediationPR.postPatchZ3Status} (
                     {remediationPR.postPatchVerifyTimeMs} ms)
                   </span>
+                  {prBlocked && (remediationPR.unresolvedClauseIds?.length ?? 0) > 0 && (
+                    <span className="text-rose-300">
+                      Unresolved: {remediationPR.unresolvedClauseIds!.join(', ')}
+                    </span>
+                  )}
                 </div>
 
                 <div className="space-y-2 pt-2">

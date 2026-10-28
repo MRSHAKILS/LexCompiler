@@ -10,6 +10,7 @@ import {
   ensureTargetRepoFilesExist,
   readTargetRepoFiles,
   resetTargetRepoToBaseline,
+  TargetRepoPathError,
   writeTargetRepoFile,
 } from './analyzer/repoBaseline.js';
 import {
@@ -52,16 +53,31 @@ import {
   recordScanToPersistentSqlite,
   runRealLlmInference,
 } from './services/realAiServiceMesh.js';
+import {
+  assertSafeBindConfig,
+  createApiGuard,
+  isOriginAllowed,
+  resolveServerSecurityConfig,
+} from './security.js';
 import type {
   ComplianceFrameworkId,
   FullComplianceScanReport,
   LegalClause,
+  RemediationPullRequest,
   RuleCategory,
 } from '../shared/types.js';
 
+const securityConfig = resolveServerSecurityConfig();
+assertSafeBindConfig(securityConfig);
+
 const app = express();
-app.use(cors());
+app.use(
+  cors({
+    origin: (origin, callback) => callback(null, isOriginAllowed(securityConfig, origin)),
+  })
+);
 app.use(express.json({ limit: '5mb' }));
+app.use('/api', createApiGuard(securityConfig));
 
 // Ensure real target repository files, Git repo & SQLite ledger exist on disk
 ensureTargetRepoFilesExist();
@@ -459,6 +475,7 @@ app.post('/api/clauses/compile', async (req, res) => {
         title: title || target.title,
         citation: citation || target.citation,
         rawLegalText: rawLegalText.trim(),
+        illustrative: false,
         version: `v2026.${commitCounter + 4}-LIVE`,
         lastAmended: new Date().toISOString().slice(0, 10),
         deontic: compiledResult.deontic,
@@ -552,6 +569,16 @@ app.post('/api/clauses/mutate-preset', async (req, res) => {
   }
 });
 
+function remediationBlockedResponse(pr: RemediationPullRequest) {
+  return {
+    error:
+      'Remediation PR did not pass the pre-PR Z3 sandbox gate; refusing to apply it. ' +
+      `Unresolved clauses: ${(pr.unresolvedClauseIds || []).join(', ') || 'unknown'}.`,
+    postPatchZ3Status: pr.postPatchZ3Status,
+    unresolvedClauseIds: pr.unresolvedClauseIds || [],
+  };
+}
+
 /**
  * Apply synthesized remediation patch for a specific architecture node (or file)
  */
@@ -563,6 +590,10 @@ app.post('/api/remediation/apply-node', async (req, res) => {
 
     if (!pr) {
       res.json(currentReport);
+      return;
+    }
+    if (pr.postPatchZ3Status !== 'SAT_COMPLIANT') {
+      res.status(409).json(remediationBlockedResponse(pr));
       return;
     }
 
@@ -593,6 +624,11 @@ app.post('/api/remediation/apply-pr', async (_req, res) => {
   try {
     const currentReport = await buildFullComplianceReport();
     const pr = currentReport.remediationPR;
+
+    if (pr && pr.postPatchZ3Status !== 'SAT_COMPLIANT') {
+      res.status(409).json(remediationBlockedResponse(pr));
+      return;
+    }
 
     if (pr) {
       for (const patch of pr.filePatches) {
@@ -630,6 +666,10 @@ app.post('/api/repo/update-file', async (req, res) => {
     const updatedReport = await buildFullComplianceReport();
     res.json(updatedReport);
   } catch (err) {
+    if (err instanceof TargetRepoPathError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     console.error('Error updating repo file:', err);
     res.status(500).json({ error: String(err) });
   }
@@ -714,6 +754,15 @@ app.post('/api/clauses/switch-locale', async (req, res) => {
 });
 
 app.get('/api/sandbox/verify-runtime', (_req, res) => {
+  if (!securityConfig.runtimeSandboxEnabled) {
+    res.status(403).json({
+      error:
+        'Runtime sandbox is disabled. It executes target-repo Python in a local process that is not an isolation boundary. ' +
+        'Set LEXCOMPILER_ENABLE_RUNTIME_SANDBOX=1 to enable it on a trusted machine.',
+      disabled: true,
+    });
+    return;
+  }
   try {
     const runtimeReport = executeRealWorldSandboxVerification();
     res.json(runtimeReport);
@@ -896,9 +945,9 @@ app.get('*', (req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
-app.listen(PORT, () => {
+app.listen(securityConfig.port, securityConfig.host, () => {
   console.log(
-    `[LexCompiler Server] Neuro-Symbolic Law-to-AST Engine listening on http://localhost:${PORT}`
+    `[LexCompiler Server] Neuro-Symbolic Law-to-AST Engine listening on http://${securityConfig.host}:${securityConfig.port}` +
+      (securityConfig.apiToken ? ' (API token required)' : ' (loopback only)')
   );
 });

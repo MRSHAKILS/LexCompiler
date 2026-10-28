@@ -19,6 +19,8 @@ RUN npm run build
 
 ENV NODE_ENV=production
 ENV PORT=3001
+# The server refuses to start on 0.0.0.0 unless LEXCOMPILER_API_TOKEN is provided at runtime.
+ENV HOST=0.0.0.0
 
 EXPOSE 3001
 

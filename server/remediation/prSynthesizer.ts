@@ -536,10 +536,12 @@ export async function synthesizeRemediationPullRequest(
   );
 
   let allResolved = sandboxVerification.proofs.every((p) => p.status === 'SAT_COMPLIANT');
+  let repairRounds = 0;
   for (let iter = 0; iter < 3 && !allResolved; iter++) {
     const leftover = sandboxVerification.proofs.filter((p) => p.status === 'UNSAT_VIOLATION');
     const targets = leftover.flatMap((p) => p.repairTargets || []);
     if (targets.length === 0) break;
+    repairRounds++;
     for (let i = 0; i < patchedFiles.length; i++) {
       const file = patchedFiles[i];
       const fileTargets = targets.filter((t) => t.filePath === file.path || file.path.endsWith(t.filePath));
@@ -612,13 +614,26 @@ export async function synthesizeRemediationPullRequest(
     return null;
   }
 
+  const unresolvedClauseIds = sandboxVerification.proofs
+    .filter((p) => p.status !== 'SAT_COMPLIANT')
+    .map((p) => p.clauseId);
+  const verifyMs = sandboxVerification.totalZ3ExecutionMs;
+  const patchedPaths = filePatches.map((fp) => fp.filePath).join(', ');
+  const executiveSummary = allResolved
+    ? `LexCompiler synthesized ${filePatches.length} polyglot AST/SQL patches across ${patchedPaths}. ` +
+      `Post-patch re-verification in Microsoft Z3 found all ${clauses.length} clauses SAT_COMPLIANT (${verifyMs} ms).`
+    : `LexCompiler synthesized ${filePatches.length} polyglot AST/SQL patches across ${patchedPaths}, ` +
+      `but post-patch re-verification in Microsoft Z3 still reports ${unresolvedClauseIds.length} of ${clauses.length} ` +
+      `clauses as UNSAT_VIOLATION (${unresolvedClauseIds.join(', ')}) after ${repairRounds} repair round(s). ` +
+      `The PR is blocked by the pre-PR Z3 sandbox gate and cannot be applied.`;
+
   return {
     prId: `PR-LEX-${Date.now().toString().slice(-5)}`,
     prNumber: 409,
     title: `fix(compliance): enforce ${maxHours}h PII purge TTL, tenant-isolated KMS keys & statutory AST guards`,
     branchName: `lexcompiler/auto-remediate-${maxHours}h-tenant-kms`,
     baseBranch: 'main',
-    status: 'READY_TO_MERGE',
+    status: allResolved ? 'READY_TO_MERGE' : 'BLOCKED_UNRESOLVED',
     createdAt: new Date().toISOString(),
     triggeredBy: violatedProofs.map((p) => p.citation).join(' + '),
     addressedViolationsCount: violatedProofs.length,
@@ -629,15 +644,11 @@ export async function synthesizeRemediationPullRequest(
     })),
     prePatchZ3Status: 'UNSAT_VIOLATION',
     postPatchZ3Status: allResolved ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION',
-    postPatchVerifyTimeMs: sandboxVerification.totalZ3ExecutionMs,
+    postPatchVerifyTimeMs: verifyMs,
+    cegisIterations: repairRounds,
+    unresolvedClauseIds,
     cryptographicAttestationHash: sandboxVerification.merkleAuditRoot,
-    executiveSummary: `LexCompiler synthesized ${filePatches.length} polyglot AST/SQL patches across ${filePatches
-      .map((fp) => fp.filePath)
-      .join(', ')}. Pre-merge formal verification in Microsoft Z3 confirmed all ${
-      clauses.length
-    } statutory invariants transition from UNSAT → SAT (${
-      sandboxVerification.totalZ3ExecutionMs
-    } ms).`,
+    executiveSummary,
     filePatches,
   };
 }

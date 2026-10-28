@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { TARGET_REPO_ROOT } from '../analyzer/repoBaseline.js';
+import { INITIAL_REPO_FILES, TARGET_REPO_ROOT } from '../analyzer/repoBaseline.js';
 
 export interface RealWorldSandboxReport {
   executedAt: string;
@@ -121,6 +122,20 @@ export function executeRealWorldSandboxVerification(): RealWorldSandboxReport {
   const workingTreeClean = runGit(['status', '--porcelain']) === '';
 
   const pyRunnerScript = `
+import resource
+
+# Defense in depth only: these limits are not an isolation boundary.
+for _limit, _value in (
+    (resource.RLIMIT_CPU, 5),
+    (resource.RLIMIT_AS, 512 * 1024 * 1024),
+    (resource.RLIMIT_FSIZE, 1024 * 1024),
+    (resource.RLIMIT_NPROC, 0),
+):
+    try:
+        resource.setrlimit(_limit, (_value, _value))
+    except (ValueError, OSError):
+        pass
+
 import json, sys, sqlite3, re, io, logging, asyncio, types
 
 repo_root = sys.argv[1]
@@ -311,10 +326,26 @@ print(json.dumps({
 }))
 `;
 
-  const stdout = execFileSync('python3', ['-c', pyRunnerScript, TARGET_REPO_ROOT], {
-    encoding: 'utf8',
-    timeout: 5000,
-  });
+  // Run against a throwaway copy of the tracked files, with an isolated interpreter
+  // (-I: no user site-packages, no PYTHON* env vars) and an empty environment.
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexcompiler-sandbox-'));
+  let stdout: string;
+  try {
+    for (const relPath of Object.keys(INITIAL_REPO_FILES)) {
+      const dest = path.join(workDir, relPath);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(path.join(TARGET_REPO_ROOT, relPath), dest);
+    }
+    stdout = execFileSync('python3', ['-I', '-c', pyRunnerScript, workDir], {
+      cwd: workDir,
+      env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
   const parsed = JSON.parse(stdout);
 
   return {

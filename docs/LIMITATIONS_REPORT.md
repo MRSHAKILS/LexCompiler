@@ -62,13 +62,13 @@ Several serious limitations remain:
 
 | # | Area | Limitation | Severity | Status |
 | :-- | :--- | :--- | :--- | :--- |
-| S1 | Security | Arbitrary file write and path traversal via `/api/repo/update-file` | 🔴 | ⬜ Open |
-| S2 | Security | Unsandboxed `exec()` of repo Python → RCE chain with S1 | 🔴 | ⬜ Open |
-| S3 | Security | No authentication or authorization on any endpoint; `cors()` allows all origins | 🔴 | ⬜ Open |
+| S1 | Security | Arbitrary file write and path traversal via `/api/repo/update-file` | 🔴 | ✅ Fixed (branch) |
+| S2 | Security | Unsandboxed `exec()` of repo Python → RCE chain with S1 | 🔴 | ◐ Partial (branch) |
+| S3 | Security | No authentication or authorization on any endpoint; `cors()` allows all origins | 🔴 | ✅ Fixed (branch) |
 | S4 | Security | Signature verify endpoint accepts a caller-supplied public key | 🟠 | ⬜ Open |
 | S5 | Security | User OpenAI API key passes through an unauthenticated backend | 🟡 | ⬜ Open |
 | S6 | Security | Synchronous subprocesses block the event loop → easy DoS | 🟡 | ◐ Partial |
-| V1 | Verification | PR gate over-claims: always `READY_TO_MERGE`; apply ignores result; UI says 100 % | 🔴 | ◐ Partial |
+| V1 | Verification | PR gate over-claims: always `READY_TO_MERGE`; apply ignores result; UI says 100 % | 🔴 | ✅ Fixed (branch) |
 | V2 | Verification | Unsat cores and models from Z3, but hand-built fallbacks and non-Optimize repair values | 🟡 | ◐ Partial |
 | V3 | Verification | Z3 only checks ground constants; no symbolic program semantics | 🟠 | ⬜ Open |
 | V4 | Verification | Displayed and hashed SMT-LIB2 differs from what actually ran | 🟠 | ⬜ Open |
@@ -79,7 +79,7 @@ Several serious limitations remain:
 | L1 | Legal compiler | First-match regex; no negation, exceptions, or number words | 🔴 | ◐ Partial |
 | L2 | Legal compiler | Fixed set of categories (now 6); category supplied by caller in the main API | 🟠 | ◐ Partial |
 | L3 | Legal compiler | Generated SMT, Rego, and AST queries are fixed templates naming demo identifiers | 🟠 | ⬜ Open |
-| L4 | Legal compiler | Curated "statute" excerpts contain obligations that aren't in the cited law | 🔴 | ⬜ Open |
+| L4 | Legal compiler | Curated "statute" excerpts contain obligations that aren't in the cited law | 🔴 | ✅ Fixed (branch, labelled) |
 | L5 | Legal compiler | LLM fallback output overrides parsed values without validation | 🟡 | 🆕 New |
 | A1 | AST analysis | Detection keyed to name patterns instead of semantics | 🟡 | ◐ Partial |
 | A2 | AST analysis | Only literal constants; expressions and units misread | 🔴 | ⬜ Open (worse) |
@@ -95,10 +95,10 @@ Several serious limitations remain:
 | B2 | BYOC scanner | Regex rewrite broke every log call | 🟡 | ✅ Fixed |
 | X1 | Sandbox | Not isolated; TypeScript never executed; logic duplicated in Python regexes | 🟠 | ⬜ Open |
 | X2 | Sandbox | SQLite stands in for PostgreSQL; FastAPI and Pydantic shimmed | 🟡 | ⬜ Open |
-| C1 | Attestation | Ed25519 key regenerated every process start; old certs unverifiable | 🟠 | ⬜ Open |
+| C1 | Attestation | Ed25519 key regenerated every process start; old certs unverifiable | 🟠 | ◐ Partial (branch) |
 | C2 | Attestation | "Merkle root" is a flat hash; "commit hash" isn't a Git hash | 🟡 | ⬜ Open |
 | C3 | SARIF | Invalid property casing (`SemanticVersion`); hard-coded repo URI | 🟡 | ⬜ Open |
-| C4 | Attestation | Certificate claims conformity with EU AI Act Art. 43 / SOC 2 | 🟠 | ⬜ Open |
+| C4 | Attestation | Certificate claims conformity with EU AI Act Art. 43 / SOC 2 | 🟠 | ✅ Fixed (branch) |
 | AI1 | Agents | The 6-agent "crew" is a static report; no agent framework is called | 🟠 | ⬜ Open |
 | AI2 | RAG | Default "384-d embeddings" are a 16-dim keyword bag; pgvector and Neo4j absent | 🟠 | ⬜ Open |
 | AI3 | RAG | RAGAS metrics are hard-coded constants (0.991 etc.) | 🟠 | ⬜ Open |
@@ -119,7 +119,8 @@ Several serious limitations remain:
 | DOC2 | Docs | README says MIT but there is no `LICENSE` file; package name differs | 🔵 | ⬜ Open |
 | U1 | Frontend | Minimal accessibility, no frontend tests, large components, hard-coded claims | 🔵 | ⬜ Open |
 
-**Tally:** 3 fixed · 12 partial · 40 open · 1 new (56 findings).
+**Tally (`51f69ae`):** 3 fixed · 12 partial · 40 open · 1 new (56 findings).
+**Tally (this branch, after the P0 fixes in §6):** 8 fixed · 13 partial · 34 open · 1 new.
 
 ---
 
@@ -487,6 +488,19 @@ README and `AGENTS.md` still claim the 6-agent crew, OPA evaluation, pgvector + 
 18. **Docs (DOC1, DOC2):** bring the README and `AGENTS.md` in line with what's implemented, and add a `LICENSE` file.
 
 ---
+
+## 6. P0 Fixes on This Branch
+
+These changes on `claude/compassionate-hypatia-3mjhsk` address the P0 recommendations. Each is covered by `server/security.test.ts`, and the security behaviour was also checked against a running server.
+
+| Finding | Change |
+| :--- | :--- |
+| **S1** ✅ | `writeTargetRepoFile` accepts only the tracked target-repo files and rejects any path that resolves outside `target-repo/`; `update-file` returns `400` instead of writing. |
+| **S3** ✅ | New `server/security.ts`: the server binds to `127.0.0.1` by default and refuses a non-loopback `HOST` without `LEXCOMPILER_API_TOKEN`. CORS uses an origin allowlist. Every `/api` route except `/api/health` requires a Bearer token when one is set; otherwise it requires a loopback (or allowlisted) `Host` (DNS-rebinding guard) and the `X-LexCompiler-Client` header (blocks cross-site `<img>`/form requests). The UI adds the header automatically and prompts once for a token if needed (`src/apiClient.ts`). |
+| **S2** ◐ | `GET /api/sandbox/verify-runtime` is disabled unless `LEXCOMPILER_ENABLE_RUNTIME_SANDBOX=1`. When it runs (HTTP or CLI), it executes on a temp copy of the files with `python3 -I`, an empty environment, and CPU/memory/file-size/process rlimits. Still open: this is not an isolation boundary (no container or network isolation). |
+| **V1** ✅ | PR `status` is `BLOCKED_UNRESOLVED` unless every clause is SAT after patching. The PR now includes `unresolvedClauseIds` and `cegisIterations`, and its summary reflects the real result. `apply-pr` and `apply-node` return `409` for a blocked PR. The UI disables the apply buttons, shows the unresolved clauses, and reports the real clause counts. |
+| **L4** ✅ | Built-in clauses and curated or offline feed items carry `illustrative: true` and show an `ILLUSTRATIVE` badge. Invented thresholds are bracketed as demo parameters. Missing Federal Register abstracts are no longer invented, and the fake "89 FR 104210" item is now an explicitly illustrative offline fallback. |
+| **C4** ✅ / **C1** ◐ | The certificate `standard` now reads as a self-attestation, not an EU AI Act Art. 43 conformity assessment or SOC 2 report. The verdict is `SAT_COMPLIANT_ATTESTED` / `UNSAT_NON_COMPLIANT`. The issuer says the key is ephemeral rather than "Hardware-Backed". Still open (C1): the key is regenerated on every start. |
 
 ## Appendix A — Probe Results
 

@@ -269,8 +269,11 @@ export function App() {
         setReport(updated);
         fetchAllTelemetry();
         triggerToast(
-          `Applied AST patch to node '${nodeId}' & re-verified in Microsoft Z3 (${updated.totalZ3ExecutionMs} ms).`
+          `Applied AST patch to node '${nodeId}' & re-verified in Microsoft Z3: ${updated.compliantClausesCount}/${updated.totalClausesEvaluated} clauses SAT_COMPLIANT (${updated.totalZ3ExecutionMs} ms).`
         );
+      } else if (res.status === 409) {
+        const blocked = (await res.json().catch(() => ({}))) as { error?: string };
+        triggerToast(blocked.error || 'Patch blocked by the pre-PR Z3 sandbox gate.');
       }
     } finally {
       setIsApplyingPatch(false);
@@ -288,8 +291,11 @@ export function App() {
         setReport(updated);
         fetchAllTelemetry();
         triggerToast(
-          `Merged Auto-PR #409 across all files! Microsoft Z3 proved 100% SAT_COMPLIANT in ${updated.totalZ3ExecutionMs} ms.`
+          `Applied remediation PR. Microsoft Z3 re-verification: ${updated.compliantClausesCount}/${updated.totalClausesEvaluated} clauses SAT_COMPLIANT (${updated.overallComplianceScore}%, ${updated.totalZ3ExecutionMs} ms).`
         );
+      } else if (res.status === 409) {
+        const blocked = (await res.json().catch(() => ({}))) as { error?: string };
+        triggerToast(blocked.error || 'PR blocked by the pre-PR Z3 sandbox gate.');
       }
     } finally {
       setIsApplyingPatch(false);

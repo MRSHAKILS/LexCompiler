@@ -156,8 +156,18 @@ export const LegalCompilerPane: React.FC<LegalCompilerPaneProps> = ({
               className="p-2.5 rounded bg-[#0B0F19] border border-slate-800 flex flex-col gap-1.5"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                  {item.source} · {item.documentNumber}
+                <span className="flex items-center gap-1.5">
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                    {item.source} · {item.documentNumber}
+                  </span>
+                  {item.illustrative && (
+                    <span
+                    title="Demo text: not (or not only) the official publication"
+                    className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                  >
+                    ILLUSTRATIVE
+                  </span>
+                  )}
                 </span>
                 <span className="text-[10px] font-mono text-slate-400">
                   {item.publicationDate}
@@ -204,6 +214,14 @@ export const LegalCompilerPane: React.FC<LegalCompilerPaneProps> = ({
               <span className="text-[10px] font-mono text-slate-500">
                 {activeClause.version}
               </span>
+              {activeClause.illustrative && (
+                <span
+                  title="Built-in demo paraphrase: numeric thresholds are scenario parameters, not wording from the cited law"
+                  className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                >
+                  ILLUSTRATIVE
+                </span>
+              )}
             </div>
             <h3 className="text-sm font-semibold text-slate-100 mt-1">{activeClause.title}</h3>
           </div>

@@ -313,7 +313,7 @@ def process_customer_payment(ssn: str, email: str, card_token: str):
             <div>
               <h3 className="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                 <KeyRound className="w-4 h-4 text-emerald-400" />
-                2. RFC 8032 Ed25519 Cryptographically Signed Conformity Certificate
+                2. RFC 8032 Ed25519 Signed Compliance Attestation (self-attested demo, not a legal conformity certificate)
               </h3>
               <p className="text-xs text-slate-400 font-mono mt-0.5">
                 Verifiable by external Big-4 auditors, regulators, and enterprise procurement teams

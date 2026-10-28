@@ -55,7 +55,7 @@ flowchart TB
     subgraph L5["5. Autonomous Remediation & Cryptographic Attestation (lex-remediation-pr-mcp)"]
         CEGIS["CEGIS Polyglot Unified Diff Synthesizer"]
         GATE["Pre-Merge Z3 Sandbox Verification Gate (Proves UNSAT -> SAT)"]
-        CERT["RFC 8032 Ed25519 Conformity Certificate & SHA-256 Merkle Root"]
+        CERT["RFC 8032 Ed25519 Self-Attestation & SHA-256 Merkle Root"]
         SARIF["OASIS SARIF v2.1.0 Export & GitHub Actions CI Gate"]
     end
 
@@ -153,7 +153,7 @@ LexCompiler implements 6 custom MCP servers supporting `stdio` (`server/mcp/stdi
 
 ### 4. Real-World Local Sandbox & Enterprise Suite (`server/sandbox/` & `server/enterprise/`)
 - **Live Runtime Sandbox (`server/sandbox/realWorldSandbox.ts`)**: Executes `target-repo/schema/postgres_pii.sql` in SQLite3, runs `target-repo/api/fastapi_intake.py` and `target-repo/workers/redis_cache_worker.py` in Python 3.12, captures live stdout logs and Redis `SETEX` TTL parameters, and manages Git commits in an isolated repository worktree.
-- **RFC 8032 Ed25519 Conformity Certificates (`server/enterprise/enterpriseSuite.ts`)**: Signs canonical Z3 Merkle proof payloads using Node's native `crypto.sign(null, payload, ed25519PrivateKey)` with live tamper detection via `crypto.verify`.
+- **RFC 8032 Ed25519 Self-Attestations (`server/enterprise/enterpriseSuite.ts`)**: Signs canonical Z3 Merkle proof payloads using Node's native `crypto.sign(null, payload, ed25519PrivateKey)` with live tamper detection via `crypto.verify`.
 - **OASIS SARIF v2.1.0 & GitHub Actions Gate (`.github/workflows/lexcompiler-gate.yml`)**: Exports static analysis results compatible with GitHub Advanced Security Code Scanning.
 
 ---
@@ -191,8 +191,32 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize"}' | npx tsx server/mcp/stdio
 ### Docker Deployment
 
 ```bash
-docker compose up --build -d
+LEXCOMPILER_API_TOKEN="$(openssl rand -hex 32)" docker compose up --build -d
 ```
+
+The container listens on `0.0.0.0`, so it requires `LEXCOMPILER_API_TOKEN`. The web UI asks for the token once per browser session.
+
+### Security Model
+
+The API can rewrite `target-repo/` files and create Git commits, so the server is locked down by default:
+
+| Setting | Default | Effect |
+| :--- | :--- | :--- |
+| `HOST` | `127.0.0.1` | Bind address. The server refuses to start on a non-loopback host without `LEXCOMPILER_API_TOKEN`. |
+| `LEXCOMPILER_API_TOKEN` | unset | When set, every `/api` route except `/api/health` requires `Authorization: Bearer <token>`. |
+| `LEXCOMPILER_ALLOWED_ORIGINS` | `http://localhost:5173`, `http://127.0.0.1:5173`, `http://localhost:3001`, `http://127.0.0.1:3001` | Browser origins allowed by CORS and by the request guard. |
+| `LEXCOMPILER_ALLOWED_HOSTS` | unset | Extra `Host` names accepted without a token (the default accepts loopback only, to block DNS rebinding). |
+| `LEXCOMPILER_ENABLE_RUNTIME_SANDBOX` | `0` | Set to `1` to enable `GET /api/sandbox/verify-runtime`, which executes the target-repo Python in a local process. It runs on a temp copy with resource limits, but that is **not** an isolation boundary; enable it only on a trusted machine. |
+
+Without a token, API clients must send the `X-LexCompiler-Client` header (the bundled UI does this automatically):
+
+```bash
+curl -H 'X-LexCompiler-Client: cli' http://127.0.0.1:3001/api/state
+```
+
+`POST /api/repo/update-file` only accepts the tracked `target-repo/` files. `POST /api/remediation/apply-pr` and `apply-node` return `409` when the post-patch Z3 check still reports violations.
+
+Built-in clauses and curated feed items are **illustrative**: they paraphrase the cited regulations and add scenario parameters (such as a 72-hour purge window or an 85% confidence gate) that are not in the official texts. They are tagged `ILLUSTRATIVE` in the UI and `illustrative: true` in the API.
 
 ---
 
@@ -211,7 +235,7 @@ docker compose up --build -d
 | `POST` | `/api/mcp/:serverId/rpc` | MCP JSON-RPC 2.0 `tools/call` endpoint for all 6 custom MCP servers |
 | `POST` | `/api/rag/query` | Executes Hybrid Contextual + Graph RAG query with RAGAS scoring |
 | `POST` | `/api/enterprise/byoc-scan` | Universal BYOC scanner for custom contracts and source code |
-| `GET` | `/api/enterprise/certificate` | Generates RFC 8032 Ed25519 signed conformity certificate |
+| `GET` | `/api/enterprise/certificate` | Generates an RFC 8032 Ed25519 signed self-attestation (ephemeral key; not a legal conformity certificate) |
 | `GET` | `/api/enterprise/sarif` | Exports OASIS SARIF v2.1.0 static analysis report |
 
 ---

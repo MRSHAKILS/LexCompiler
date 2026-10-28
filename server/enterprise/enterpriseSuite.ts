@@ -34,13 +34,13 @@ async function getZ3Byoc() {
 
 export interface CryptographicConformityCertificate {
   certificateId: string;
-  standard: 'EU-AI-ACT-ART43 / GDPR-ART32 / HIPAA-164.312 / SOC2-CC6.1';
+  standard: 'LEXCOMPILER-SELF-ATTESTATION (not an EU AI Act Art. 43 conformity assessment or SOC 2 report)';
   issuedAt: string;
   issuer: string;
   repositoryName: string;
   commitHash: string;
   z3SolverEngine: string;
-  overallVerdict: 'SAT_COMPLIANT_CERTIFIED' | 'UNSAT_NON_COMPLIANT_PROVISIONAL';
+  overallVerdict: 'SAT_COMPLIANT_ATTESTED' | 'UNSAT_NON_COMPLIANT';
   complianceScorePercent: number;
   merkleAuditRoot: string;
   clauseAttestations: Array<{
@@ -88,16 +88,16 @@ export function generateSignedConformityCertificate(
 
   return {
     certificateId: `CERT-LEX-${report.commitHash.toUpperCase()}-${Date.now().toString().slice(-4)}`,
-    standard: 'EU-AI-ACT-ART43 / GDPR-ART32 / HIPAA-164.312 / SOC2-CC6.1',
+    standard: 'LEXCOMPILER-SELF-ATTESTATION (not an EU AI Act Art. 43 conformity assessment or SOC 2 report)',
     issuedAt: new Date().toISOString(),
-    issuer: 'LexCompiler Neuro-Symbolic Authority (Ed25519 Hardware-Backed Root)',
+    issuer: 'LexCompiler demo signer (ephemeral in-process Ed25519 key, regenerated on every server start)',
     repositoryName: report.repositoryName,
     commitHash: report.commitHash,
     z3SolverEngine: report.z3EngineVersion,
     overallVerdict:
       report.violatedClausesCount === 0
-        ? 'SAT_COMPLIANT_CERTIFIED'
-        : 'UNSAT_NON_COMPLIANT_PROVISIONAL',
+        ? 'SAT_COMPLIANT_ATTESTED'
+        : 'UNSAT_NON_COMPLIANT',
     complianceScorePercent: report.overallComplianceScore,
     merkleAuditRoot: report.merkleAuditRoot,
     clauseAttestations: report.proofs.map((p) => ({

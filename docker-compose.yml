@@ -9,4 +9,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
+      - HOST=0.0.0.0
+      # Required when listening beyond loopback; the UI prompts for it once per session.
+      - LEXCOMPILER_API_TOKEN=${LEXCOMPILER_API_TOKEN:?Set LEXCOMPILER_API_TOKEN before running docker compose}
     restart: unless-stopped
