@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-serif: 'Newsreader', Georgia, serif;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #050609;
+    background-image: radial-gradient(
+      ellipse 85% 38% at 55% -8%,
+      rgba(229, 193, 88, 0.065),
+      rgba(99, 102, 241, 0.055),
+      transparent
+    );
+    color: #F4F4F6;
+    letter-spacing: -0.011em;
+  }
+
+  h1, h2, h3, h4 {
+    letter-spacing: -0.022em;
+  }
+
+  code, pre, .font-mono {
+    font-family: var(--font-mono);
+    font-variant-ligatures: contextual;
+  }
+
+  .font-legal {
+    font-family: var(--font-serif);
+  }
+}
+
+@keyframes shockwavePulse {
+  0% {
+    transform: scale(0.25);
+    opacity: 0.95;
+  }
+  70% {
+    transform: scale(1.65);
+    opacity: 0.35;
+  }
+  100% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+
+@keyframes dashFlow {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+.animate-shockwave {
+  animation: shockwavePulse 1.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-edge-flow {
+  stroke-dasharray: 8 6;
+  animation: dashFlow 1.2s linear infinite;
+}
+
+/* Precision minimal scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #050609;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
