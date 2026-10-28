@@ -194,6 +194,7 @@ npm start
 | `npm run lint` | ESLint flat config (`eslint.config.js`) |
 | `npm run verify:cli` | Compliance gate (exit 0 passed, 1 failed, 2 internal error) |
 | `npm run verify:realworld` | End-to-end sandbox demo |
+| `npm run setup:sandbox` | Creates `.venv` with the real FastAPI, Pydantic, httpx and Redis packages for the runtime sandbox |
 | `npm run sarif` | Writes `lexcompiler.sarif` (SARIF v2.1.0) for the scanned repository |
 
 ### Scanning Your Own Repository
@@ -231,6 +232,9 @@ Only a `READY_TO_MERGE` remediation (post-patch Z3 `SAT`) can be opened. Optiona
 | `LEXCOMPILER_SANDBOX_GIT_DIR` | `data/sandbox-git` | Git directory for remediation commits |
 | `LEXCOMPILER_DATA_DIR` | `data/` | Ledger, vector store, persisted clauses, signing key |
 | `LEXCOMPILER_SIGNING_KEY_PEM` / `LEXCOMPILER_SIGNING_KEY_PATH` | generated in the data dir | Ed25519 attestation key |
+| `LEXCOMPILER_POSTGRES_URL` | unset (in-process PostgreSQL via PGlite) | PostgreSQL server for the sandbox schema run |
+| `LEXCOMPILER_REDIS_URL` | unset (fakeredis) | Redis server for the sandbox cache worker |
+| `LEXCOMPILER_SANDBOX_PYTHON` | `.venv` Python | Interpreter for the runtime sandbox |
 | `LEXCOMPILER_OPA_BIN` | `opa` on `PATH` | OPA binary |
 | `LEXCOMPILER_PYTHON` | first of `python3`, `python`, `py -3` that is Python >= 3.10 | Python interpreter for AST parsing and the runtime sandbox |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
@@ -290,7 +294,7 @@ Built-in clauses and curated feed items are **illustrative**: they paraphrase th
 | `POST` | `/api/clauses/mutate-preset` | Triggers a regulatory amendment scenario and recalculates blast radius |
 | `POST` | `/api/remediation/apply-pr` | Applies synthesized AST patches to `target-repo/` and re-verifies `SAT` |
 | `POST` | `/api/remediation/open-github-pr` | Pushes the `READY_TO_MERGE` remediation to a branch and opens a GitHub pull request |
-| `GET` | `/api/sandbox/verify-runtime` | Executes `target-repo/` in SQLite3, Python 3.12, and TypeScript |
+| `GET` | `/api/sandbox/verify-runtime` | Executes `target-repo/` on PostgreSQL, FastAPI / Pydantic / Redis (Python), and TypeScript |
 | `GET` | `/api/services/mesh` | Live telemetry from Ollama (`:11434`), Z3, and SQLite vector ledger |
 | `POST` | `/api/llm/multi-model-pipeline` | Runs `all-minilm` 384-d embeddings + `qwen2.5-coder` + `dolphin3` |
 | `POST` | `/api/mcp/:serverId/rpc` | MCP JSON-RPC 2.0 `tools/call` endpoint for all 6 custom MCP servers |

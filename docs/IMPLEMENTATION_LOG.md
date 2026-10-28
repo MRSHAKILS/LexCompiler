@@ -147,6 +147,21 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **S5:** cloud mode now prefers the server's `OPENAI_API_KEY`, so the browser never has to send a key. The console offers a "Cloud: OpenAI (server OPENAI_API_KEY)" option; a key typed in the UI is still accepted over the authenticated API.
 - **`docs/LIMITATIONS_REPORT.md`:** a new §0 records the status of every finding on this branch, with the step that addressed it or the Part 2 item that completes it.
 
+### Step 12 · PostgreSQL, real FastAPI / Pydantic / Redis in the sandbox (L-10)
+- **PostgreSQL:** `server/sandbox/postgresSandbox.ts` executes `schema/postgres_pii.sql` on PostgreSQL 18 (PGlite, in-process WASM build of PostgreSQL), or on a real server when `LEXCOMPILER_POSTGRES_URL` is set (inside a throwaway schema). SQLite is gone from the sandbox.
+- **Behaviour exercised on PostgreSQL:**
+  - columns and defaults read from `information_schema`;
+  - a sample record inserted;
+  - the retention purge (`DELETE … WHERE created_at < now() - retention_ttl_hours * interval '1 hour'`) removes an expired record;
+  - Art. 17 erasure checks that deleting a patient removes every dependent row, or reports the foreign-key error.
+- **Remediation gate:** a patched SQL file must also execute on PostgreSQL.
+- **Python frameworks:** `npm run setup:sandbox` creates `.venv` with the pinned packages in `requirements-sandbox.txt`.
+  - **FastAPI and Pydantic:** the intake endpoint is called over HTTP (httpx ASGI transport), so routing, Pydantic validation and header binding are real.
+  - **Redis:** the worker writes to fakeredis, or to a real server via `LEXCOMPILER_REDIS_URL`, and the stored TTL is read back from Redis.
+  - **Fallback:** without `.venv`, shims are used, and the report says so.
+- **CI and Docker:** CI runs `npm run setup:sandbox`, and the Docker image builds the same `.venv`. A `.dockerignore` keeps local artefacts out of the build context.
+- **Tests:** `server/postgres.test.ts` covers the schema run, the retention purge, the erasure cascade, a RESTRICT foreign key, and invalid DDL. `verify:realworld` gained PostgreSQL, HTTP and Redis TTL checks.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -162,7 +177,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Implemented and tested against a mocked API (Step 7). Remaining: set `LEXCOMPILER_GITHUB_TOKEN` / `LEXCOMPILER_GITHUB_REPO`, open one real PR end to end, and optionally persist the returned PR number. |
 | L-8 | **Hardware-backed signing (C1)** | No KMS/HSM available | The key now persists in a file or an env PEM and is published (Step 4). Remaining: keep the Ed25519 key in AWS KMS / Cloud KMS / an HSM, and add RFC 3161 timestamping and revocation. |
 | L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | TypeScript now runs for real under Node's permission model, and Python under rlimits (Steps 1, 7). Remaining: run both in an unprivileged container (or gVisor/nsjail/Firecracker) with no network access. |
-| L-10 | **Real PostgreSQL execution (X2)** | No PostgreSQL server | Execute `schema/*.sql` on a disposable PostgreSQL instance instead of SQLite, and run FastAPI/Pydantic/Redis for real instead of shims and mocks. |
+| L-10 | **Real PostgreSQL execution (X2)** | — | ✅ Done (Step 12). Optional local check: run `verify:realworld` with `LEXCOMPILER_POSTGRES_URL` and `LEXCOMPILER_REDIS_URL` pointing at real servers. |
 | L-11 | **Tree-sitter queries (L3)** | The WASM grammar bundle has no SQL grammar | Python and TypeScript queries now run for real (Step 9). Remaining: add a SQL grammar (e.g. `tree-sitter-sql` built to WASM) and run DDL queries over `schema/*.sql` instead of matching embedded `CREATE TABLE` strings. |
 | L-12 | **External MCP servers** (postgres-pgvector, neo4j-cypher, github, filesystem, duckdb, n8n) | The services aren't available here | Run and wire each server, then list them as integrated once they answer `initialize`. |
 | L-15 | **GitHub code-scanning upload** | Enabling code scanning is a repository setting | CI already produces `lexcompiler.sarif`. Enable code scanning, add `security-events: write`, and add `github/codeql-action/upload-sarif` for scans of real repositories (not the intentionally non-compliant fixture). |

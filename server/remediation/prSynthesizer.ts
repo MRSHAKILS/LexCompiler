@@ -1,5 +1,6 @@
 import { createTwoFilesPatch } from 'diff';
 import { analyzeFullRepositoryAsync, checkSourceSyntax } from '../analyzer/astAnalyzer.js';
+import { executeSchemaOnPostgres } from '../sandbox/postgresSandbox.js';
 import { verifyRepositoryAgainstClauses } from '../prover/z3Engine.js';
 import { sha256Hex } from '../util/hash.js';
 import type {
@@ -370,7 +371,16 @@ export async function synthesizeRemediationPullRequest(
   for (const file of files) {
     const original = originals.get(file.path) ?? '';
     if (file.content === original) continue;
-    const syntaxCheck = checkSourceSyntax(file);
+    let syntaxCheck = checkSourceSyntax(file);
+    if (syntaxCheck.passed && file.language === 'sql') {
+      // The patched DDL must also be accepted by a real PostgreSQL engine.
+      try {
+        await executeSchemaOnPostgres(file.content);
+        syntaxCheck = { passed: true, message: 'Executed on PostgreSQL' };
+      } catch (err) {
+        syntaxCheck = { passed: false, message: `PostgreSQL rejected the schema: ${(err as Error).message}` };
+      }
+    }
     if (!syntaxCheck.passed) syntaxFailures.push(`${file.path}: ${syntaxCheck.message}`);
     const diff = createUnifiedDiff(file.path, original, file.content);
     const [start, end] = lineByFile.get(file.path) || [1, 1];

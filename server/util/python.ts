@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
 export interface PythonInterpreter {
   /** Executable to spawn. */
@@ -48,4 +50,29 @@ export function resolvePython(): PythonInterpreter | null {
     }
   }
   return resolved;
+}
+
+/**
+ * Interpreter for the runtime sandbox: LEXCOMPILER_SANDBOX_PYTHON, then the project's
+ * `.venv` (created by `npm run setup:sandbox` with the real FastAPI/Pydantic/Redis
+ * packages), then any Python >= 3.10.
+ */
+export function resolveSandboxPython(): PythonInterpreter | null {
+  const explicit = process.env.LEXCOMPILER_SANDBOX_PYTHON?.trim();
+  const venv = path.join(process.cwd(), '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+  for (const command of [explicit, fs.existsSync(venv) ? venv : undefined]) {
+    if (!command) continue;
+    try {
+      const out = execFileSync(command, ['-c', 'import sys; print("%d.%d.%d" % sys.version_info[:3])'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      }).trim();
+      return { command, prefixArgs: [], version: `Python ${out}` };
+    } catch {
+      // fall through to the next candidate
+    }
+  }
+  return resolvePython();
 }

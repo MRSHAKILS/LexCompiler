@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { INITIAL_REPO_FILES, TARGET_REPO_IS_FIXTURE, TARGET_REPO_ROOT } from '../analyzer/repoBaseline.js';
-import { resolvePython } from '../util/python.js';
+import { resolveSandboxPython } from '../util/python.js';
+import { executeSchemaOnPostgres, type PostgresExecutionReport } from './postgresSandbox.js';
 
 export interface RealWorldSandboxReport {
   executedAt: string;
@@ -16,21 +17,11 @@ export interface RealWorldSandboxReport {
     gitDiffStat: string;
     workingTreeClean: boolean;
   };
-  sqlDatabaseExecution: {
-    engine: string;
-    tablesCreated: string[];
-    patientRecordsColumns: Array<{
-      name: string;
-      type: string;
-      notnull: boolean;
-      defaultValue: string | null;
-    }>;
-    sampleInsertedRow: Record<string, unknown>;
-    hasTenantKmsKeyColumn: boolean;
-    actualDefaultRetentionHours: number;
-  };
+  sqlDatabaseExecution: PostgresExecutionReport;
   pythonFastApiExecution: {
     runtimeVersion: string;
+    frameworks: string;
+    httpStatus: number | null;
     testPayload: Record<string, string>;
     capturedLoggerOutput: string;
     leakedPlaintextSsnInLogs: boolean;
@@ -39,6 +30,8 @@ export interface RealWorldSandboxReport {
   pythonRedisWorkerExecution: {
     capturedSetexKey: string;
     capturedSetexTtlSeconds: number;
+    storedTtlSeconds: number;
+    redisBackend: string;
     capturedSetexTtlHours: number;
     capturedSetexPayload: string;
     purgeWorkerStatus: Record<string, unknown>;
@@ -272,46 +265,20 @@ else:
         except (ValueError, OSError):
             pass
 
-import json, sys, sqlite3, re, io, logging, asyncio, types
+import json, sys, re, io, logging, asyncio, types, os
 
 repo_root = sys.argv[1]
 
-# 1. Execute SQL DDL in real SQLite3 in-memory database engine
-with open(f"{repo_root}/schema/postgres_pii.sql", "r", encoding="utf-8") as f:
-    raw_sql = f.read()
-
-conn = sqlite3.connect(":memory:")
-cur = conn.cursor()
-cur.executescript(raw_sql)
-
-tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-col_info = cur.execute("PRAGMA table_info(patient_records)").fetchall()
-columns = [
-    {"name": c[1], "type": c[2], "notnull": bool(c[3]), "defaultValue": c[4]}
-    for c in col_info
-]
-col_names = [c["name"] for c in columns]
-has_tenant_kms_col = "tenant_kms_key_id" in col_names
-
-if has_tenant_kms_col:
-    cur.execute(
-        "INSERT INTO patient_records (patient_id, tenant_id, tenant_kms_key_id, full_name, email, ssn, diagnosis_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("pat-9921", "tenant-zurich-01", "kms-key-eu-zurich-01", "Dr. Elena Rostova", "elena.rostova@zurich-clinic.ch", "enc_kms::999-42-8810", "ICD10-I21.0")
-    )
-else:
-    cur.execute(
-        "INSERT INTO patient_records (patient_id, tenant_id, full_name, email, ssn, diagnosis_code) VALUES (?, ?, ?, ?, ?, ?)",
-        ("pat-9921", "tenant-zurich-01", "Dr. Elena Rostova", "elena.rostova@zurich-clinic.ch", "enc_shared::999-42-8810", "ICD10-I21.0")
-    )
-conn.commit()
-
-row_values = cur.execute("SELECT * FROM patient_records WHERE patient_id='pat-9921'").fetchone()
-sample_row = dict(zip(col_names, row_values))
-actual_default_ttl = int(sample_row.get("retention_ttl_hours", 720))
-
 # 2. Execute Python FastAPI Intake Module (api/fastapi_intake.py)
-# Provide lightweight shims if fastapi/pydantic are not installed in global python3
-if "fastapi" not in sys.modules:
+# Real FastAPI/Pydantic when installed (npm run setup:sandbox); minimal shims otherwise.
+try:
+    import fastapi, pydantic
+    import httpx
+    real_frameworks = True
+    frameworks = f"FastAPI {fastapi.__version__} + Pydantic {pydantic.VERSION} (HTTP via httpx ASGI transport)"
+except ImportError:
+    real_frameworks = False
+    frameworks = "shimmed FastAPI/Pydantic (run npm run setup:sandbox for the real packages)"
     fa_mod = types.ModuleType("fastapi")
     class DummyFastAPI:
         def __init__(self, **kwargs): pass
@@ -322,8 +289,6 @@ if "fastapi" not in sys.modules:
     fa_mod.Header = lambda default=None: default
     fa_mod.HTTPException = Exception
     sys.modules["fastapi"] = fa_mod
-
-if "pydantic" not in sys.modules:
     pyd_mod = types.ModuleType("pydantic")
     class DummyBaseModel:
         def __init__(self, **kwargs):
@@ -355,7 +320,7 @@ class SandboxKmsClient:
 if "TENANT_KMS_CLIENT" in intake_ns:
     intake_ns["TENANT_KMS_CLIENT"] = SandboxKmsClient()
 
-payload_obj = intake_ns["PatientIntakePayload"](
+payload_dict = dict(
     tenant_id="tenant-zurich-01",
     patient_id="pat-9921",
     full_name="Dr. Elena Rostova",
@@ -364,7 +329,20 @@ payload_obj = intake_ns["PatientIntakePayload"](
     diagnosis_code="ICD10-I21.0"
 )
 
-intake_response = asyncio.run(intake_ns["ingest_patient_pii"](payload_obj, x_tenant_id="tenant-zurich-01"))
+if real_frameworks:
+    # A real HTTP request through FastAPI routing, Pydantic validation and header binding
+    # (in-process ASGI transport: no sockets, no threads).
+    async def _post():
+        transport = httpx.ASGITransport(app=intake_ns["app"])
+        async with httpx.AsyncClient(transport=transport, base_url="http://sandbox") as client:
+            return await client.post("/api/v1/patients/intake", json=payload_dict, headers={"x-tenant-id": "tenant-zurich-01"})
+    http = asyncio.run(_post())
+    intake_response = http.json()
+    http_status = http.status_code
+else:
+    payload_obj = intake_ns["PatientIntakePayload"](**payload_dict)
+    intake_response = asyncio.run(intake_ns["ingest_patient_pii"](payload_obj, x_tenant_id="tenant-zurich-01"))
+    http_status = None
 captured_log = log_stream.getvalue().strip()
 leaked_ssn = ("999-42-8810" in captured_log) or ("elena.rostova@zurich-clinic.ch" in captured_log)
 
@@ -375,32 +353,47 @@ with open(f"{repo_root}/workers/redis_cache_worker.py", "r", encoding="utf-8") a
 redis_ns = {}
 exec(compile(redis_code, f"{repo_root}/workers/redis_cache_worker.py", "exec"), redis_ns)
 
-class MockRedisClient:
-    def __init__(self):
+class RecordingRedis:
+    """Wraps a Redis client and records the last SETEX call."""
+    def __init__(self, inner):
+        self.inner = inner
         self.last_key = ""
         self.last_ttl = 0
         self.last_val = ""
     def setex(self, k, ttl, val):
-        self.last_key = k
-        self.last_ttl = ttl
-        self.last_val = val
+        self.last_key, self.last_ttl, self.last_val = k, int(ttl), val
+        return self.inner.setex(k, ttl, val) if self.inner is not None else True
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
 
-mock_redis = MockRedisClient()
+redis_url = os.environ.get("LEXCOMPILER_REDIS_URL")
+try:
+    if redis_url:
+        import redis as redis_lib
+        inner_redis = redis_lib.Redis.from_url(redis_url)
+        redis_backend = f"Redis server ({redis_url.split('@')[-1]})"
+    else:
+        import fakeredis
+        inner_redis = fakeredis.FakeRedis()
+        redis_backend = f"fakeredis {fakeredis.__version__} (Redis command semantics in-process)"
+except ImportError:
+    inner_redis = None
+    redis_backend = "recording stub (run npm run setup:sandbox for fakeredis)"
+
+mock_redis = RecordingRedis(inner_redis)
 worker = redis_ns["RedisSessionCacheWorker"](mock_redis)
 worker.cache_patient_session("tenant-zurich-01", "pat-9921", {"ssn_token": "999-42-8810", "diagnosis": "ICD10-I21.0"})
 purge_status = worker.enforce_retention_purge()
+# TTL as stored by the Redis engine itself, not just the argument passed to SETEX.
+stored_ttl = int(inner_redis.ttl(mock_redis.last_key)) if inner_redis is not None else mock_redis.last_ttl
+if inner_redis is not None and redis_url:
+    inner_redis.delete(mock_redis.last_key)
 
 print(json.dumps({
-    "sql": {
-        "engine": f"SQLite {sqlite3.sqlite_version} (Executing schema/postgres_pii.sql)",
-        "tablesCreated": tables,
-        "patientRecordsColumns": columns,
-        "sampleInsertedRow": sample_row,
-        "hasTenantKmsKeyColumn": has_tenant_kms_col,
-        "actualDefaultRetentionHours": actual_default_ttl
-    },
     "fastapi": {
         "runtimeVersion": f"Python {sys.version.split()[0]}",
+        "frameworks": frameworks,
+        "httpStatus": http_status,
         "testPayload": {
             "tenant_id": "tenant-zurich-01",
             "patient_id": "pat-9921",
@@ -415,6 +408,8 @@ print(json.dumps({
     "redis": {
         "capturedSetexKey": mock_redis.last_key,
         "capturedSetexTtlSeconds": mock_redis.last_ttl,
+        "storedTtlSeconds": stored_ttl,
+        "redisBackend": redis_backend,
         "capturedSetexTtlHours": int(mock_redis.last_ttl // 3600),
         "capturedSetexPayload": mock_redis.last_val,
         "purgeWorkerStatus": purge_status
@@ -427,13 +422,14 @@ print(json.dumps({
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexcompiler-sandbox-'));
   let stdout: string;
   let tsRun!: Awaited<ReturnType<typeof runTypeScriptServices>>;
+  let sqlRun!: PostgresExecutionReport;
   try {
     for (const relPath of Object.keys(INITIAL_REPO_FILES)) {
       const dest = path.join(workDir, relPath);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(path.join(TARGET_REPO_ROOT, relPath), dest);
     }
-    const python = resolvePython();
+    const python = resolveSandboxPython();
     if (!python) throw new Error('No Python >= 3.10 interpreter found (tried LEXCOMPILER_PYTHON, python3, python, py -3)');
     const { stdout: out } = await execFileAsync(python.command, [...python.prefixArgs, '-I', '-c', pyRunnerScript, workDir], {
       cwd: workDir,
@@ -441,14 +437,16 @@ print(json.dumps({
       env: {
         PATH: process.env.PATH || '/usr/bin:/bin',
         LANG: 'C.UTF-8',
+        ...(process.env.LEXCOMPILER_REDIS_URL ? { LEXCOMPILER_REDIS_URL: process.env.LEXCOMPILER_REDIS_URL } : {}),
         ...(process.platform === 'win32' && process.env.SYSTEMROOT ? { SYSTEMROOT: process.env.SYSTEMROOT } : {}),
       },
       windowsHide: true,
       encoding: 'utf8',
-      timeout: 5000,
+      timeout: 15000,
       maxBuffer: 2 * 1024 * 1024,
     });
     stdout = out;
+    sqlRun = await executeSchemaOnPostgres(fs.readFileSync(path.join(workDir, 'schema/postgres_pii.sql'), 'utf8'));
     tsRun = await runTypeScriptServices(workDir, policy.minAiConfidence ?? 0.85, policy.allowedRegions ?? ['eu-central-1', 'eu-west-1']);
   } finally {
     fs.rmSync(workDir, { recursive: true, force: true });
@@ -464,7 +462,7 @@ print(json.dumps({
       gitDiffStat,
       workingTreeClean,
     },
-    sqlDatabaseExecution: parsed.sql,
+    sqlDatabaseExecution: sqlRun,
     pythonFastApiExecution: parsed.fastapi,
     pythonRedisWorkerExecution: parsed.redis,
     typescriptAiTriageExecution: tsRun.ai,

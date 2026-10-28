@@ -44,6 +44,11 @@ async function runRealWorldScenario() {
   console.log(`  SQL: ${pre.sqlDatabaseExecution.engine}, retention default ${pre.sqlDatabaseExecution.actualDefaultRetentionHours}h`);
   console.log(`  FastAPI log: ${pre.pythonFastApiExecution.capturedLoggerOutput}`);
   console.log(`  Redis SETEX TTL: ${pre.pythonRedisWorkerExecution.capturedSetexTtlHours}h`);
+  console.log(`  Python: ${pre.pythonFastApiExecution.frameworks}; Redis: ${pre.pythonRedisWorkerExecution.redisBackend}`);
+  check(/^PostgreSQL \d+/.test(pre.sqlDatabaseExecution.engine), 'schema executes on PostgreSQL');
+  check(pre.sqlDatabaseExecution.retentionPurge.staleRowsBefore > 0 && pre.sqlDatabaseExecution.retentionPurge.staleRowsAfter === 0, 'PostgreSQL retention purge removes expired rows');
+  check(pre.sqlDatabaseExecution.erasureCascade.every((e) => e.erasureSucceeded), 'PostgreSQL erasure cascades to dependent rows');
+  if (pre.pythonFastApiExecution.httpStatus !== null) check(pre.pythonFastApiExecution.httpStatus === 200, 'FastAPI intake answers HTTP 200');
   check(pre.pythonFastApiExecution.leakedPlaintextSsnInLogs, 'baseline app leaks plaintext PII to logs (expected)');
   console.log(`  TS AI decision: ${JSON.stringify(pre.typescriptAiTriageExecution.returnedDecision)}`);
   console.log(`  TS replication: ${JSON.stringify(pre.typescriptCrossBorderExecution.returnedSyncStatus)}`);
@@ -118,6 +123,9 @@ async function runRealWorldScenario() {
   check(!post.pythonFastApiExecution.leakedPlaintextSsnInLogs, 'patched app no longer logs plaintext PII');
   check(post.pythonRedisWorkerExecution.capturedSetexTtlHours <= 72, 'patched cache TTL is within 72h');
   check(post.sqlDatabaseExecution.hasTenantKmsKeyColumn, 'patched schema has tenant_kms_key_id');
+  check(post.sqlDatabaseExecution.actualDefaultRetentionHours <= 72, 'patched PostgreSQL retention default is within 72h');
+  check(post.pythonRedisWorkerExecution.storedTtlSeconds <= 72 * 3600, 'Redis stores the key with a TTL within 72h');
+  check(post.sqlDatabaseExecution.erasureCascade.every((e) => e.erasureSucceeded), 'patched schema still cascades erasure');
   console.log(`  TS AI decision: ${JSON.stringify(post.typescriptAiTriageExecution.returnedDecision)}`);
   check(!post.typescriptAiTriageExecution.violatedEuAiActArt14, 'patched AI service routes low-confidence cases to a human');
   check(!post.typescriptCrossBorderExecution.violatedGdprArt44, 'patched replication stays in an allowed region');
