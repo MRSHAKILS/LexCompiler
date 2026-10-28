@@ -7,3 +7,4 @@ video-build/
 /*.png
 /*.mp4
 .env
+INTERNAL_AUDIT.md
