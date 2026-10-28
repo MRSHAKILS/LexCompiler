@@ -4,6 +4,7 @@
  */
 export const CELLAR_SPARQL = process.env.LEXCOMPILER_EURLEX_SPARQL_URL || 'https://publications.europa.eu/webapi/rdf/sparql';
 export const EURLEX_HTML = process.env.LEXCOMPILER_EURLEX_HTML_URL || 'https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/';
+export const CELLAR_RESOURCE = process.env.LEXCOMPILER_CELLAR_RESOURCE_URL || 'https://publications.europa.eu/resource/celex/';
 
 /** Acts amending or correcting a CELEX number, newest first. */
 export function amendmentsQuery(celex: string, limit = 10): string {
@@ -74,10 +75,21 @@ export function extractArticle(html: string, article: number): { title: string; 
   return { title: [heading, subtitle].filter(Boolean).map((t) => decode(t!)).join(' — '), text: paragraphs.join(' ') };
 }
 
+/**
+ * Official article text: EUR-Lex's HTML rendering first, then the Publications Office's CELLAR
+ * resource for the same CELEX (content negotiation, same oj-* markup). EUR-Lex answers automated
+ * clients with an empty 202 challenge page, so CELLAR is the documented machine-access path.
+ */
 export async function fetchEurLexArticle(celex: string, article: number, fetchImpl: typeof fetch = fetch, timeoutMs = 4000): Promise<{ title: string; text: string; url: string } | null> {
-  const url = `${EURLEX_HTML}?uri=CELEX:${celex}`;
-  const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) return null;
-  const found = extractArticle(await res.text(), article);
-  return found ? { ...found, url: `https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:${celex}#art_${article}` } : null;
+  const sources: Array<[string, RequestInit]> = [
+    [`${EURLEX_HTML}?uri=CELEX:${celex}`, {}],
+    [`${CELLAR_RESOURCE}${encodeURIComponent(celex)}`, { headers: { Accept: 'application/xhtml+xml, text/html;q=0.9', 'Accept-Language': 'eng' } }],
+  ];
+  for (const [url, init] of sources) {
+    const res = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(url.startsWith(CELLAR_RESOURCE) ? Math.max(timeoutMs, 20000) : timeoutMs) }).catch(() => null);
+    if (!res || res.status !== 200) continue;
+    const found = extractArticle(await res.text(), article);
+    if (found) return { ...found, url: `https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:${celex}#art_${article}` };
+  }
+  return null;
 }

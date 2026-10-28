@@ -373,6 +373,17 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - Semantic dedup uses 384-d `all-minilm` embeddings from Ollama (1 of 25 segments removed).
 - **Not measured here:** provider-reported prompt-cache hits need an LLM agent run on a provider that returns cached-token counts (OpenAI or Anthropic); Ollama reports none.
 
+### Step 29 · Live EUR-Lex and CELLAR feed (L-13)
+- **Live run** with internet access:
+  - The CELLAR SPARQL query returned the real corrigenda of GDPR and the AI Act, plus `CELEX:32026R1744` amending the AI Act.
+  - The Federal Register items were live (`illustrative: false`).
+- **Bug fix:** EUR-Lex's HTML endpoint answers automated clients with an empty `202` (its bot challenge), so the tracked articles stayed illustrative.
+  - `fetchEurLexArticle` now falls back to the Publications Office's CELLAR resource for the same CELEX (`https://publications.europa.eu/resource/celex/<CELEX>`, content negotiation for XHTML in English). That is the documented machine-access path, and it serves the same `oj-*` markup.
+  - No challenge is bypassed.
+  - `LEXCOMPILER_CELLAR_RESOURCE_URL` overrides the base URL.
+- **Result:** GDPR Art. 17 ("Right to erasure") and AI Act Art. 14 ("Human oversight") now come back with `illustrative: false` and the official article text. The feed's other items are unchanged.
+- **Test:** `eurLex.test.ts` covers the fallback (an empty 202 from EUR-Lex, then XHTML from CELLAR with the right `Accept` header).
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -399,7 +410,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-20 | **Event-loop blocking (S6)** | Not reached in the cloud session | Replace the remaining `execFileSync` calls (sandbox Git history, the sync analyzer fallback, `resolvePython`) with async `execFile`/`spawn`, so a request never blocks the event loop. |
 | L-21 | **PII classification beyond names (A1)** | Not reached in the cloud session | Classify PII from types and schemas (Pydantic field types, SQL column comments and constraints, TypeScript interfaces) and from value patterns in fixtures, in addition to identifier names; add precision/recall tests. |
 | L-22 | **Frontend accessibility and tests (U1)** | Not reached in the cloud session | Add `@testing-library/react` + jsdom tests for the dashboard, IDE drawer and agent console; fix keyboard focus, ARIA labels and colour contrast; split the largest components. |
-| L-13 | **EUR-Lex SPARQL ingestion** | EUR-Lex and CELLAR are blocked from this session (403) | Implemented and tested against recorded responses (Step 20). Remaining: run `GET /api/regulations/live-feed` with internet access and confirm the GDPR Art. 17 / AI Act Art. 14 items show `illustrative: false` with the official text. |
+| L-13 | **EUR-Lex SPARQL ingestion** | EUR-Lex and CELLAR are blocked from this session (403) | ✅ Done (Steps 20, 29): the live feed returns the official Art. 17 / Art. 14 text (`illustrative: false`) through CELLAR, plus live amendments. |
 | L-14 | **Docker image verification (D1)** | Docker isn't available in this session | ✅ Done (Steps 6, 24): the compose stack builds and runs, healthy and non-root, with models served by the compose Ollama. |
 
 ---
