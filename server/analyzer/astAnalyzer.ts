@@ -11,12 +11,11 @@ import type {
   TargetRepoFile,
 } from '../../shared/types.js';
 import { resolvePython, resolvePythonAsync } from '../util/python.js';
+import { classifyPii, PII_NAME, type PiiEvidence } from './piiClassifier.js';
 import { collectGovernanceFindings } from './governanceFacts.js';
 import { summarizeTypeScriptFunction } from './symbolicTs.js';
 
-/** Identifier is PII when its last `_`-separated token(s) name a personal-data field. */
-const PII_IDENTIFIER =
-  /(^|_)(ssn|email|phone|dob|date_of_birth|birthdate|passport|national_id|tax_id|credit_card|card_number|full_name|diagnosis_code|diagnosis)$/i;
+const PII_IDENTIFIER = PII_NAME;
 const PII_COLUMN_PREFIX = /^(patient_|biometric_)/i;
 const TTL_NAMES = /(ttl|retention|expir|purge)/i;
 const KMS_FLAG_NAMES = /(tenant.*kms|kms.*envelope|tenant_isolated_kms)/i;
@@ -348,7 +347,13 @@ function addColumn(parsed: ParsedTable, item: SqlToken[], comments: SqlToken[]):
   }
 
   const ann = annotationsFrom(comments);
-  const inferredPii = isInferredPiiColumn(colName);
+  // String literals inside a column CHECK (...) are validation patterns for the classifier.
+  const checkPatterns: string[] = [];
+  for (let c = item.findIndex((t) => upper(t) === 'CHECK'); c >= 0 && c < item.length; c++) {
+    if (item[c].kind === 'string') checkPatterns.push(item[c].value);
+  }
+  const classified = classifyPii({ name: colName, typeText: dataType, patterns: checkPatterns });
+  const inferredPii = isInferredPiiColumn(colName) || (classified.pii && !classified.evidence.every((e) => e === 'name'));
   const isPII = Boolean(ann.piiClass) || inferredPii;
   // Application-level ciphertext columns (e.g. `ssn_encrypted BYTEA`) count as encrypted at rest.
   const ciphertextColumn = /(_enc|_encrypted|_ciphertext)$/i.test(colName) && /BYTEA|BLOB|BINARY/i.test(dataType);
@@ -396,17 +401,53 @@ function addColumn(parsed: ParsedTable, item: SqlToken[], comments: SqlToken[]):
     isPrimaryKey,
     isNullable: !notNull && !isPrimaryKey,
     isPII,
-    piiClassification: ann.piiClass || (isPII ? 'DIRECT_IDENTIFIER' : 'NONE'),
+    piiClassification: ann.piiClass || (isPII ? piiClassificationFor(classified.category) : 'NONE'),
     encryptedAtRest,
     encryptionAlgorithm: ann.encryptedAlg || (ciphertextColumn ? 'APPLICATION_CIPHERTEXT' : undefined),
     hasTenantKeyIsolation: hasTenantKeyCol,
     foreignKeyReference: fk
       ? { table: fk.parentTable, column: fk.parentColumn, onDeleteCascade: fk.onDelete === 'CASCADE', implicit: fk.onDelete == null }
       : undefined,
-    piiInference: ann.piiClass ? 'ANNOTATION' : inferredPii ? 'NAME_PATTERN' : 'NONE',
+    piiInference: ann.piiClass ? 'ANNOTATION' : inferredPii ? piiInferenceFor(classified.evidence, isInferredPiiColumn(colName)) : 'NONE',
     line: nameTok.line,
   });
   if (fk) parsed.foreignKeys.push(fk);
+}
+
+type SqlPiiClass = NonNullable<SQLColumnNode['piiClassification']>;
+
+function piiClassificationFor(category: string | undefined): SqlPiiClass {
+  if (category === 'health') return 'HEALTH_PHI';
+  if (category === 'card_number' || category === 'iban') return 'FINANCIAL_PCI';
+  if (category === 'biometric') return 'BIOMETRIC';
+  return 'DIRECT_IDENTIFIER';
+}
+
+function piiInferenceFor(evidence: PiiEvidence[], byName: boolean): NonNullable<SQLColumnNode['piiInference']> {
+  if (byName) return 'NAME_PATTERN';
+  if (evidence.includes('type')) return 'TYPE';
+  if (evidence.includes('schema')) return 'SCHEMA';
+  return evidence.includes('value') ? 'VALUE' : 'NAME_PATTERN';
+}
+
+/** `COMMENT ON COLUMN table.column IS '…'`: documentation that can classify an existing column as PII. */
+function applyColumnComment(parsedTables: Map<string, ParsedTable>, code: SqlToken[]): void {
+  const isIdx = code.findIndex((t, i) => i > 2 && upper(t) === 'IS');
+  const text = isIdx > 0 && code[isIdx + 1]?.kind === 'string' ? code[isIdx + 1].value : '';
+  // [schema.]table.column: the last identifier is the column, the one before it the table.
+  const names = code.slice(3, isIdx).filter((t) => t.kind === 'word' || t.kind === 'quoted').map((t) => t.value);
+  if (names.length < 2 || !text) return;
+  const parsed = parsedTables.get(names[names.length - 2].toLowerCase());
+  const col = parsed?.table.columns.find((c) => c.name.toLowerCase() === names[names.length - 1].toLowerCase());
+  if (!parsed || !col || col.isPII) return;
+  const classified = classifyPii({ name: col.name, typeText: col.dataType, description: text });
+  if (!classified.pii) return;
+  col.isPII = true;
+  col.piiClassification = piiClassificationFor(classified.category);
+  col.piiInference = 'SCHEMA';
+  parsed.table.containsPII = true;
+  if (col.encryptedAtRest) parsed.table.encryptedColumnsCount++;
+  else parsed.table.unencryptedPiiColumns.push(col.name);
 }
 
 function addTableConstraint(parsed: ParsedTable, item: SqlToken[]): void {
@@ -564,6 +605,11 @@ export function parseSqlSchemaFile(file: TargetRepoFile): {
       }
       parsedTables.set(tn.name.toLowerCase(), parsed);
       order.push(parsed);
+      continue;
+    }
+
+    if (first === 'COMMENT' && upper(code[1]) === 'ON' && upper(code[2]) === 'COLUMN') {
+      applyColumnComment(parsedTables, code);
       continue;
     }
 
@@ -761,7 +807,13 @@ export interface ParsedPythonAst {
     body_line?: number;
     body_col?: number;
   }>;
-  classes: Array<{ name: string; lineno: number; end_lineno: number; bases?: string[]; fields?: Array<{ name: string; lineno: number; end_lineno: number }> }>;
+  classes: Array<{
+    name: string;
+    lineno: number;
+    end_lineno: number;
+    bases?: string[];
+    fields?: Array<{ name: string; lineno: number; end_lineno: number; annotation?: string; description?: string; patterns?: string[]; samples?: string[] }>;
+  }>;
   attr_reads?: string[];
   symbolic?: Record<string, SymbolicSummary & { lineno: number; end_lineno: number }>;
   sinks: Array<{
@@ -938,7 +990,26 @@ for node in ast.walk(tree):
         fields = []
         for stmt in node.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-                fields.append({"name": stmt.target.id, "lineno": stmt.lineno, "end_lineno": stmt.end_lineno})
+                # Type, Field(description=, pattern=, examples=) and literal defaults feed the PII classifier.
+                fld = {"name": stmt.target.id, "lineno": stmt.lineno, "end_lineno": stmt.end_lineno,
+                       "annotation": ast.unparse(stmt.annotation), "samples": [], "patterns": []}
+                v = stmt.value
+                if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                    fld["samples"].append(v.value)
+                elif isinstance(v, ast.Call) and dotted(v.func).split(".")[-1] == "Field":
+                    for a in v.args[:1]:
+                        if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                            fld["samples"].append(a.value)
+                    for kw in v.keywords:
+                        if kw.arg in ("description", "title") and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            fld["description"] = (fld.get("description", "") + " " + kw.value.value).strip()
+                        elif kw.arg in ("pattern", "regex") and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            fld["patterns"].append(kw.value.value)
+                        elif kw.arg in ("default", "example") and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            fld["samples"].append(kw.value.value)
+                        elif kw.arg == "examples" and isinstance(kw.value, (ast.List, ast.Tuple)):
+                            fld["samples"].extend(e.value for e in kw.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str))
+                fields.append(fld)
         classes.append({"name": node.name, "lineno": node.lineno, "end_lineno": node.end_lineno,
                         "bases": [dotted(b) for b in node.bases if dotted(b)], "fields": fields})
 

@@ -116,7 +116,8 @@ export interface SQLColumnNode {
     onDeleteCascade: boolean;
     implicit?: boolean;
   };
-  piiInference?: 'ANNOTATION' | 'NAME_PATTERN' | 'NONE';
+  /** What classified the column: an @pii annotation, its name, its type, its schema documentation or CHECK pattern, or a value. */
+  piiInference?: 'ANNOTATION' | 'NAME_PATTERN' | 'TYPE' | 'SCHEMA' | 'VALUE' | 'NONE';
   line: number;
 }
 
@@ -257,6 +258,8 @@ export interface ASTFindingNode {
     /** PII_COLLECTION_MODEL: PII fields the model collects, and those never read by the module. */
     collectedPiiFields?: string[];
     unusedPiiFields?: string[];
+    /** Per PII field: the category and which signals (name, type, schema, value) classified it. */
+    piiFieldEvidence?: Record<string, { pii: boolean; category?: string; evidence: Array<'name' | 'type' | 'schema' | 'value'> }>;
     /** BREACH_NOTIFICATION_POLICY: configured supervisory-authority notification deadline. */
     breachNotificationHours?: number | null;
     /** DPIA_RECORD: reference to the impact assessment, and whether that file exists in the repository. */

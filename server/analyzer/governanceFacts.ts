@@ -4,6 +4,7 @@ import ts from 'typescript';
 import type { ASTFindingNode, SourceEditAnchor, TargetRepoFile } from '../../shared/types.js';
 import { TARGET_REPO_ROOT } from './repoBaseline.js';
 import { isPiiIdentifier, parsePythonAstCached, type ParsedPythonAst } from './astAnalyzer.js';
+import { classifyPii } from './piiClassifier.js';
 
 /**
  * Facts for the governance categories (consent / lawful basis, breach notification,
@@ -33,11 +34,13 @@ function pythonFindings(file: TargetRepoFile, py: ParsedPythonAst): ASTFindingNo
   const moduleConsts = py.assignments.filter((a) => a.scope === '<module>');
 
   // Pydantic / dataclass models that collect PII.
-  const models = py.classes.filter((c) => (c.bases || []).some((b) => /BaseModel|TypedDict/.test(b)) && (c.fields || []).some((f) => isPiiIdentifier(f.name)));
+  type PyField = NonNullable<ParsedPythonAst['classes'][number]['fields']>[number];
+  const piiOf = (f: PyField) => classifyPii({ name: f.name, typeText: f.annotation, description: f.description, patterns: f.patterns, samples: f.samples });
+  const models = py.classes.filter((c) => (c.bases || []).some((b) => /BaseModel|TypedDict/.test(b)) && (c.fields || []).some((f) => piiOf(f).pii));
   const reads = new Set(py.attr_reads || []);
   const wholeModelUse = [...SERIALISES_WHOLE_MODEL].some((m) => reads.has(m));
   for (const m of models) {
-    const pii = (m.fields || []).filter((f) => isPiiIdentifier(f.name));
+    const pii = (m.fields || []).filter((f) => piiOf(f).pii);
     const unused = wholeModelUse ? [] : pii.filter((f) => !reads.has(f.name));
     findings.push({
       id: `ast-py-model-${file.path}-${m.name}`,
@@ -50,7 +53,12 @@ function pythonFindings(file: TargetRepoFile, py: ParsedPythonAst): ASTFindingNo
       constructType: 'PII_COLLECTION_MODEL',
       functionName: m.name,
       codeSnippet: snippet(lines, m.lineno, m.end_lineno),
-      metadata: { containsPii: true, collectedPiiFields: pii.map((f) => f.name), unusedPiiFields: unused.map((f) => f.name) },
+      metadata: {
+        containsPii: true,
+        collectedPiiFields: pii.map((f) => f.name),
+        unusedPiiFields: unused.map((f) => f.name),
+        piiFieldEvidence: Object.fromEntries(pii.map((f) => [f.name, piiOf(f)])),
+      },
       editAnchors: unused.map(
         (f): SourceEditAnchor => ({
           role: 'PII_MODEL_FIELD',
@@ -164,10 +172,47 @@ function dpiaFinding(file: TargetRepoFile, lines: string[], name: string, line: 
   };
 }
 
+/**
+ * Interfaces and object type aliases whose properties hold PII, judged from the property name,
+ * its declared type (`Email`, `PhoneNumber`, …) and its JSDoc (`@pii`, "date of birth", …).
+ */
+function typeScriptPiiModels(file: TargetRepoFile, sf: ts.SourceFile, lines: string[]): ASTFindingNode[] {
+  const out: ASTFindingNode[] = [];
+  for (const st of sf.statements) {
+    const members = ts.isInterfaceDeclaration(st) ? st.members : ts.isTypeAliasDeclaration(st) && ts.isTypeLiteralNode(st.type) ? st.type.members : null;
+    if (!members || !(ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st))) continue;
+    const evidence: Record<string, ReturnType<typeof classifyPii>> = {};
+    for (const m of members) {
+      if (!ts.isPropertySignature(m) || !m.name || !(ts.isIdentifier(m.name) || ts.isStringLiteral(m.name))) continue;
+      const doc = ts.getJSDocCommentsAndTags(m).map((d) => d.getText(sf)).join(' ');
+      const c = classifyPii({ name: m.name.text, typeText: m.type?.getText(sf), description: doc || undefined });
+      if (c.pii) evidence[m.name.text] = c;
+    }
+    if (!Object.keys(evidence).length) continue;
+    const start = sf.getLineAndCharacterOfPosition(st.getStart()).line + 1;
+    const end = sf.getLineAndCharacterOfPosition(st.getEnd()).line + 1;
+    out.push({
+      id: `ast-ts-model-${file.path}-${st.name.text}`,
+      filePath: file.path,
+      line: start,
+      endLine: end,
+      column: 1,
+      language: 'typescript',
+      astNodeKind: `${ts.SyntaxKind[st.kind]}(${st.name.text})`,
+      constructType: 'PII_COLLECTION_MODEL',
+      functionName: st.name.text,
+      codeSnippet: snippet(lines, start, end),
+      metadata: { containsPii: true, collectedPiiFields: Object.keys(evidence), unusedPiiFields: [], piiFieldEvidence: evidence },
+      editAnchors: [],
+    });
+  }
+  return out;
+}
+
 function typeScriptFindings(file: TargetRepoFile): ASTFindingNode[] {
   const sf = ts.createSourceFile(file.path, file.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const lines = file.content.split('\n');
-  const findings: ASTFindingNode[] = [];
+  const findings: ASTFindingNode[] = typeScriptPiiModels(file, sf, lines);
   for (const stmt of sf.statements) {
     if (!ts.isVariableStatement(stmt)) continue;
     for (const d of stmt.declarationList.declarations) {
