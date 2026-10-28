@@ -9,6 +9,7 @@ import type {
   SQLTableSchema,
   TargetRepoFile,
 } from '../../shared/types.js';
+import { resolvePython } from '../util/python.js';
 
 /** Identifier is PII when its last `_`-separated token(s) name a personal-data field. */
 const PII_IDENTIFIER =
@@ -1037,8 +1038,10 @@ function parsePythonAstCached(content: string): ParsedPythonAst | null {
   const digest = sha256Hex(content);
   if (pythonAstCache.has(digest)) return pythonAstCache.get(digest) ?? null;
   let parsed: ParsedPythonAst | null = null;
+  const python = resolvePython();
+  if (!python) return null;
   try {
-    const stdout = execFileSync('python3', ['-I', '-c', PYTHON_AST_SCRIPT], {
+    const stdout = execFileSync(python.command, [...python.prefixArgs, '-I', '-c', PYTHON_AST_SCRIPT], {
       input: content,
       encoding: 'utf8',
       timeout: 5000,
@@ -1058,8 +1061,13 @@ function parsePythonAstCached(content: string): ParsedPythonAst | null {
 
 /** Parses a Python file in a child process without blocking the event loop. */
 function parsePythonAstAsync(content: string): Promise<ParsedPythonAst | null> {
+  const python = resolvePython();
+  if (!python) return Promise.resolve(null);
   return new Promise((resolve) => {
-    const child = spawn('python3', ['-I', '-c', PYTHON_AST_SCRIPT], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const child = spawn(python.command, [...python.prefixArgs, '-I', '-c', PYTHON_AST_SCRIPT], {
+      stdio: ['pipe', 'pipe', 'ignore'],
+      windowsHide: true,
+    });
     let out = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
     child.stdout.setEncoding('utf8');

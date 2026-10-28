@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { INITIAL_REPO_FILES, TARGET_REPO_IS_FIXTURE, TARGET_REPO_ROOT } from '../analyzer/repoBaseline.js';
+import { resolvePython } from '../util/python.js';
 
 export interface RealWorldSandboxReport {
   executedAt: string;
@@ -198,19 +199,78 @@ export async function executeRealWorldSandboxVerification(
   const workingTreeClean = runGit(['status', '--porcelain']) === '';
 
   const pyRunnerScript = `
-import resource
+import sys
 
 # Defense in depth only: these limits are not an isolation boundary.
-for _limit, _value in (
-    (resource.RLIMIT_CPU, 5),
-    (resource.RLIMIT_AS, 512 * 1024 * 1024),
-    (resource.RLIMIT_FSIZE, 1024 * 1024),
-    (resource.RLIMIT_NPROC, 0),
-):
-    try:
-        resource.setrlimit(_limit, (_value, _value))
-    except (ValueError, OSError):
-        pass
+if sys.platform == "win32":
+    # No rlimits on Windows: put this process in a Job Object with the same CPU (5 s),
+    # memory (512 MiB) and no-child-process limits. Windows has no per-file size cap.
+    import ctypes
+    from ctypes import wintypes
+
+    class _BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [(_n, ctypes.c_uint64) for _n in ("ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
+
+    class _ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimits),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    _JOB_OBJECT_LIMIT_PROCESS_TIME = 0x2
+    _JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x8
+    _JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x100
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    _JobObjectExtendedLimitInformation = 9
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    _kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _limits = _ExtendedLimits()
+    _limits.BasicLimitInformation.LimitFlags = (
+        _JOB_OBJECT_LIMIT_PROCESS_TIME
+        | _JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        | _JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        | _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    )
+    _limits.BasicLimitInformation.PerProcessUserTimeLimit = 5 * 10_000_000
+    _limits.BasicLimitInformation.ActiveProcessLimit = 1
+    _limits.ProcessMemoryLimit = 512 * 1024 * 1024
+    _job = _kernel32.CreateJobObjectW(None, None)
+    if _job:
+        _kernel32.SetInformationJobObject(_job, _JobObjectExtendedLimitInformation, ctypes.byref(_limits), ctypes.sizeof(_limits))
+        _kernel32.AssignProcessToJobObject(_job, _kernel32.GetCurrentProcess())
+else:
+    import resource
+
+    for _limit, _value in (
+        (resource.RLIMIT_CPU, 5),
+        (resource.RLIMIT_AS, 512 * 1024 * 1024),
+        (resource.RLIMIT_FSIZE, 1024 * 1024),
+        (resource.RLIMIT_NPROC, 0),
+    ):
+        try:
+            resource.setrlimit(_limit, (_value, _value))
+        except (ValueError, OSError):
+            pass
 
 import json, sys, sqlite3, re, io, logging, asyncio, types
 
@@ -373,9 +433,17 @@ print(json.dumps({
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(path.join(TARGET_REPO_ROOT, relPath), dest);
     }
-    const { stdout: out } = await execFileAsync('python3', ['-I', '-c', pyRunnerScript, workDir], {
+    const python = resolvePython();
+    if (!python) throw new Error('No Python >= 3.10 interpreter found (tried LEXCOMPILER_PYTHON, python3, python, py -3)');
+    const { stdout: out } = await execFileAsync(python.command, [...python.prefixArgs, '-I', '-c', pyRunnerScript, workDir], {
       cwd: workDir,
-      env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
+      // Windows needs SYSTEMROOT for the interpreter's crypto/random init.
+      env: {
+        PATH: process.env.PATH || '/usr/bin:/bin',
+        LANG: 'C.UTF-8',
+        ...(process.platform === 'win32' && process.env.SYSTEMROOT ? { SYSTEMROOT: process.env.SYSTEMROOT } : {}),
+      },
+      windowsHide: true,
       encoding: 'utf8',
       timeout: 5000,
       maxBuffer: 2 * 1024 * 1024,

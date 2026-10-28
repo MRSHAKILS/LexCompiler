@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import path from 'node:path';
 import cors from 'cors';
 import express from 'express';
@@ -69,6 +68,7 @@ import {
   isOriginAllowed,
   resolveServerSecurityConfig,
 } from './security.js';
+import { resolvePython } from './util/python.js';
 import type {
   ComplianceFrameworkId,
   FullComplianceScanReport,
@@ -213,14 +213,8 @@ async function buildFullComplianceReport(
   };
 }
 
-let python3Version: Promise<string | null> | null = null;
-function checkPython3(): Promise<string | null> {
-  python3Version ??= new Promise((resolve) => {
-    execFile('python3', ['--version'], { timeout: 3000 }, (err, stdout, stderr) =>
-      resolve(err ? null : `${stdout || stderr}`.trim())
-    );
-  });
-  return python3Version;
+async function checkPython3(): Promise<string | null> {
+  return resolvePython()?.version ?? null;
 }
 
 /** Checks the dependencies scans need; 503 when Z3 or python3 is unavailable. */

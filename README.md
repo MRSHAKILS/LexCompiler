@@ -232,6 +232,7 @@ Only a `READY_TO_MERGE` remediation (post-patch Z3 `SAT`) can be opened. Optiona
 | `LEXCOMPILER_DATA_DIR` | `data/` | Ledger, vector store, persisted clauses, signing key |
 | `LEXCOMPILER_SIGNING_KEY_PEM` / `LEXCOMPILER_SIGNING_KEY_PATH` | generated in the data dir | Ed25519 attestation key |
 | `LEXCOMPILER_OPA_BIN` | `opa` on `PATH` | OPA binary |
+| `LEXCOMPILER_PYTHON` | first of `python3`, `python`, `py -3` that is Python >= 3.10 | Python interpreter for AST parsing and the runtime sandbox |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `OPENAI_API_KEY` | unset | Server-side key for cloud mode, so the browser never sends one |
 | `LEXCOMPILER_INPUT_PRICE_PER_MTOK_USD` | built-in | Input price for token-cost estimates |
