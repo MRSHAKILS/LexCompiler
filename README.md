@@ -278,6 +278,7 @@ The workflow uploads the findings to GitHub code scanning and fails the job when
 | `LEXCOMPILER_RERANKER_MODEL`, `LEXCOMPILER_RERANKER_LOCAL_DIR`, `LEXCOMPILER_RERANKER_DTYPE` | unset | BGE cross-encoder reranker through transformers.js (`npm install @huggingface/transformers`) |
 | `LEXCOMPILER_SIGNER` | `local` | Attestation signer: `local` (Ed25519 key file), `gcp-kms` (`LEXCOMPILER_GCP_KMS_KEY_VERSION`, Cloud HSM supported), or `aws-kms` (`LEXCOMPILER_AWS_KMS_KEY_ID`) |
 | `LEXCOMPILER_TSA_URL` | unset | RFC 3161 Time-Stamp Authority used to timestamp attestation signatures |
+| `LEXCOMPILER_SANDBOX_CONTAINER`, `LEXCOMPILER_SANDBOX_IMAGE`, `LEXCOMPILER_SANDBOX_OCI_RUNTIME` | unset | Run the runtime sandbox in a locked-down container (`docker`/`podman`, image from `Dockerfile.sandbox`, optional `runsc` for gVisor) |
 | `LEXCOMPILER_OPA_BIN` | `opa` on `PATH` | OPA binary |
 | `LEXCOMPILER_PYTHON` | first of `python3`, `python`, `py -3` that is Python >= 3.10 | Python interpreter for AST parsing and the runtime sandbox |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |

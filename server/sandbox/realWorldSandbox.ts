@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { INITIAL_REPO_FILES, TARGET_REPO_IS_FIXTURE, TARGET_REPO_ROOT } from '../analyzer/repoBaseline.js';
 import { resolveSandboxPython } from '../util/python.js';
+import { CONTAINER_WORKDIR, containerRunArgs, containerSandboxFromEnv, describeIsolation } from './container.js';
 import { executeSchemaOnPostgres, type PostgresExecutionReport } from './postgresSandbox.js';
 
 export interface RealWorldSandboxReport {
@@ -45,6 +46,8 @@ export interface RealWorldSandboxReport {
     returnedSyncStatus: Record<string, unknown>;
     violatedGdprArt44: boolean;
   };
+  /** Where the code ran: a locked-down container, or a local process with resource limits. */
+  isolation: string;
 }
 
 const execFileAsync = promisify(execFile);
@@ -82,11 +85,18 @@ const pick = (mod, re) => Object.entries(mod).find(([k, v]) => typeof v === 'fun
 })().catch((err) => process.stdout.write(JSON.stringify({ error: String(err) })));
 `;
   fs.writeFileSync(path.join(workDir, 'lexcompiler-ts-runner.cjs'), runner);
-  const { stdout } = await execFileAsync(
-    process.execPath,
-    ['--permission', `--allow-fs-read=${workDir}`, '--max-old-space-size=128', 'lexcompiler-ts-runner.cjs'],
-    { cwd: workDir, env: { PATH: process.env.PATH || '/usr/bin:/bin' }, encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }
-  );
+  const container = containerSandboxFromEnv();
+  const { stdout } = container
+    ? await execFileAsync(
+        container.engine,
+        containerRunArgs(container, workDir, ['node', '--permission', `--allow-fs-read=${CONTAINER_WORKDIR}`, '--max-old-space-size=128', `${CONTAINER_WORKDIR}/lexcompiler-ts-runner.cjs`]),
+        { encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024 }
+      )
+    : await execFileAsync(
+        process.execPath,
+        ['--permission', `--allow-fs-read=${workDir}`, '--max-old-space-size=128', 'lexcompiler-ts-runner.cjs'],
+        { cwd: workDir, env: { PATH: process.env.PATH || '/usr/bin:/bin' }, encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }
+      );
   const result = JSON.parse(stdout) as {
     error?: string;
     aiFn?: string;
@@ -429,23 +439,44 @@ print(json.dumps({
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(path.join(TARGET_REPO_ROOT, relPath), dest);
     }
-    const python = resolveSandboxPython();
-    if (!python) throw new Error('No Python >= 3.10 interpreter found (tried LEXCOMPILER_PYTHON, python3, python, py -3)');
-    const { stdout: out } = await execFileAsync(python.command, [...python.prefixArgs, '-I', '-c', pyRunnerScript, workDir], {
-      cwd: workDir,
-      // Windows needs SYSTEMROOT for the interpreter's crypto/random init.
-      env: {
-        PATH: process.env.PATH || '/usr/bin:/bin',
-        LANG: 'C.UTF-8',
-        ...(process.env.LEXCOMPILER_REDIS_URL ? { LEXCOMPILER_REDIS_URL: process.env.LEXCOMPILER_REDIS_URL } : {}),
-        ...(process.platform === 'win32' && process.env.SYSTEMROOT ? { SYSTEMROOT: process.env.SYSTEMROOT } : {}),
-      },
-      windowsHide: true,
-      encoding: 'utf8',
-      timeout: 15000,
-      maxBuffer: 2 * 1024 * 1024,
-    });
-    stdout = out;
+    const container = containerSandboxFromEnv();
+    if (container) {
+      // The container runs as nobody: make the (throwaway, read-only mounted) copy readable.
+      const open = (dir: string) => {
+        fs.chmodSync(dir, 0o755);
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          const p = path.join(dir, e.name);
+          if (e.isDirectory()) open(p);
+          else fs.chmodSync(p, 0o644);
+        }
+      };
+      open(workDir);
+      // The image's interpreter (with FastAPI / Pydantic / fakeredis) runs the same script inside the container.
+      const { stdout: out } = await execFileAsync(container.engine, containerRunArgs(container, workDir, ['python', '-I', '-c', pyRunnerScript, CONTAINER_WORKDIR]), {
+        encoding: 'utf8',
+        timeout: 60000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      stdout = out;
+    } else {
+      const python = resolveSandboxPython();
+      if (!python) throw new Error('No Python >= 3.10 interpreter found (tried LEXCOMPILER_PYTHON, python3, python, py -3)');
+      const { stdout: out } = await execFileAsync(python.command, [...python.prefixArgs, '-I', '-c', pyRunnerScript, workDir], {
+        cwd: workDir,
+        // Windows needs SYSTEMROOT for the interpreter's crypto/random init.
+        env: {
+          PATH: process.env.PATH || '/usr/bin:/bin',
+          LANG: 'C.UTF-8',
+          ...(process.env.LEXCOMPILER_REDIS_URL ? { LEXCOMPILER_REDIS_URL: process.env.LEXCOMPILER_REDIS_URL } : {}),
+          ...(process.platform === 'win32' && process.env.SYSTEMROOT ? { SYSTEMROOT: process.env.SYSTEMROOT } : {}),
+        },
+        windowsHide: true,
+        encoding: 'utf8',
+        timeout: 15000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      stdout = out;
+    }
     sqlRun = await executeSchemaOnPostgres(fs.readFileSync(path.join(workDir, 'schema/postgres_pii.sql'), 'utf8'));
     tsRun = await runTypeScriptServices(workDir, policy.minAiConfidence ?? 0.85, policy.allowedRegions ?? ['eu-central-1', 'eu-west-1']);
   } finally {
@@ -467,6 +498,7 @@ print(json.dumps({
     pythonRedisWorkerExecution: parsed.redis,
     typescriptAiTriageExecution: tsRun.ai,
     typescriptCrossBorderExecution: tsRun.crossBorder,
+    isolation: describeIsolation(containerSandboxFromEnv()),
   };
 }
 

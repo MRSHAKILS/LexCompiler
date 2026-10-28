@@ -288,6 +288,17 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **Fix found by the real-repository smoke test:** "Personal data **may** be processed only with consent" was read as a waiver, because the generic negation detector treats "may" as permissive. Consent is now negated only by explicit waivers ("consent is not required", "need not obtain consent"). There is a regression test.
 - **Tests:** `server/externalMcp.test.ts` covers stdio against a spawned MCP server, HTTP with SSE and sessions, ONLINE/OFFLINE probing, and env expansion. `server/eurLex.test.ts` covers the SPARQL query and parsing, article extraction, and feed replacement with fallback.
 
+### Step 21 · Container-isolated runtime sandbox (L-9)
+- **Container mode:** with `LEXCOMPILER_SANDBOX_CONTAINER=docker` (or `podman`), both sandbox runners execute inside `LEXCOMPILER_SANDBOX_IMAGE` (`Dockerfile.sandbox`: Node 22 with Python and the real sandbox frameworks, running as `nobody`). The Python runner (FastAPI / Pydantic / fakeredis) and the TypeScript runner (still under Node's permission model) both run there.
+- **Restrictions:** the container gets:
+  - `--network none` and `--read-only`;
+  - a read-only mount of the scratch copy at `/work`;
+  - `--cap-drop ALL` and `--security-opt no-new-privileges`;
+  - pid, memory and CPU limits, and uid 65534;
+  - optionally gVisor (`LEXCOMPILER_SANDBOX_OCI_RUNTIME=runsc`).
+- **Reporting:** the report's `isolation` field states where the code ran.
+- **Tests:** `server/container.test.ts` checks the flags, and runs the full sandbox through a fake container engine that records the invocation and maps `/work`, so the wiring is exercised end to end.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -302,7 +313,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | Run `ollama serve` and pull the models; the LLM fallback, embeddings, and multi-model pipeline then use them (`available: true`). |
 | L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Implemented and tested against a mocked API (Step 7). Remaining: set `LEXCOMPILER_GITHUB_TOKEN` / `LEXCOMPILER_GITHUB_REPO`, open one real PR end to end, and optionally persist the returned PR number. |
 | L-8 | **Hardware-backed signing (C1)** | No cloud KMS account or TSA reachable here | Implemented (Step 18) and tested against fakes. Remaining: create a KMS key (GCP `EC_SIGN_ED25519` with HSM protection, or AWS `ECC_NIST_P256` SIGN_VERIFY), set `LEXCOMPILER_SIGNER` and the key id, set `LEXCOMPILER_TSA_URL` (e.g. `https://freetsa.org/tsr`), then issue and verify one certificate. |
-| L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | TypeScript now runs for real under Node's permission model, and Python under rlimits (Steps 1, 7). Remaining: run both in an unprivileged container (or gVisor/nsjail/Firecracker) with no network access. |
+| L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | Implemented (Step 21) and tested with a fake engine. Remaining: run `docker build -f Dockerfile.sandbox -t lexcompiler-sandbox:1 .`, set `LEXCOMPILER_SANDBOX_CONTAINER=docker` (plus `LEXCOMPILER_SANDBOX_OCI_RUNTIME=runsc` if gVisor is installed), and run `npm run verify:realworld`; `isolation` must read `container`. |
 | L-10 | **Real PostgreSQL execution (X2)** | — | ✅ Done (Step 12). Optional local check: run `verify:realworld` with `LEXCOMPILER_POSTGRES_URL` and `LEXCOMPILER_REDIS_URL` pointing at real servers. |
 | L-11 | **Tree-sitter queries (L3)** | — | ✅ Done (Steps 9, 14): Python, TypeScript and SQL grammars. |
 | L-12 | **External MCP servers** | The external services are not available here | Client implemented and tested (Step 20). Remaining: copy `mcp-servers.example.json` to `mcp-servers.json`, start the services (PostgreSQL, Neo4j, n8n; uvx/npx for the stdio servers; a GitHub token), and check that `/api/mcp/servers` lists each as `ONLINE`. |
