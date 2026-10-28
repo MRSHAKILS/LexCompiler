@@ -15,6 +15,19 @@ export type RuleCategory =
   | 'AI_HUMAN_IN_THE_LOOP'
   | 'CROSS_BORDER_TRANSFER';
 
+export type DeonticExtractionMethod =
+  | 'DETERMINISTIC_PARSER'
+  | 'LLM_JSON_FALLBACK'
+  | 'DETERMINISTIC_DEFAULT';
+
+export interface DeonticExtractionProvenance {
+  method: DeonticExtractionMethod;
+  evidence: string[];
+  llmModel?: string;
+  llmLatencyMs?: number;
+  llmRejectedReason?: string;
+}
+
 export interface DeonticExtraction {
   modality: DeonticModality; // O (Obligation), F (Prohibition), P (Permission)
   deonticOperatorSymbol: 'O(φ)' | 'F(φ)' | 'P(φ)';
@@ -33,8 +46,11 @@ export interface DeonticExtraction {
     minAiConfidenceThreshold?: number;
     requireHumanOversightGate?: boolean;
     allowedDataRegions?: string[];
+    prohibitedDataRegions?: string[];
     requireImmutableAuditLog?: boolean;
+    requireEncryptionAtRest?: boolean;
   };
+  extractionProvenance?: DeonticExtractionProvenance;
 }
 
 export interface CompiledPolicyArtifacts {
@@ -81,8 +97,19 @@ export interface SQLColumnNode {
     table: string;
     column: string;
     onDeleteCascade: boolean;
+    implicit?: boolean;
   };
+  piiInference?: 'ANNOTATION' | 'NAME_PATTERN' | 'NONE';
   line: number;
+}
+
+export interface SQLDependentForeignKey {
+  childTable: string;
+  childColumn: string;
+  filePath: string;
+  line: number;
+  onDeleteCascade: boolean;
+  implicit: boolean;
 }
 
 export interface SQLTableSchema {
@@ -98,6 +125,42 @@ export interface SQLTableSchema {
   encryptedColumnsCount: number;
   unencryptedPiiColumns: string[];
   columns: SQLColumnNode[];
+  dependentForeignKeys?: SQLDependentForeignKey[];
+}
+
+export type SourceEditAnchorRole =
+  | 'RETENTION_TTL_LITERAL'
+  | 'RETENTION_ANNOTATION_LITERAL'
+  | 'TENANT_KMS_FLAG'
+  | 'CIPHER_LABEL'
+  | 'SHARED_KEY_ENCRYPT_CALL'
+  | 'PII_LOG_ARGUMENT'
+  | 'AI_CONFIDENCE_THRESHOLD'
+  | 'HUMAN_OVERSIGHT_FLAG'
+  | 'AUDIT_LOG_FLAG'
+  | 'EGRESS_REGION_LITERAL'
+  | 'SOVEREIGN_BOUNDARY_FLAG'
+  | 'SQL_COLUMN_INSERTION_POINT'
+  | 'SQL_COLUMN_ENCRYPTION_ANNOTATION'
+  | 'SQL_FOREIGN_KEY_ON_DELETE';
+
+/**
+ * Exact source span of a value the remediation synthesizer may rewrite.
+ * Lines are 1-based; columns are 0-based UTF-16 offsets into the line.
+ */
+export interface SourceEditAnchor {
+  role: SourceEditAnchorRole;
+  symbol: string;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+  sourceText: string;
+  numericValue?: number;
+  booleanValue?: boolean;
+  stringValue?: string;
+  hoursPerUnit?: number;
+  context?: Record<string, string>;
 }
 
 export interface ASTFindingNode {
@@ -110,7 +173,9 @@ export interface ASTFindingNode {
   astNodeKind: string;
   constructType:
     | 'FASTAPI_ENDPOINT'
+    | 'PII_PROCESSING_FUNCTION'
     | 'REDIS_CACHE_WORKER'
+    | 'DATA_RETENTION_POLICY'
     | 'POSTGRES_DDL_TABLE'
     | 'LOGGER_CALL'
     | 'LLM_INFERENCE_CALL'
@@ -121,6 +186,7 @@ export interface ASTFindingNode {
   metadata: {
     usesTenantIsolatedKms?: boolean;
     encryptionCipher?: string;
+    encryptsPii?: boolean;
     retentionTtlHours?: number | null;
     logsPlaintextPii?: boolean;
     leakedFields?: string[];
@@ -128,8 +194,11 @@ export interface ASTFindingNode {
     aiConfidenceThreshold?: number | null;
     writesAuditLog?: boolean;
     egressRegion?: string;
+    sovereignGuardEnabled?: boolean;
     hasCascadeDelete?: boolean;
+    containsPii?: boolean;
   };
+  editAnchors?: SourceEditAnchor[];
 }
 
 export interface ArchitectureGraphNode {
@@ -184,6 +253,34 @@ export interface Z3FormalProofStep {
   justification: string;
 }
 
+export type Z3RepairAction =
+  | 'SET_RETENTION_BOUND'
+  | 'ADD_RETENTION_COLUMN'
+  | 'ADD_TENANT_KMS_COLUMN'
+  | 'ENABLE_TENANT_KMS'
+  | 'REDACT_LOG_ARGUMENTS'
+  | 'RAISE_CONFIDENCE_GATE'
+  | 'ENABLE_HUMAN_OVERSIGHT'
+  | 'ENABLE_AUDIT_LOG'
+  | 'PIN_EGRESS_REGION'
+  | 'ENABLE_SOVEREIGN_GUARD'
+  | 'ENCRYPT_COLUMN'
+  | 'CASCADE_FOREIGN_KEY';
+
+/** A violated code fact from the Z3 unsat core, with the minimal-change value Z3 Optimize found for it. */
+export interface Z3RepairTarget {
+  factLabel: string;
+  z3Variable: string;
+  repairAction: Z3RepairAction;
+  findingId: string;
+  nodeId: string;
+  filePath: string;
+  language: 'python' | 'typescript' | 'sql';
+  anchorSymbol?: string;
+  currentValue: number | boolean | string | null;
+  requiredValue: number | boolean | string;
+}
+
 export interface ClauseVerificationProof {
   clauseId: string;
   citation: string;
@@ -196,6 +293,9 @@ export interface ClauseVerificationProof {
   z3SolveTimeMs: number;
   smtLib2Executed: string;
   unsatCoreAssertions: string[];
+  unsatCoreIterations?: string[][];
+  z3ModelAssignments?: Record<string, string | number | boolean>;
+  repairTargets?: Z3RepairTarget[];
   counterexampleWitness: Record<string, string | number | boolean>;
   formalProofSteps: Z3FormalProofStep[];
   opaRegoTriggeredDenials: string[];
@@ -252,8 +352,10 @@ export interface RemediationPullRequest {
     title: string;
   }>;
   prePatchZ3Status: 'UNSAT_VIOLATION';
-  postPatchZ3Status: 'SAT_COMPLIANT';
+  postPatchZ3Status: 'SAT_COMPLIANT' | 'UNSAT_VIOLATION';
   postPatchVerifyTimeMs: number;
+  cegisIterations?: number;
+  unresolvedClauseIds?: string[];
   cryptographicAttestationHash: string;
   executiveSummary: string;
   filePatches: FilePatchDiff[];
