@@ -13,7 +13,12 @@ export type RuleCategory =
   | 'PII_LOGGING_BAN'
   | 'RIGHT_TO_ERASURE_CASCADE'
   | 'AI_HUMAN_IN_THE_LOOP'
-  | 'CROSS_BORDER_TRANSFER';
+  | 'CROSS_BORDER_TRANSFER'
+  | 'CONSENT_LAWFUL_BASIS'
+  | 'BREACH_NOTIFICATION'
+  | 'DPIA_REQUIRED'
+  | 'DATA_MINIMISATION'
+  | 'PURPOSE_LIMITATION';
 
 export type DeonticExtractionMethod =
   | 'DETERMINISTIC_PARSER'
@@ -51,6 +56,11 @@ export interface DeonticExtraction {
     prohibitedDataRegions?: string[];
     requireImmutableAuditLog?: boolean;
     requireEncryptionAtRest?: boolean;
+    requireConsentCheck?: boolean;
+    maxBreachNotificationHours?: number;
+    requireDpia?: boolean;
+    forbidUnusedPiiFields?: boolean;
+    allowedProcessingPurposes?: string[];
   };
   extractionProvenance?: DeonticExtractionProvenance;
 }
@@ -149,7 +159,11 @@ export type SourceEditAnchorRole =
   | 'SOVEREIGN_BOUNDARY_FLAG'
   | 'SQL_COLUMN_INSERTION_POINT'
   | 'SQL_COLUMN_ENCRYPTION_ANNOTATION'
-  | 'SQL_FOREIGN_KEY_ON_DELETE';
+  | 'SQL_FOREIGN_KEY_ON_DELETE'
+  | 'PII_MODEL_FIELD'
+  | 'CONSENT_CHECK_INSERTION_POINT'
+  | 'PROCESSING_PURPOSE_LITERAL'
+  | 'BREACH_DEADLINE_LITERAL';
 
 /**
  * Exact source span of a value the remediation synthesizer may rewrite.
@@ -187,7 +201,11 @@ export interface ASTFindingNode {
     | 'LOGGER_CALL'
     | 'LLM_INFERENCE_CALL'
     | 'CROSS_BORDER_EGRESS'
-    | 'ERASURE_HANDLER';
+    | 'ERASURE_HANDLER'
+    | 'PII_ENTRYPOINT'
+    | 'PII_COLLECTION_MODEL'
+    | 'BREACH_NOTIFICATION_POLICY'
+    | 'DPIA_RECORD';
   functionName: string;
   codeSnippet: string;
   metadata: {
@@ -208,6 +226,18 @@ export interface ASTFindingNode {
     retentionSource?: string;
     /** True when the TTL unit was not stated in the identifier and hours were assumed. */
     retentionUnitAssumed?: boolean;
+    /** PII_ENTRYPOINT: a consent / lawful-basis check is called before processing. */
+    hasConsentCheck?: boolean;
+    /** PII_ENTRYPOINT: processing purpose declared by the module (PROCESSING_PURPOSE) or the handler. */
+    declaredPurpose?: string | null;
+    /** PII_COLLECTION_MODEL: PII fields the model collects, and those never read by the module. */
+    collectedPiiFields?: string[];
+    unusedPiiFields?: string[];
+    /** BREACH_NOTIFICATION_POLICY: configured supervisory-authority notification deadline. */
+    breachNotificationHours?: number | null;
+    /** DPIA_RECORD: reference to the impact assessment, and whether that file exists in the repository. */
+    dpiaReference?: string | null;
+    dpiaRecordExists?: boolean;
   };
   editAnchors?: SourceEditAnchor[];
 }
@@ -276,7 +306,12 @@ export type Z3RepairAction =
   | 'PIN_EGRESS_REGION'
   | 'ENABLE_SOVEREIGN_GUARD'
   | 'ENCRYPT_COLUMN'
-  | 'CASCADE_FOREIGN_KEY';
+  | 'CASCADE_FOREIGN_KEY'
+  | 'INSERT_CONSENT_CHECK'
+  | 'SET_BREACH_DEADLINE'
+  | 'ADD_BREACH_POLICY'
+  | 'REMOVE_UNUSED_PII_FIELD'
+  | 'PIN_PROCESSING_PURPOSE';
 
 /** A violated code fact from the Z3 unsat core, with the minimal-change value Z3 Optimize found for it. */
 export interface Z3RepairTarget {

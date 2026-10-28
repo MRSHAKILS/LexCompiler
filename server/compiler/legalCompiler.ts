@@ -24,6 +24,11 @@ function regoBounds(b: ExtractedDeonticBounds): RegoBounds {
     requireImmutableAuditLog: true,
     requireCascadeErasure: b.requireCascadeErasure,
     allowedDataRegions: b.allowedDataRegions,
+    requireConsentCheck: b.requireConsentCheck,
+    maxBreachNotificationHours: b.maxBreachNotificationHours,
+    requireDpia: b.requireDpia,
+    forbidUnusedPiiFields: b.forbidUnusedPiiFields,
+    allowedProcessingPurposes: b.allowedProcessingPurposes,
   };
 }
 
@@ -59,6 +64,11 @@ export interface ExtractedDeonticBounds {
   requireHumanOversightGate: boolean;
   allowedDataRegions: string[];
   requireEncryptionAtRest: boolean;
+  requireConsentCheck: boolean;
+  maxBreachNotificationHours: number;
+  requireDpia: boolean;
+  forbidUnusedPiiFields: boolean;
+  allowedProcessingPurposes: string[];
   provenance: DeonticExtractionProvenance;
 }
 
@@ -156,6 +166,12 @@ export function inferRuleCategoryFromProse(
   fallback: RuleCategory = 'RETENTION_AND_TENANT_KMS'
 ): RuleCategory {
   const { lower } = normalizeLegalProse(rawText);
+  // Governance categories first: their trigger phrases are specific.
+  if (/personal data breach|breach notification|notify the supervisory authority|article 33\b/.test(lower)) return 'BREACH_NOTIFICATION';
+  if (/impact assessment|\bdpia\b|article 35\b/.test(lower)) return 'DPIA_REQUIRED';
+  if (/data minimi[sz]ation|adequate, relevant and limited|article 5\s*\(1\)\s*\(c\)/.test(lower)) return 'DATA_MINIMISATION';
+  if (/purpose limitation|specified, explicit and legitimate purposes?|article 5\s*\(1\)\s*\(b\)|only for the purposes? of/.test(lower)) return 'PURPOSE_LIMITATION';
+  if (/\bconsent\b|lawful basis|legal basis|article 6\b|article 7\b/.test(lower)) return 'CONSENT_LAWFUL_BASIS';
   if (
     /prohibit|shall not log|never log|plaintext.*log|unredacted|pii.?log|লগ.*নিষিদ্ধ/.test(lower)
   ) {
@@ -203,6 +219,16 @@ const TENANT_KMS_RE =
 const LOG_BAN_RE =
   /prohibit|shall not log|never log|forbid|unredacted|plaintext.*log|mask|redact|লগ.*নিষিদ্ধ|লগিং.*নিষিদ্ধ|অরক্ষিত.*লগ|প্রকাশ করা যাবে না|রিড্যাক্ট/i;
 const LOG_PERMITTED_RE = /(logging|log|logged)[^.;]{0,60}\b(is|are)\s+(permitted|allowed)|\bmay\s+(be\s+)?log/i;
+
+/** Permitted purposes: quoted names, or the list after "only for (the purposes of)". */
+export function extractPurposes(text: string): string[] {
+  const slug = (p: string) => p.trim().toLowerCase().replace(/^(the|a|an)\s+/, '').replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  const quoted = [...text.matchAll(/["“']([A-Za-z][A-Za-z0-9 _-]{2,40})["”']/g)].map((m) => slug(m[1]));
+  if (quoted.length) return [...new Set(quoted)];
+  const m = /only for (?:the )?(?:purposes? of )?([^.;]+)/i.exec(text);
+  if (!m) return [];
+  return [...new Set(m[1].split(/,|\band\b|\bor\b/).map(slug).filter((p) => p.length > 2))];
+}
 
 export function extractDeonticBoundsFromProse(
   rawText: string,
@@ -286,11 +312,23 @@ export function extractDeonticBoundsFromProse(
     }
   }
 
+  const consentRe = /\bconsent\b|lawful basis|legal basis/i;
+  const requireConsentCheck = category === 'CONSENT_LAWFUL_BASIS' && !(consentRe.test(lower) && phraseIsNegated(lower, consentRe));
+  if (category === 'CONSENT_LAWFUL_BASIS' && !requireConsentCheck) reviewNotes.push('The consent requirement appears negated; no consent check was required.');
+  const maxBreachNotificationHours = category === 'BREACH_NOTIFICATION' && temporal.hit ? temporal.hours : 72;
+  const requireDpia = category === 'DPIA_REQUIRED' || /impact assessment|\bdpia\b/i.test(lower);
+  const forbidUnusedPiiFields = category === 'DATA_MINIMISATION';
+  const allowedProcessingPurposes = category === 'PURPOSE_LIMITATION' ? extractPurposes(normalized) : [];
+  if (category === 'PURPOSE_LIMITATION' && allowedProcessingPurposes.length === 0) {
+    reviewNotes.push('No list of permitted purposes was found; only a declared processing purpose is required.');
+  }
+
   const needsNumeric =
-    category === 'RETENTION_AND_TENANT_KMS' || category === 'AI_HUMAN_IN_THE_LOOP';
+    category === 'RETENTION_AND_TENANT_KMS' || category === 'AI_HUMAN_IN_THE_LOOP' || category === 'BREACH_NOTIFICATION';
   const missingNumeric =
     (category === 'RETENTION_AND_TENANT_KMS' && !temporal.hit) ||
-    (category === 'AI_HUMAN_IN_THE_LOOP' && !confidenceHit);
+    (category === 'AI_HUMAN_IN_THE_LOOP' && !confidenceHit) ||
+    (category === 'BREACH_NOTIFICATION' && !temporal.hit);
 
   return {
     maxRetentionHours,
@@ -306,6 +344,11 @@ export function extractDeonticBoundsFromProse(
     requireHumanOversightGate,
     allowedDataRegions,
     requireEncryptionAtRest,
+    requireConsentCheck,
+    maxBreachNotificationHours,
+    requireDpia,
+    forbidUnusedPiiFields,
+    allowedProcessingPurposes,
     provenance: {
       method: needsNumeric && missingNumeric ? 'DETERMINISTIC_DEFAULT' : 'DETERMINISTIC_PARSER',
       evidence: [...temporal.evidence, ...(confidenceHit ? [`confidence:${minAiConfidenceThreshold}`] : [])],
@@ -681,6 +724,9 @@ function compileFromBounds(
     return { deontic, compiled };
   }
 
+  const governance = compileGovernanceCategory(bounds, category, clauseId, citation);
+  if (governance) return governance;
+
   // CROSS_BORDER_TRANSFER (explicit branch; never a silent fallthrough for other categories)
   const allowsUsEast = allowedDataRegions.includes('us-east-1');
   const deontic: DeonticExtraction = {
@@ -721,6 +767,100 @@ function compileFromBounds(
   };
 
   return { deontic, compiled };
+}
+
+/** Deontic text, FOL and SMT-LIB2 summary for the GDPR governance categories. */
+function compileGovernanceCategory(
+  bounds: ExtractedDeonticBounds,
+  category: RuleCategory,
+  clauseId: string,
+  citation: string
+): { deontic: DeonticExtraction; compiled: CompiledPolicyArtifacts } | null {
+  const b = bounds;
+  const header = `; LexCompiler SMT-LIB2 Synthesis for ${citation} (${clauseId})
+(set-logic QF_LIA)
+(set-option :produce-models true)
+(set-option :produce-unsat-cores true)
+`;
+  const spec: Record<string, { modality: DeonticExtraction['modality']; op: DeonticExtraction['deonticOperatorSymbol']; actor: string; action: string; scope: string[]; condition: string; formula: string; fol: string; smt: string; params: DeonticExtraction['extractedParameters'] }> = {
+    CONSENT_LAWFUL_BASIS: {
+      modality: 'OBLIGATION', op: 'O(φ)', actor: 'Data Controller / Request Handlers',
+      action: 'Verify consent or another lawful basis before processing personal data (GDPR Art. 6–7)',
+      scope: ['pii_entrypoints'], condition: '∀ h ∈ PIIEntryPoints : ConsentChecked(h)',
+      formula: 'O(∀h ∈ PIIEntryPoints : ConsentChecked(h))', fol: '∀h : ProcessesPII(h) → ConsentChecked(h)',
+      smt: `(declare-const statutory_requires_consent Bool)
+(declare-const handler_checks_consent Bool)
+(assert (! (= statutory_requires_consent ${b.requireConsentCheck}) :named law_gdpr_art6_lawful_basis))
+(assert (! (=> statutory_requires_consent handler_checks_consent) :named inv_consent_checked))`,
+      params: { requireConsentCheck: b.requireConsentCheck },
+    },
+    BREACH_NOTIFICATION: {
+      modality: 'OBLIGATION', op: 'O(φ)', actor: 'Data Controller / Incident Response',
+      action: `Notify the supervisory authority of a personal-data breach within ${b.maxBreachNotificationHours} hours (GDPR Art. 33)`,
+      scope: ['breach_notification_policy'], condition: `Configured(BreachDeadline) ∧ BreachDeadline ≤ ${b.maxBreachNotificationHours}h`,
+      formula: `O(Notify(SA) within ${b.maxBreachNotificationHours}h)`, fol: '∃p ∈ Policies : BreachDeadline(p) ∧ ∀p : Hours(p) ≤ Max',
+      smt: `(declare-const law_max_breach_notification_minutes Int)
+(declare-const configured_breach_notification_minutes Int)
+(assert (! (= law_max_breach_notification_minutes ${Math.round(b.maxBreachNotificationHours * 60)}) :named law_gdpr_art33_deadline))
+(assert (! (<= configured_breach_notification_minutes law_max_breach_notification_minutes) :named inv_breach_deadline_within_limit))`,
+      params: { maxBreachNotificationHours: b.maxBreachNotificationHours },
+    },
+    DPIA_REQUIRED: {
+      modality: 'OBLIGATION', op: 'O(φ)', actor: 'Data Controller / High-Risk Processing',
+      action: 'Carry out a data protection impact assessment before high-risk processing (GDPR Art. 35)',
+      scope: ['ai_decision_nodes', 'dpia_records'], condition: '∀ n ∈ HighRiskNodes : ∃ d ∈ DPIARecords : Exists(d)',
+      formula: 'O(HighRisk(n) → DPIA)', fol: '∀n : HighRisk(n) → ∃d : DPIA(d) ∧ OnRecord(d)',
+      smt: `(declare-const statutory_requires_dpia Bool)
+(declare-const dpia_on_record Bool)
+(assert (! (= statutory_requires_dpia ${b.requireDpia}) :named law_gdpr_art35_dpia))
+(assert (! (=> statutory_requires_dpia dpia_on_record) :named inv_dpia_on_record))`,
+      params: { requireDpia: b.requireDpia },
+    },
+    DATA_MINIMISATION: {
+      modality: 'PROHIBITION', op: 'F(φ)', actor: 'Data Controller / Intake Models',
+      action: 'Collect only personal data that is used (GDPR Art. 5(1)(c))',
+      scope: ['pii_collection_models'], condition: '∀ m ∈ Models : UnusedPIIFields(m) = ∅',
+      formula: 'F(∃m, f : Collects(m, f) ∧ ¬Used(f))', fol: '∀m ∀f : Collects(m, f) ∧ PII(f) → Used(f)',
+      smt: `(declare-const statutory_forbids_unused_pii Bool)
+(declare-const model_unused_pii_fields Int)
+(assert (! (= statutory_forbids_unused_pii ${b.forbidUnusedPiiFields}) :named law_gdpr_art5_1c_minimisation))
+(assert (! (=> statutory_forbids_unused_pii (= model_unused_pii_fields 0)) :named inv_no_unused_pii_fields))`,
+      params: { forbidUnusedPiiFields: b.forbidUnusedPiiFields },
+    },
+    PURPOSE_LIMITATION: {
+      modality: 'OBLIGATION', op: 'O(φ)', actor: 'Data Controller / Request Handlers',
+      action: `Process personal data only for declared, permitted purposes${b.allowedProcessingPurposes.length ? ` (${b.allowedProcessingPurposes.join(', ')})` : ''} (GDPR Art. 5(1)(b))`,
+      scope: ['pii_entrypoints'], condition: `∀ h ∈ PIIEntryPoints : Purpose(h) ∈ {${b.allowedProcessingPurposes.join(', ') || 'declared'}}`,
+      formula: 'O(∀h : Purpose(h) ∈ Permitted)', fol: '∀h : ProcessesPII(h) → Declared(Purpose(h)) ∧ Permitted(Purpose(h))',
+      smt: `(declare-const handler_declares_purpose Bool)
+(declare-const handler_purpose_permitted Bool)
+(assert (! (= handler_declares_purpose true) :named inv_purpose_declared))
+(assert (! (=> handler_declares_purpose handler_purpose_permitted) :named inv_purpose_permitted))`,
+      params: { allowedProcessingPurposes: b.allowedProcessingPurposes },
+    },
+  };
+  const g = spec[category];
+  if (!g) return null;
+  return {
+    deontic: {
+      modality: g.modality,
+      deonticOperatorSymbol: g.op,
+      actor: g.actor,
+      regulatedAction: g.action,
+      targetDataScope: g.scope,
+      normativeCondition: g.condition,
+      formalPredicateSummary: g.formula,
+      extractedParameters: g.params,
+      extractionProvenance: b.provenance,
+    },
+    compiled: {
+      deonticFormula: g.formula,
+      firstOrderLogic: g.fol,
+      smtLib2Snippet: `${header}\n${g.smt}`,
+      opaRegoRule: regoPolicyFor(category, regoBounds(b), citation),
+      astPatternQuery: treeSitterQueriesFor(category),
+    },
+  };
 }
 
 export function compileLegalProseToFormalPolicy(

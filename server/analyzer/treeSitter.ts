@@ -85,6 +85,27 @@ export function treeSitterQueriesFor(category: RuleCategory): string {
   value: (string) @value (#match? @value "(us|eu|ap|ca|sa|me|af)-[a-z]+-[0-9]"))\n;; @language python\n(assignment
   left: (identifier) @name
   right: (string) @value (#match? @value "(us|eu|ap|ca|sa|me|af)-[a-z]+-[0-9]"))`;
+    case 'CONSENT_LAWFUL_BASIS':
+      return `;; @language python\n(function_definition
+  name: (identifier) @handler
+  parameters: (parameters (typed_parameter (identifier) @param type: (type) @model)))
+(call
+  function: [(identifier) (attribute)] @consent_call (#match? @consent_call "(consent|lawful_basis|legal_basis)"))`;
+    case 'BREACH_NOTIFICATION':
+      return `;; @language python\n${pyTtl.replace(/TTL\|ttl\|RETENTION\|retention\|EXPIR\|expir\|PURGE\|purge/, 'BREACH|breach')}\n;; @language typescript\n${tsConst('(BREACH|breach)')}`;
+    case 'DPIA_REQUIRED':
+      return `;; @language python\n(assignment
+  left: (identifier) @name (#match? @name "(DPIA|dpia)")
+  right: (string) @value)\n;; @language typescript\n${tsConst('(DPIA|dpia)')}`;
+    case 'DATA_MINIMISATION':
+      return `;; @language python\n(class_definition
+  name: (identifier) @model
+  superclasses: (argument_list (identifier) @base (#eq? @base "BaseModel"))
+  body: (block (expression_statement (assignment left: (identifier) @field type: (type) @type))))`;
+    case 'PURPOSE_LIMITATION':
+      return `;; @language python\n(assignment
+  left: (identifier) @name (#match? @name "(PURPOSE|purpose)")
+  right: (string) @value)\n;; @language typescript\n${tsConst('(PURPOSE|purpose)')}`;
     case 'ENCRYPTION_AT_REST':
     case 'RIGHT_TO_ERASURE_CASCADE':
       return `;; @language sql\n${category === 'ENCRYPTION_AT_REST' ? sqlPiiColumns : sqlForeignKeys}\n;; @language python\n${embeddedDdl}\n${pyKms}\n;; @language typescript\n((template_string) @ddl (#match? @ddl "CREATE TABLE"))`;

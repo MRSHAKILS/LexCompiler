@@ -38,6 +38,17 @@ def redact_pii(value: object) -> str:
  * Inserted when a patch introduces encrypt_with_tenant_kms(...). It never returns
  * plaintext: without a configured KMS client it fails closed.
  */
+export const REQUIRE_CONSENT_HELPER = `# Set to an object exposing has_consent(subject) -> bool (your consent / lawful-basis registry).
+CONSENT_REGISTRY = None
+
+
+def require_consent(subject):
+    """Fails closed: processing stops unless the registry records consent or another lawful basis."""
+    if CONSENT_REGISTRY is None:
+        raise PermissionError("CONSENT_REGISTRY is not configured; refusing to process personal data")
+    if not CONSENT_REGISTRY.has_consent(subject):
+        raise PermissionError("No consent or other lawful basis is recorded for this data subject")`;
+
 export const TENANT_KMS_HELPER = `# Set to a KMS client exposing encrypt(tenant_id: str, plaintext: bytes) -> bytes (e.g. an AWS KMS wrapper).
 TENANT_KMS_CLIENT = None
 
@@ -131,6 +142,9 @@ function mergeTargets(targets: Z3RepairTarget[]): Z3RepairTarget[] {
     if ((t.repairAction === 'SET_RETENTION_BOUND' || t.repairAction === 'ADD_RETENTION_COLUMN') && Number(t.requiredValue) < Number(prev.requiredValue)) {
       byKey.set(key, t);
     }
+    if (t.repairAction === 'SET_BREACH_DEADLINE' && Number(t.requiredValue) < Number(prev.requiredValue)) {
+      byKey.set(key, t);
+    }
     if (t.repairAction === 'RAISE_CONFIDENCE_GATE' && Number(t.requiredValue) > Number(prev.requiredValue)) {
       byKey.set(key, t);
     }
@@ -149,6 +163,7 @@ function editsForTargets(
     (finding.editAnchors || []).filter((a) => a.role === role && spanMatches(content, a));
   let needsKmsHelper = false;
   let needsRedactHelper = false;
+  let needsConsentHelper = false;
 
   for (const t of targets) {
     switch (t.repairAction) {
@@ -250,6 +265,43 @@ function editsForTargets(
         }
         break;
       }
+      case 'INSERT_CONSENT_CHECK': {
+        for (const a of anchors('CONSENT_CHECK_INSERTION_POINT')) {
+          const indent = a.context?.indent || '    ';
+          edits.push(replaceAnchor(a, `${indent}require_consent(${a.context?.subject || 'None'})\n`, `${a.symbol}: require_consent(${a.context?.subject})`));
+          needsConsentHelper = true;
+        }
+        break;
+      }
+      case 'SET_BREACH_DEADLINE': {
+        const hours = Number(t.requiredValue);
+        for (const a of anchors('BREACH_DEADLINE_LITERAL')) {
+          const value = formatNumber(hours / (a.hoursPerUnit || 1));
+          edits.push(replaceAnchor(a, value, `${a.symbol}: ${a.sourceText} → ${value} (${hours}h)`));
+        }
+        break;
+      }
+      case 'ADD_BREACH_POLICY': {
+        if (finding.language === 'python' && !/BREACH_NOTIFICATION_DEADLINE_HOURS\s*=/.test(content)) {
+          const h = formatNumber(Number(t.requiredValue));
+          edits.push(pythonHelperEdit(content, `# GDPR Art. 33(1): notify the supervisory authority of a personal-data breach within this window.\nBREACH_NOTIFICATION_DEADLINE_HOURS = ${h}`, `add BREACH_NOTIFICATION_DEADLINE_HOURS = ${h}`));
+        }
+        break;
+      }
+      case 'REMOVE_UNUSED_PII_FIELD': {
+        for (const a of anchors('PII_MODEL_FIELD')) edits.push(replaceAnchor(a, '', `remove unused PII field ${a.symbol}`));
+        break;
+      }
+      case 'PIN_PROCESSING_PURPOSE': {
+        const purpose = String(t.requiredValue);
+        const literal = anchors('PROCESSING_PURPOSE_LITERAL')[0];
+        if (literal) {
+          if (literal.stringValue !== purpose) edits.push(replaceAnchor(literal, quoteLike(literal.sourceText, purpose), `${literal.symbol} → "${purpose}"`));
+        } else if (finding.language === 'python' && !/^PROCESSING_PURPOSE\s*=/m.test(content)) {
+          edits.push(pythonHelperEdit(content, `# GDPR Art. 5(1)(b): the purpose this module processes personal data for.\nPROCESSING_PURPOSE = "${purpose}"`, `declare PROCESSING_PURPOSE = "${purpose}"`));
+        }
+        break;
+      }
       default:
         break;
     }
@@ -257,6 +309,9 @@ function editsForTargets(
 
   if (needsKmsHelper && !/def encrypt_with_tenant_kms\(/.test(content)) {
     edits.push(pythonHelperEdit(content, TENANT_KMS_HELPER, 'add fail-closed encrypt_with_tenant_kms helper'));
+  }
+  if (needsConsentHelper && !/def require_consent\(/.test(content)) {
+    edits.push(pythonHelperEdit(content, REQUIRE_CONSENT_HELPER, 'add fail-closed require_consent helper'));
   }
   if (needsRedactHelper && !/def redact_pii\(/.test(content)) {
     edits.push(pythonHelperEdit(content, REDACT_PII_HELPER, 'add keyed redact_pii helper'));
@@ -288,6 +343,10 @@ function titleFor(targets: Z3RepairTarget[]): string {
   const regions = [...new Set(targets.filter((t) => t.repairAction === 'PIN_EGRESS_REGION').map((t) => String(t.requiredValue)))];
   if (regions.length) parts.push(`${regions.join('/')} data residency`);
   if (targets.some((t) => t.repairAction === 'CASCADE_FOREIGN_KEY')) parts.push('erasure cascade');
+  if (targets.some((t) => t.repairAction === 'INSERT_CONSENT_CHECK')) parts.push('consent checks');
+  if (targets.some((t) => t.repairAction === 'SET_BREACH_DEADLINE' || t.repairAction === 'ADD_BREACH_POLICY')) parts.push('breach-notification deadline');
+  if (targets.some((t) => t.repairAction === 'REMOVE_UNUSED_PII_FIELD')) parts.push('data minimisation');
+  if (targets.some((t) => t.repairAction === 'PIN_PROCESSING_PURPOSE')) parts.push('processing purpose');
   return `fix(compliance): enforce ${parts.join(', ') || 'statutory invariants'}`;
 }
 
@@ -339,7 +398,11 @@ export async function synthesizeRemediationPullRequest(
         if (finding) edits.push(...editsForTargets(file.content, finding, ts));
       }
       if (edits.length === 0) return file;
-      const { content, applied } = applyEdits(file.content, edits);
+      // Findings in the same file can request the same helper insertion; apply it once.
+      const unique = edits.filter(
+        (e, i) => edits.findIndex((x) => x.line === e.line && x.column === e.column && x.endLine === e.endLine && x.endColumn === e.endColumn && x.text === e.text) === i
+      );
+      const { content, applied } = applyEdits(file.content, unique);
       if (content === file.content) return file;
       changed = true;
       allTargets.push(...fileTargets);

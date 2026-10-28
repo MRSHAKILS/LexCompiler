@@ -10,6 +10,7 @@ import type {
   TargetRepoFile,
 } from '../../shared/types.js';
 import { resolvePython } from '../util/python.js';
+import { collectGovernanceFindings } from './governanceFacts.js';
 
 /** Identifier is PII when its last `_`-separated token(s) name a personal-data field. */
 const PII_IDENTIFIER =
@@ -733,7 +734,7 @@ interface PySpan {
   text: string;
 }
 
-interface ParsedPythonAst {
+export interface ParsedPythonAst {
   syntax_error?: string;
   node_count: number;
   assignments: Array<{
@@ -753,8 +754,13 @@ interface ParsedPythonAst {
     end_lineno: number;
     args: string[];
     decorators: string[];
+    calls?: string[];
+    annotations?: Record<string, string>;
+    body_line?: number;
+    body_col?: number;
   }>;
-  classes: Array<{ name: string; lineno: number; end_lineno: number }>;
+  classes: Array<{ name: string; lineno: number; end_lineno: number; bases?: string[]; fields?: Array<{ name: string; lineno: number; end_lineno: number }> }>;
+  attr_reads?: string[];
   sinks: Array<{
     func: string;
     lineno: number;
@@ -917,10 +923,25 @@ for node in ast.walk(tree):
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         args = [a.arg for a in node.args.args + node.args.kwonlyargs]
         decos = [dotted(d.func) if isinstance(d, ast.Call) else dotted(d) for d in node.decorator_list]
+        calls = sorted({dotted(c.func) for c in ast.walk(node) if isinstance(c, ast.Call) and dotted(c.func)})
+        annotations = {a.arg: dotted(a.annotation) for a in node.args.args + node.args.kwonlyargs if a.annotation is not None and dotted(a.annotation)}
+        body = node.body
+        first = body[1] if (len(body) > 1 and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant) and isinstance(body[0].value.value, str)) else body[0]
         functions.append({"name": node.name, "kind": type(node).__name__, "lineno": node.lineno,
-                          "end_lineno": node.end_lineno, "args": args, "decorators": decos})
+                          "end_lineno": node.end_lineno, "args": args, "decorators": decos,
+                          "calls": calls, "annotations": annotations,
+                          "body_line": first.lineno, "body_col": ccol(first.lineno, first.col_offset)})
     elif isinstance(node, ast.ClassDef):
-        classes.append({"name": node.name, "lineno": node.lineno, "end_lineno": node.end_lineno})
+        fields = []
+        for stmt in node.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                fields.append({"name": stmt.target.id, "lineno": stmt.lineno, "end_lineno": stmt.end_lineno})
+        classes.append({"name": node.name, "lineno": node.lineno, "end_lineno": node.end_lineno,
+                        "bases": [dotted(b) for b in node.bases if dotted(b)], "fields": fields})
+
+# Attribute / key reads anywhere in the module (data-minimisation: which collected fields are used).
+attr_reads = sorted({n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load)}
+                    | {n.slice.value for n in ast.walk(tree) if isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)})
 
 # --- PII taint: seeds are PII-named parameters; propagate through assignments to a fixpoint.
 tainted = set()
@@ -1026,6 +1047,7 @@ print(json.dumps({
     "assignments": assignments,
     "functions": functions,
     "classes": classes,
+    "attr_reads": attr_reads,
     "sinks": sinks,
     "encrypt_calls": encrypt_calls,
     "cache_calls": cache_calls,
@@ -1034,7 +1056,7 @@ print(json.dumps({
 
 const pythonAstCache = new Map<string, ParsedPythonAst | null>();
 
-function parsePythonAstCached(content: string): ParsedPythonAst | null {
+export function parsePythonAstCached(content: string): ParsedPythonAst | null {
   const digest = sha256Hex(content);
   if (pythonAstCache.has(digest)) return pythonAstCache.get(digest) ?? null;
   let parsed: ParsedPythonAst | null = null;
@@ -1582,6 +1604,7 @@ export function analyzeFullRepository(files: TargetRepoFile[]): {
       enrichedFiles.push(file);
     }
   }
+  astFindings.push(...collectGovernanceFindings(files, astFindings));
 
   return { sqlTables, astFindings, enrichedFiles };
 }

@@ -185,6 +185,22 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **Build:** `npm run build` copies the grammar into `dist-server`.
 - **Test:** `server/analysis.test.ts` checks the retention default (720), the PII columns, and the `patient_id → patient_records ON DELETE CASCADE` foreign key.
 
+### Step 15 · Five new rule categories (L-17)
+- **New categories:**
+  - `CONSENT_LAWFUL_BASIS` (GDPR Art. 6–7)
+  - `BREACH_NOTIFICATION` (Art. 33)
+  - `DPIA_REQUIRED` (Art. 35)
+  - `DATA_MINIMISATION` (Art. 5(1)(c))
+  - `PURPOSE_LIMITATION` (Art. 5(1)(b))
+- **End to end:** each category has category inference, bound extraction, a compiled deontic / FOL / SMT summary, a Rego v1 policy (with OPA input), a Tree-sitter query, per-instance Z3 invariants with unsat cores, and remediation:
+  - **Consent:** the Python AST now records each function's calls and annotated arguments. A handler that takes PII or a PII model must call a consent / lawful-basis check. Remediation inserts `require_consent(<subject>)` plus a fail-closed helper that raises until `CONSENT_REGISTRY` is configured.
+  - **Breach notification:** module constants such as `BREACH_NOTIFICATION_WINDOW_DAYS` are converted to hours and checked against the limit (48h is extracted from "within 48 hours"; the default is 72h). A repository that processes PII with no deadline at all is a violation. Remediation tightens the constant or adds `BREACH_NOTIFICATION_DEADLINE_HOURS`.
+  - **DPIA:** automated decision-making needs a `DPIA_REFERENCE` that points at a file in the repository. A DPIA is a document, so it is reported but never generated; the remediation stays unresolved.
+  - **Data minimisation:** fields of a Pydantic model that are PII but never read in the module (and not serialised wholesale) are violations, and remediation removes them. The fixture's `full_name` is one.
+  - **Purpose limitation:** each PII handler needs a declared `PROCESSING_PURPOSE`, and it must be one of the permitted purposes. Z3 checks this over an enumerated universe, as for regions. Remediation applies only when the law permits exactly one purpose; otherwise it needs a decision.
+- **Remediation engine:** identical edits from several findings in one file (for example the same helper) are applied once.
+- **Tests:** `server/governance.test.ts` (9 tests) covers inference, extraction, facts, the OPA input, and refute → remediate → `SAT_COMPLIANT` for four categories. It also checks the breach deadline being tightened, the fail-closed consent check, and that a DPIA is satisfied only by a referenced file that exists.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -205,7 +221,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-12 | **External MCP servers** (postgres-pgvector, neo4j-cypher, github, filesystem, duckdb, n8n) | The services aren't available here | Run and wire each server, then list them as integrated once they answer `initialize`. |
 | L-15 | **GitHub code-scanning upload** | Enabling code scanning is a repository setting | CI already produces `lexcompiler.sarif`. Enable code scanning, add `security-events: write`, and add `github/codeql-action/upload-sarif` for scans of real repositories (not the intentionally non-compliant fixture). |
 | L-16 | **Symbolic program semantics (V3)** | Needs a symbolic-execution or abstract-interpretation engine over Python/TypeScript | Today Z3 proves bounds over facts the analyzer extracts (constants, taint, sinks). Remaining: encode control flow and data flow (paths, branches, inter-procedural calls) as SMT, so properties are proven over program behaviour rather than extracted facts. |
-| L-17 | **More rule categories (L2)** — consent and lawful basis, 72-hour breach notification, DPIA, data minimisation, purpose limitation | Each needs its own extraction rules, analyzer facts, Z3 encoding, Rego policy, Tree-sitter query, and remediation | Add each category end to end, following the six existing ones, with fixture cases and regression tests. |
+| L-17 | **More rule categories (L2)** | — | ✅ Done (Step 15). Optional local check: write a real DPIA for `services/ai_credit_triage.ts` and reference it with `DPIA_REFERENCE`. |
 | L-18 | **Multi-tenant users and projects (P1)** | Needs an identity provider and a multi-user database | Replace the single API token with OIDC sign-in, per-user roles, and per-project repositories, clauses, and ledgers. |
 | L-19 | **Full verification of real repositories at scale** | No large real-world repositories to benchmark against here | Run `LEXCOMPILER_TARGET_REPO=… npm run verify:cli` on real codebases, measure precision/recall of findings, and tune the analyzer heuristics. |
 | L-13 | **EUR-Lex SPARQL ingestion** | The EUR-Lex SPARQL endpoint isn't reachable from this session | Query the CELLAR SPARQL endpoint for amendments to the tracked CELEX numbers and replace the curated excerpts with official text. |
