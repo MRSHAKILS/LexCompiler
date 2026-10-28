@@ -1,8 +1,9 @@
 # Framework adapters for the six LexCompiler agents (python -m lexcompiler_agents --help).
+# These pins resolve together: crewai 1.15 needs openai<3, so pydantic-ai-slim and
+# openai-agents stay on the last releases that accept openai 2.x.
 pydantic>=2.11,<3
-pydantic-ai-slim[openai,anthropic]==2.55.0
+pydantic-ai-slim[openai,anthropic]==2.31.1
 langgraph==1.2.10
 crewai==1.15.20
 dspy==3.3.0
-openai-agents==0.22.0
-pytest>=8
+openai-agents==0.20.0

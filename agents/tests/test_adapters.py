@@ -57,3 +57,40 @@ def test_hermes_loop_against_a_stub_ollama(stub):
         assert out.summary == "5 files scanned." and client.calls == [("scan_polyglot_repository_ast", {})]
     finally:
         server.shutdown()
+
+
+def test_openai_agents_returns_typed_output_when_the_model_skips_the_handoff(stub):
+    # Regression: a model that answers directly (no handoff to the reviewer) returned a bare string.
+    from agents import OpenAIChatCompletionsModel, set_tracing_disabled
+    from openai import AsyncOpenAI
+
+    from lexcompiler_agents import openai_agents_remediation
+
+    answer = {"summary": "Patched 5 files; post-patch Z3 is SAT_COMPLIANT.", "keyFacts": ["SAT_COMPLIANT"], "confidence": 0.9}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            body = json.dumps({
+                "id": "c1", "object": "chat.completion", "created": 0, "model": "stub",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": json.dumps(answer)}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    set_tracing_disabled(True)
+    try:
+        client = stub("lex-remediation-pr-mcp", {"synthesize_remediation_pr": {"postPatchStatus": "SAT_COMPLIANT"}})
+        llm = AsyncOpenAI(base_url=f"http://127.0.0.1:{server.server_port}/v1", api_key="stub")
+        out = openai_agents_remediation.run(client, OpenAIChatCompletionsModel(model="stub", openai_client=llm))
+        assert isinstance(out, AgentOutput) and out.keyFacts == ["SAT_COMPLIANT"]
+    finally:
+        server.shutdown()

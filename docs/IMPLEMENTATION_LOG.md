@@ -340,6 +340,19 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - `evaluationMethod`: names the `Xenova/bge-reranker-base` cross-encoder.
   Neo4j held 28 nodes and 21 edges afterwards, and PostgreSQL had `vector` 0.8.7 with 20 chunk rows. The first query takes about 37 s while the reranker model downloads.
 
+### Step 26 · Agent frameworks installed and run on local models (L-2)
+- **Dependency fix:** `agents/requirements.txt` could not be installed. crewai 1.15 needs `openai<3`, while openai-agents 0.22 and the OpenAI extra of pydantic-ai-slim 2.55 need `openai>=3`.
+  - Pinned openai-agents 0.20.0 and pydantic-ai-slim 2.31.1, the last releases that accept openai 2.x; pip now resolves the whole set (openai 2.54) and `pip check` is clean.
+  - `requirements-test.txt` uses the same versions plus openai-agents, so CI tests what users install.
+- **Bug fix:** the OpenAI Agents adapter returned a bare string when the model answered without handing off to the reviewer. Both agents now declare `output_type=AgentOutput`, and `run()` also accepts a `Model` object. A new test against a stub chat-completions server fails without the fix.
+- **Lint:** ESLint now ignores `.venv-agents/`, which contains JavaScript from the installed Python packages; CI creates that folder before its lint step.
+- **Real runs** against the app's HTTP MCP endpoint, with local Ollama models:
+  - CrewAI (`ollama/llama3.2`), DSPy ReAct (`ollama_chat/llama3.2`) and the OpenAI Agents SDK (`litellm/ollama_chat/llama3.2`) each returned a valid `AgentOutput`. CrewAI summarised 13 live feed items from its MCP tool.
+  - The TypeScript pipeline with `LEXCOMPILER_LLM_BASE_URL=http://127.0.0.1:11434/v1` and `LEXCOMPILER_LLM_MODEL=llama3.2` ran all six agents as `LLM_AGENT`. Four completed with real MCP tool calls (horizon scanner, deontic extractor, Z3 critic, remediation enforcer) and provider-reported token usage.
+  - Two were reported `FAILED` with the reason (turn limit; non-JSON answer). Per-agent overrides (`LEXCOMPILER_AGENT_<ID>_MODEL`) applied as configured.
+  - These 0.5B–3B models are too weak to finish every step reliably; `dolphin3` does not support tool calls in Ollama.
+- **Agents pytest:** 5 passed.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -347,7 +360,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | # | Item | Why it couldn't be finished here | What remains |
 | :-- | :--- | :--- | :--- |
 | L-1 | **OPA Rego evaluation (V5)** | Running a downloaded OPA binary was not permitted in this session | ✅ Done (Steps 8, 22): `server/opa.test.ts` passes against real OPA 1.4.2 locally. |
-| L-2 | **6-agent crew (AI1)** | Needs provider API keys and local GGUF models | Implemented (Step 19). Remaining: set `LEXCOMPILER_LLM_*` / `LEXCOMPILER_AGENT_<ID>_*` (Claude, DeepSeek, GPT-4o, Gemini, Llama, Qwen) and run the pipeline. `pip install -r agents/requirements.txt`, then run `python -m lexcompiler_agents <agent-id>` for the CrewAI, DSPy and OpenAI Agents adapters (Pydantic-AI, LangGraph and Hermes are already tested). |
+| L-2 | **6-agent crew (AI1)** | Needs provider API keys and local GGUF models | Implemented (Step 19); verified locally (Step 26): requirements fixed, all six adapters import, and CrewAI, DSPy and OpenAI Agents, plus the TypeScript pipeline, run against the local Ollama models. Remaining: run the pipeline with the named models, which needs provider API keys (Claude, DeepSeek, GPT-4o, Gemini, hosted Llama 70B) or a local Qwen-2.5-Coder-7B with tool support. |
 | L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No Neo4j server, and Hugging Face downloads are blocked here | ✅ Done (Steps 13, 25): pgvector on PostgreSQL, Neo4j and the BGE cross-encoder all verified in one query. |
 | L-4 | **RAGAS evaluation (AI3)** | Needs a judge LLM | Labelled set, IR metrics and judge implemented (Step 19). Remaining: set `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL` (or `LEXCOMPILER_LLM_*`) and run `npm run eval:rag`; optionally also run the Python `ragas` package on the same dataset. |
 | L-5 | **Token-optimisation benchmark (AI4)** | Hugging Face downloads are blocked here | Implemented (Step 19). Remaining: `pip install llmlingua` (downloads the xlm-roberta model) and set `LEXCOMPILER_LLMLINGUA_PYTHON`. Run Ollama with `all-minilm` for neural dedup, and run an LLM agent so cache hits are measured. |
