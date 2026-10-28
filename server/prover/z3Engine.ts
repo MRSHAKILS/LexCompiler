@@ -9,6 +9,7 @@ import type {
   LegalClause,
   SQLTableSchema,
   Z3FormalProofStep,
+  Z3RepairTarget,
 } from '../../shared/types.js';
 
 let z3InstancePromise: ReturnType<typeof initZ3> | null = null;
@@ -18,6 +19,130 @@ async function getZ3() {
     z3InstancePromise = initZ3();
   }
   return z3InstancePromise;
+}
+
+type Z3Any = any;
+
+function enableUnsatCores(solver: Z3Any): void {
+  try {
+    solver.set('unsat_core', true);
+  } catch {
+    try {
+      solver.set('produce-unsat-cores', true);
+    } catch {
+      // Solver still functions; cores may be empty and we fall back to named labels.
+    }
+  }
+}
+
+function assertAndTrackNamed(solver: Z3Any, Z3: Z3Any, name: string, expr: Z3Any): void {
+  const tracker = Z3.Bool.const(name);
+  if (typeof solver.assertAndTrack === 'function') {
+    solver.assertAndTrack(expr, tracker);
+  } else {
+    solver.add(expr);
+    solver.add(tracker.eq(true));
+  }
+}
+
+function readUnsatCore(solver: Z3Any): string[] {
+  try {
+    const core = solver.unsatCore();
+    if (!core) return [];
+    return [...core].map((b: Z3Any) => String(b).replace(/^not\s+/i, '').trim());
+  } catch {
+    return [];
+  }
+}
+
+function readModelAssignments(
+  solver: Z3Any,
+  decls: Array<{ name: string; expr: Z3Any }>
+): Record<string, string | number | boolean> {
+  try {
+    const model = solver.model();
+    const out: Record<string, string | number | boolean> = {};
+    for (const d of decls) {
+      const v = model.eval(d.expr, true);
+      const s = String(v);
+      if (s === 'true' || s === 'false') out[d.name] = s === 'true';
+      else if (/^-?\d+$/.test(s)) out[d.name] = parseInt(s, 10);
+      else out[d.name] = s;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function pickPiiTable(sqlTables: SQLTableSchema[]): SQLTableSchema | undefined {
+  return (
+    sqlTables.find((t) => t.tableName === 'patient_records') ||
+    sqlTables.find((t) => t.containsPII && t.retentionHoursConfigured != null) ||
+    sqlTables.find((t) => t.containsPII) ||
+    sqlTables[0]
+  );
+}
+
+function pickFinding(
+  astFindings: ASTFindingNode[],
+  types: ASTFindingNode['constructType'][]
+): ASTFindingNode | undefined {
+  for (const t of types) {
+    const hit = astFindings.find((f) => f.constructType === t);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+function proofSkeleton(clause: LegalClause, extra: {
+  z3Result: string;
+  solveMs: number;
+  fullSmtExecuted: string;
+  unsatCoreAssertions: string[];
+  counterexampleWitness: Record<string, string | number | boolean>;
+  z3ModelAssignments?: Record<string, string | number | boolean>;
+  repairTargets?: Z3RepairTarget[];
+  formalProofSteps: Z3FormalProofStep[];
+  opaRegoTriggeredDenials: string[];
+  affectedGraphNodeIds: string[];
+  offendingLocations: ClauseVerificationProof['offendingLocations'];
+  astSnapshot: unknown;
+}): ClauseVerificationProof {
+  const statuteSha256 = sha256Hex(clause.rawLegalText);
+  const deonticIrSha256 = sha256Hex(JSON.stringify(clause.deontic));
+  const smtFormulaSha256 = sha256Hex(extra.fullSmtExecuted);
+  const astSnapshotSha256 = sha256Hex(JSON.stringify(extra.astSnapshot));
+  return {
+    clauseId: clause.id,
+    citation: clause.citation,
+    title: clause.title,
+    frameworkId: clause.frameworkId,
+    category: clause.category,
+    severity: clause.severity,
+    status: extra.z3Result === 'sat' ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION',
+    z3SolverStatus: extra.z3Result === 'sat' ? 'sat' : 'unsat',
+    z3SolveTimeMs: extra.solveMs,
+    smtLib2Executed: extra.fullSmtExecuted,
+    unsatCoreAssertions: extra.unsatCoreAssertions,
+    z3ModelAssignments: extra.z3ModelAssignments,
+    repairTargets: extra.repairTargets,
+    counterexampleWitness: extra.counterexampleWitness,
+    formalProofSteps: extra.formalProofSteps,
+    opaRegoTriggeredDenials: extra.opaRegoTriggeredDenials,
+    affectedGraphNodeIds: extra.affectedGraphNodeIds,
+    offendingLocations: extra.offendingLocations,
+    cryptographicProvenance: {
+      statuteSha256,
+      deonticIrSha256,
+      smtFormulaSha256,
+      astSnapshotSha256,
+      merkleProofHash: sha256Hex(
+        `${statuteSha256}:${deonticIrSha256}:${smtFormulaSha256}:${astSnapshotSha256}`
+      ),
+      timestampIso: new Date().toISOString(),
+    },
+  };
 }
 
 /**
@@ -40,17 +165,27 @@ export async function verifyRepositoryAgainstClauses(
   const { Context } = await getZ3();
   const Z3 = new Context('lexcompiler_prover');
 
-  const patientTable = sqlTables.find((t) => t.tableName === 'patient_records');
-  const fastApiFinding = astFindings.find((f) => f.constructType === 'FASTAPI_ENDPOINT');
-  const loggerFinding = astFindings.find((f) => f.constructType === 'LOGGER_CALL');
-  const redisFinding = astFindings.find((f) => f.constructType === 'REDIS_CACHE_WORKER');
-  const aiFinding = astFindings.find((f) => f.constructType === 'LLM_INFERENCE_CALL');
-  const crossBorderFinding = astFindings.find((f) => f.constructType === 'CROSS_BORDER_EGRESS');
+  const patientTable = pickPiiTable(sqlTables);
+  const sqlFinding =
+    astFindings.find(
+      (f) =>
+        f.constructType === 'POSTGRES_DDL_TABLE' &&
+        (f.functionName.endsWith(patientTable?.tableName || '') ||
+          f.filePath === patientTable?.filePath)
+    ) || astFindings.find((f) => f.constructType === 'POSTGRES_DDL_TABLE');
+  const fastApiFinding = pickFinding(astFindings, ['FASTAPI_ENDPOINT', 'PII_PROCESSING_FUNCTION']);
+  const loggerFinding =
+    astFindings.find((f) => f.constructType === 'LOGGER_CALL' && f.metadata.logsPlaintextPii) ||
+    astFindings.find((f) => f.constructType === 'LOGGER_CALL');
+  const redisFinding = pickFinding(astFindings, ['REDIS_CACHE_WORKER', 'DATA_RETENTION_POLICY']);
+  const aiFinding = pickFinding(astFindings, ['LLM_INFERENCE_CALL']);
+  const crossBorderFinding = pickFinding(astFindings, ['CROSS_BORDER_EGRESS']);
+  const erasureFinding = pickFinding(astFindings, ['ERASURE_HANDLER', 'POSTGRES_DDL_TABLE']);
 
-  // Extracted concrete values from the live AST & SQL DDL
   const postgresEncryptedAtRest = (patientTable?.unencryptedPiiColumns.length ?? 0) === 0;
   const postgresTenantKmsIsolated = patientTable?.hasTenantKeyIsolation ?? false;
   const postgresRetentionHours = patientTable?.retentionHoursConfigured ?? 720;
+  const postgresHasCascade = patientTable?.hasErasureCascade ?? false;
 
   const fastApiUsesTenantKms = fastApiFinding?.metadata.usesTenantIsolatedKms ?? false;
   const fastApiLogsPlaintextPii =
@@ -73,14 +208,17 @@ export async function verifyRepositoryAgainstClauses(
   for (const clause of clauses) {
     const t0 = performance.now();
     const solver = new Z3.Solver();
+    enableUnsatCores(solver);
 
     const unsatCoreAssertions: string[] = [];
     const opaRegoTriggeredDenials: string[] = [];
     const formalProofSteps: Z3FormalProofStep[] = [];
     const affectedGraphNodeIds: string[] = [];
     const offendingLocations: ClauseVerificationProof['offendingLocations'] = [];
+    const repairTargets: Z3RepairTarget[] = [];
     let fullSmtExecuted = '';
     let counterexampleWitness: Record<string, string | number | boolean> = {};
+    let z3ModelAssignments: Record<string, string | number | boolean> = {};
 
     if (clause.category === 'RETENTION_AND_TENANT_KMS') {
       const maxHours = clause.deontic.extractedParameters.maxRetentionHours ?? 72;
@@ -95,29 +233,84 @@ export async function verifyRepositoryAgainstClauses(
       const redisTtl = Z3.Int.const('redis_worker_ttl_hours');
       const redisKms = Z3.Bool.const('redis_worker_uses_tenant_kms');
 
-      // Statutory Axioms
-      solver.add(sMaxHours.eq(maxHours));
-      solver.add(sReqKms.eq(reqTenantKms));
+      assertAndTrackNamed(solver, Z3, `law_max_retention_${maxHours}h`, sMaxHours.eq(maxHours));
+      assertAndTrackNamed(solver, Z3, 'law_requires_tenant_kms', sReqKms.eq(reqTenantKms));
+      assertAndTrackNamed(solver, Z3, 'inv_postgres_encrypted_at_rest', pgEnc.eq(true));
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        'inv_postgres_tenant_key_isolation',
+        Z3.Implies(sReqKms, pgKms.eq(true))
+      );
+      assertAndTrackNamed(solver, Z3, 'inv_postgres_retention_bound', pgRet.le(sMaxHours));
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        'inv_fastapi_tenant_kms_envelope',
+        Z3.Implies(sReqKms, apiKms.eq(true))
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `inv_redis_ttl_within_${maxHours}h`,
+        redisTtl.le(sMaxHours)
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        'inv_redis_tenant_kms_envelope',
+        Z3.Implies(sReqKms, redisKms.eq(true))
+      );
 
-      // Universal Compliance Invariants
-      solver.add(pgEnc.eq(true));
-      solver.add(Z3.Implies(sReqKms, pgKms.eq(true)));
-      solver.add(pgRet.le(sMaxHours));
-      solver.add(Z3.Implies(sReqKms, apiKms.eq(true)));
-      solver.add(redisTtl.le(sMaxHours));
-      solver.add(Z3.Implies(sReqKms, redisKms.eq(true)));
-
-      // Extracted Live AST & SQL Schema State Assertions
-      solver.add(pgEnc.eq(postgresEncryptedAtRest));
-      solver.add(pgKms.eq(postgresTenantKmsIsolated));
-      solver.add(pgRet.eq(postgresRetentionHours));
-      solver.add(apiKms.eq(fastApiUsesTenantKms));
-      solver.add(redisTtl.eq(redisTtlHours));
-      solver.add(redisKms.eq(redisUsesTenantKms));
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_postgres_encrypted_${postgresEncryptedAtRest}`,
+        pgEnc.eq(postgresEncryptedAtRest)
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_postgres_tenant_kms_${postgresTenantKmsIsolated}`,
+        pgKms.eq(postgresTenantKmsIsolated)
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_postgres_retention_${postgresRetentionHours}h`,
+        pgRet.eq(postgresRetentionHours)
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_fastapi_tenant_kms_${fastApiUsesTenantKms}`,
+        apiKms.eq(fastApiUsesTenantKms)
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_redis_ttl_${redisTtlHours}h`,
+        redisTtl.eq(redisTtlHours)
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_redis_tenant_kms_${redisUsesTenantKms}`,
+        redisKms.eq(redisUsesTenantKms)
+      );
 
       const z3Result = await solver.check();
       const solveMs = Math.max(0.4, Math.round((performance.now() - t0) * 100) / 100);
       totalZ3ExecutionMs += solveMs;
+      const solverCore = z3Result === 'unsat' ? readUnsatCore(solver) : [];
+      z3ModelAssignments =
+        z3Result === 'sat'
+          ? readModelAssignments(solver, [
+              { name: 'statutory_max_ttl_hours', expr: sMaxHours },
+              { name: 'postgres_retention_hours', expr: pgRet },
+              { name: 'redis_worker_ttl_hours', expr: redisTtl },
+            ])
+          : {};
 
       fullSmtExecuted = `${clause.compiled.smtLib2Snippet}
 
@@ -129,7 +322,8 @@ export async function verifyRepositoryAgainstClauses(
 (assert (! (= redis_worker_ttl_hours ${redisTtlHours}) :named ast_redis_ttl_${redisTtlHours}h))
 
 (check-sat)
-; Z3 Solver Result: ${z3Result} (${solveMs} ms)`;
+; Z3 Solver Result: ${z3Result} (${solveMs} ms)
+; unsat-core: ${solverCore.join(', ') || 'n/a'}`;
 
       counterexampleWitness = {
         statutory_max_ttl_hours: maxHours,
@@ -152,92 +346,163 @@ export async function verifyRepositoryAgainstClauses(
           stepNumber: 2,
           ruleName: 'Polyglot AST & DDL Fact Extraction (Code)',
           formula: `Postgres(ttl=${postgresRetentionHours}h, tenant_kms=${postgresTenantKmsIsolated}) ∧ FastAPI(tenant_kms=${fastApiUsesTenantKms}) ∧ RedisWorker(ttl=${redisTtlHours}h, tenant_kms=${redisUsesTenantKms})`,
-          justification:
-            'Extracted via SQL DDL parser (schema/postgres_pii.sql) and Python 3 AST (api/fastapi_intake.py, workers/redis_cache_worker.py)',
+          justification: `Extracted via SQL DDL parser (${patientTable?.filePath || 'schema'}) and Python 3 AST (${fastApiFinding?.filePath || 'api'}, ${redisFinding?.filePath || 'workers'})`,
         }
       );
 
       if (z3Result === 'unsat') {
-        unsatCoreAssertions.push(`law_max_retention_${maxHours}h`);
-        if (reqTenantKms) {
-          unsatCoreAssertions.push('law_requires_tenant_kms');
-        }
+        unsatCoreAssertions.push(
+          ...(solverCore.length > 0
+            ? solverCore
+            : [
+                `law_max_retention_${maxHours}h`,
+                ...(reqTenantKms ? ['law_requires_tenant_kms'] : []),
+              ])
+        );
 
-        // Check which of the 3 specific nodes violated the formal constraint
         if (postgresRetentionHours > maxHours || (reqTenantKms && !postgresTenantKmsIsolated)) {
           affectedGraphNodeIds.push('node-postgres-schema');
-          unsatCoreAssertions.push(
-            `ast_postgres_retention_${postgresRetentionHours}h`,
-            `ast_postgres_tenant_kms_${postgresTenantKmsIsolated}`
-          );
+          if (solverCore.length === 0) {
+            unsatCoreAssertions.push(
+              `ast_postgres_retention_${postgresRetentionHours}h`,
+              `ast_postgres_tenant_kms_${postgresTenantKmsIsolated}`
+            );
+          }
           opaRegoTriggeredDenials.push(
-            `VIOLATION [${clause.citation}]: Postgres table 'patient_records' retention (${postgresRetentionHours}h > ${maxHours}h) & tenant_kms_isolated=${postgresTenantKmsIsolated}`
+            `VIOLATION [${clause.citation}]: Postgres table '${patientTable?.tableName || 'pii_table'}' retention (${postgresRetentionHours}h > ${maxHours}h) & tenant_kms_isolated=${postgresTenantKmsIsolated}`
           );
           offendingLocations.push({
             nodeId: 'node-postgres-schema',
-            filePath: 'schema/postgres_pii.sql',
+            filePath: patientTable?.filePath || sqlFinding?.filePath || 'schema/postgres_pii.sql',
             language: 'sql',
-            line: patientTable?.startLine ?? 4,
-            endLine: patientTable?.endLine ?? 14,
+            line: patientTable?.startLine ?? sqlFinding?.line ?? 4,
+            endLine: patientTable?.endLine ?? sqlFinding?.endLine ?? 14,
             codeSnippet:
-              astFindings.find((f) => f.constructType === 'POSTGRES_DDL_TABLE')?.codeSnippet ||
-              'CREATE TABLE patient_records (...)',
-            explanation: `PostgreSQL table 'patient_records' configures retention_ttl_hours = ${postgresRetentionHours}h (exceeding ${maxHours}h limit)${
+              sqlFinding?.codeSnippet ||
+              `CREATE TABLE ${patientTable?.tableName || 'pii_table'} (...)`,
+            explanation: `PostgreSQL table '${patientTable?.tableName || 'pii_table'}' configures retention_ttl_hours = ${postgresRetentionHours}h (exceeding ${maxHours}h limit)${
               reqTenantKms && !postgresTenantKmsIsolated
                 ? ' and lacks a tenant_kms_key_id column for tenant-isolated encryption at rest.'
                 : '.'
             }`,
-            astNodeType: 'SQL::CreateTableStatement(patient_records)',
+            astNodeType: `SQL::CreateTableStatement(${patientTable?.tableName || 'pii_table'})`,
             remediationPreview: `Add tenant_kms_key_id VARCHAR(128) NOT NULL -- @tenant_isolated_kms and set retention_ttl_hours DEFAULT ${maxHours} -- @retention_hours(${maxHours})`,
           });
+          if (postgresRetentionHours > maxHours) {
+            repairTargets.push({
+              factLabel: `ast_postgres_retention_${postgresRetentionHours}h`,
+              z3Variable: 'postgres_retention_hours',
+              repairAction: 'SET_RETENTION_BOUND',
+              findingId: sqlFinding?.id || 'ast-sql',
+              nodeId: 'node-postgres-schema',
+              filePath: patientTable?.filePath || sqlFinding?.filePath || 'schema/postgres_pii.sql',
+              language: 'sql',
+              anchorSymbol: 'retention_ttl_hours',
+              currentValue: postgresRetentionHours,
+              requiredValue: maxHours,
+            });
+          }
+          if (reqTenantKms && !postgresTenantKmsIsolated) {
+            repairTargets.push({
+              factLabel: `ast_postgres_tenant_kms_${postgresTenantKmsIsolated}`,
+              z3Variable: 'postgres_tenant_kms_isolated',
+              repairAction: 'ADD_TENANT_KMS_COLUMN',
+              findingId: sqlFinding?.id || 'ast-sql',
+              nodeId: 'node-postgres-schema',
+              filePath: patientTable?.filePath || sqlFinding?.filePath || 'schema/postgres_pii.sql',
+              language: 'sql',
+              anchorSymbol: 'tenant_kms_key_id',
+              currentValue: false,
+              requiredValue: true,
+            });
+          }
         }
 
         if (reqTenantKms && !fastApiUsesTenantKms) {
           affectedGraphNodeIds.push('node-fastapi-endpoint');
-          unsatCoreAssertions.push(`ast_fastapi_tenant_kms_${fastApiUsesTenantKms}`);
+          if (solverCore.length === 0) {
+            unsatCoreAssertions.push(`ast_fastapi_tenant_kms_${fastApiUsesTenantKms}`);
+          }
           opaRegoTriggeredDenials.push(
-            `VIOLATION [${clause.citation}]: FastAPI endpoint '/api/v1/patients/intake' encrypts PII with shared global key instead of tenant-isolated KMS envelope`
+            `VIOLATION [${clause.citation}]: FastAPI endpoint encrypts PII with shared global key instead of tenant-isolated KMS envelope`
           );
           offendingLocations.push({
             nodeId: 'node-fastapi-endpoint',
-            filePath: 'api/fastapi_intake.py',
+            filePath: fastApiFinding?.filePath || 'api/fastapi_intake.py',
             language: 'python',
             line: fastApiFinding?.line ?? 29,
             endLine: fastApiFinding?.endLine ?? 49,
             codeSnippet:
               fastApiFinding?.codeSnippet ||
               'encrypted_ssn = encrypt_shared_aes256(payload.ssn)',
-            explanation: `FastAPI endpoint 'ingest_patient_pii' sets USING_TENANT_ISOLATED_KMS = False and invokes encrypt_shared_aes256(...) without tenant key isolation (x_tenant_id).`,
-            astNodeType: 'Python::AsyncFunctionDef(ingest_patient_pii)',
-            remediationPreview: `Switch to encrypt_with_tenant_kms(payload.ssn, tenant_id=x_tenant_id) and set USING_TENANT_ISOLATED_KMS = True`,
+            explanation: `Python endpoint '${fastApiFinding?.functionName || 'ingest'}' disables tenant-isolated KMS and uses a shared AES key.`,
+            astNodeType: `Python::${fastApiFinding?.astNodeKind || 'AsyncFunctionDef'}`,
+            remediationPreview: `Switch to encrypt_with_tenant_kms(...) and set the tenant KMS flag to True`,
+          });
+          repairTargets.push({
+            factLabel: `ast_fastapi_tenant_kms_${fastApiUsesTenantKms}`,
+            z3Variable: 'fastapi_uses_tenant_kms',
+            repairAction: 'ENABLE_TENANT_KMS',
+            findingId: fastApiFinding?.id || 'ast-py-endpoint',
+            nodeId: 'node-fastapi-endpoint',
+            filePath: fastApiFinding?.filePath || 'api/fastapi_intake.py',
+            language: 'python',
+            currentValue: false,
+            requiredValue: true,
           });
         }
 
         if (redisTtlHours > maxHours || (reqTenantKms && !redisUsesTenantKms)) {
           affectedGraphNodeIds.push('node-redis-worker');
-          unsatCoreAssertions.push(`ast_redis_ttl_${redisTtlHours}h`);
+          if (solverCore.length === 0) {
+            unsatCoreAssertions.push(`ast_redis_ttl_${redisTtlHours}h`);
+          }
           opaRegoTriggeredDenials.push(
-            `VIOLATION [${clause.citation}]: RedisSessionCacheWorker PII_CACHE_TTL_HOURS (${redisTtlHours}h) exceeds ${maxHours}h purge mandate`
+            `VIOLATION [${clause.citation}]: Cache worker TTL (${redisTtlHours}h) exceeds ${maxHours}h purge mandate`
           );
           offendingLocations.push({
             nodeId: 'node-redis-worker',
-            filePath: 'workers/redis_cache_worker.py',
+            filePath: redisFinding?.filePath || 'workers/redis_cache_worker.py',
             language: 'python',
             line: redisFinding?.line ?? 7,
             endLine: redisFinding?.endLine ?? 28,
             codeSnippet:
               redisFinding?.codeSnippet ||
               'PII_CACHE_TTL_HOURS = 720\nUSE_TENANT_KMS_ENVELOPE = False',
-            explanation: `Redis cache worker 'RedisSessionCacheWorker' sets PII_CACHE_TTL_HOURS = ${redisTtlHours} (${Math.round(
-              redisTtlHours / 24
-            )} days), violating the ${maxHours}-hour statutory purge bound${
+            explanation: `Cache worker sets TTL = ${redisTtlHours}h, violating the ${maxHours}-hour statutory purge bound${
               reqTenantKms && !redisUsesTenantKms
                 ? ', and disables tenant KMS envelope encryption.'
                 : '.'
             }`,
-            astNodeType: 'Python::ClassDef(RedisSessionCacheWorker)',
-            remediationPreview: `Set PII_CACHE_TTL_HOURS = ${maxHours} and USE_TENANT_KMS_ENVELOPE = True`,
+            astNodeType: redisFinding?.astNodeKind || 'Python::ClassDef',
+            remediationPreview: `Set cache TTL hours = ${maxHours} and enable tenant KMS envelope`,
           });
+          if (redisTtlHours > maxHours) {
+            repairTargets.push({
+              factLabel: `ast_redis_ttl_${redisTtlHours}h`,
+              z3Variable: 'redis_worker_ttl_hours',
+              repairAction: 'SET_RETENTION_BOUND',
+              findingId: redisFinding?.id || 'ast-py-cache',
+              nodeId: 'node-redis-worker',
+              filePath: redisFinding?.filePath || 'workers/redis_cache_worker.py',
+              language: 'python',
+              currentValue: redisTtlHours,
+              requiredValue: maxHours,
+            });
+          }
+          if (reqTenantKms && !redisUsesTenantKms) {
+            repairTargets.push({
+              factLabel: `ast_redis_tenant_kms_${redisUsesTenantKms}`,
+              z3Variable: 'redis_worker_uses_tenant_kms',
+              repairAction: 'ENABLE_TENANT_KMS',
+              findingId: redisFinding?.id || 'ast-py-cache',
+              nodeId: 'node-redis-worker',
+              filePath: redisFinding?.filePath || 'workers/redis_cache_worker.py',
+              language: 'python',
+              currentValue: false,
+              requiredValue: true,
+            });
+          }
         }
 
         formalProofSteps.push(
@@ -263,46 +528,27 @@ export async function verifyRepositoryAgainstClauses(
         });
       }
 
-      const statuteSha256 = sha256Hex(clause.rawLegalText);
-      const deonticIrSha256 = sha256Hex(JSON.stringify(clause.deontic));
-      const smtFormulaSha256 = sha256Hex(fullSmtExecuted);
-      const astSnapshotSha256 = sha256Hex(
-        JSON.stringify({
-          postgresRetentionHours,
-          postgresTenantKmsIsolated,
-          fastApiUsesTenantKms,
-          redisTtlHours,
+      proofs.push(
+        proofSkeleton(clause, {
+          z3Result,
+          solveMs,
+          fullSmtExecuted,
+          unsatCoreAssertions,
+          counterexampleWitness,
+          z3ModelAssignments,
+          repairTargets,
+          formalProofSteps,
+          opaRegoTriggeredDenials,
+          affectedGraphNodeIds,
+          offendingLocations,
+          astSnapshot: {
+            postgresRetentionHours,
+            postgresTenantKmsIsolated,
+            fastApiUsesTenantKms,
+            redisTtlHours,
+          },
         })
       );
-
-      proofs.push({
-        clauseId: clause.id,
-        citation: clause.citation,
-        title: clause.title,
-        frameworkId: clause.frameworkId,
-        category: clause.category,
-        severity: clause.severity,
-        status: z3Result === 'sat' ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION',
-        z3SolverStatus: z3Result === 'sat' ? 'sat' : 'unsat',
-        z3SolveTimeMs: solveMs,
-        smtLib2Executed: fullSmtExecuted,
-        unsatCoreAssertions,
-        counterexampleWitness,
-        formalProofSteps,
-        opaRegoTriggeredDenials,
-        affectedGraphNodeIds,
-        offendingLocations,
-        cryptographicProvenance: {
-          statuteSha256,
-          deonticIrSha256,
-          smtFormulaSha256,
-          astSnapshotSha256,
-          merkleProofHash: sha256Hex(
-            `${statuteSha256}:${deonticIrSha256}:${smtFormulaSha256}:${astSnapshotSha256}`
-          ),
-          timestampIso: new Date().toISOString(),
-        },
-      });
       continue;
     }
 
@@ -311,20 +557,39 @@ export async function verifyRepositoryAgainstClauses(
       const sLawForbids = Z3.Bool.const('law_forbids_plaintext_pii_logs');
       const sAstLogsPii = Z3.Bool.const('fastapi_logs_plaintext_pii');
 
-      solver.add(sLawForbids.eq(forbidLogs));
-      solver.add(Z3.Implies(sLawForbids, sAstLogsPii.eq(false)));
-      solver.add(sAstLogsPii.eq(fastApiLogsPlaintextPii));
+      assertAndTrackNamed(solver, Z3, 'law_hipaa_gdpr_no_pii_logs', sLawForbids.eq(forbidLogs));
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        'inv_zero_plaintext_pii_in_logs',
+        Z3.Implies(sLawForbids, sAstLogsPii.eq(false))
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_fastapi_logs_plaintext_pii_${fastApiLogsPlaintextPii}`,
+        sAstLogsPii.eq(fastApiLogsPlaintextPii)
+      );
 
       const z3Result = await solver.check();
       const solveMs = Math.max(0.3, Math.round((performance.now() - t0) * 100) / 100);
       totalZ3ExecutionMs += solveMs;
+      const solverCore = z3Result === 'unsat' ? readUnsatCore(solver) : [];
+      z3ModelAssignments =
+        z3Result === 'sat'
+          ? readModelAssignments(solver, [
+              { name: 'law_forbids_plaintext_pii_logs', expr: sLawForbids },
+              { name: 'fastapi_logs_plaintext_pii', expr: sAstLogsPii },
+            ])
+          : {};
 
       fullSmtExecuted = `${clause.compiled.smtLib2Snippet}
 
 ; --- Extracted Live Python AST Facts ---
 (assert (! (= fastapi_logs_plaintext_pii ${fastApiLogsPlaintextPii}) :named ast_fastapi_logs_plaintext_pii_${fastApiLogsPlaintextPii}))
 (check-sat)
-; Z3 Solver Result: ${z3Result} (${solveMs} ms)`;
+; Z3 Solver Result: ${z3Result} (${solveMs} ms)
+; unsat-core: ${solverCore.join(', ') || 'n/a'}`;
 
       counterexampleWitness = {
         law_forbids_plaintext_pii_logs: forbidLogs,
@@ -343,39 +608,54 @@ export async function verifyRepositoryAgainstClauses(
           stepNumber: 2,
           ruleName: 'Python AST Call Graph Extraction',
           formula: `fastapi_logs_plaintext_pii = ${fastApiLogsPlaintextPii}`,
-          justification: `Inspected Call(logger.info) at api/fastapi_intake.py:${loggerFinding?.line ?? 31}`,
+          justification: `Inspected Call(${loggerFinding?.functionName || 'logger'}) at ${loggerFinding?.filePath || 'python'}:${loggerFinding?.line ?? 0}`,
         }
       );
 
       if (z3Result === 'unsat') {
         affectedGraphNodeIds.push('node-fastapi-endpoint');
         unsatCoreAssertions.push(
-          'law_hipaa_gdpr_no_pii_logs',
-          'inv_zero_plaintext_pii_in_logs',
-          'ast_fastapi_logs_plaintext_pii_true'
+          ...(solverCore.length > 0
+            ? solverCore
+            : [
+                'law_hipaa_gdpr_no_pii_logs',
+                'inv_zero_plaintext_pii_in_logs',
+                'ast_fastapi_logs_plaintext_pii_true',
+              ])
         );
         opaRegoTriggeredDenials.push(
           `VIOLATION [${clause.citation}]: Unredacted PII/PHI fields (${(
             loggerFinding?.metadata.leakedFields || ['ssn', 'email', 'diagnosis_code']
-          ).join(', ')}) written to logger.info in api/fastapi_intake.py`
+          ).join(', ')}) written to ${loggerFinding?.functionName || 'logger'} in ${loggerFinding?.filePath || 'python'}`
         );
         offendingLocations.push({
           nodeId: 'node-fastapi-endpoint',
-          filePath: 'api/fastapi_intake.py',
+          filePath: loggerFinding?.filePath || fastApiFinding?.filePath || 'api/fastapi_intake.py',
           language: 'python',
           line: loggerFinding?.line ?? 31,
           endLine: loggerFinding?.endLine ?? 33,
           codeSnippet:
             loggerFinding?.codeSnippet ||
-            'logger.info(f"Ingesting patient record ssn={payload.ssn} email={payload.email} diagnosis={payload.diagnosis_code}")',
-          explanation: `Python f-string interpolation inside logger.info() leaks raw SSN, email, and clinical diagnosis code to application stdout logs.`,
-          astNodeType: 'Python::Call(logger.info -> JoinedStr)',
-          remediationPreview: `Replace raw PII interpolation with SHA-256 redaction helper redact_pii(payload.patient_id)`,
+            'logger.info(f"... ssn={payload.ssn} ...")',
+          explanation: `Logger sink interpolates raw PII identifiers without redaction.`,
+          astNodeType: loggerFinding?.astNodeKind || 'Python::Call(logger.info)',
+          remediationPreview: `Replace raw PII interpolation with SHA-256 redaction helper redact_pii(...)`,
+        });
+        repairTargets.push({
+          factLabel: 'ast_fastapi_logs_plaintext_pii_true',
+          z3Variable: 'fastapi_logs_plaintext_pii',
+          repairAction: 'REDACT_LOG_ARGUMENTS',
+          findingId: loggerFinding?.id || 'ast-py-logger',
+          nodeId: 'node-fastapi-endpoint',
+          filePath: loggerFinding?.filePath || fastApiFinding?.filePath || 'api/fastapi_intake.py',
+          language: 'python',
+          currentValue: true,
+          requiredValue: false,
         });
         formalProofSteps.push({
           stepNumber: 3,
           ruleName: 'Q.E.D. — Prohibition Violated (UNSAT)',
-          formula: `UNSAT_CORE = { law_hipaa_gdpr_no_pii_logs, ast_fastapi_logs_plaintext_pii_true }`,
+          formula: `UNSAT_CORE = { ${unsatCoreAssertions.join(', ')} }`,
           justification: `Proven by Z3 in ${solveMs} ms.`,
         });
       } else {
@@ -387,39 +667,22 @@ export async function verifyRepositoryAgainstClauses(
         });
       }
 
-      const statuteSha256 = sha256Hex(clause.rawLegalText);
-      const deonticIrSha256 = sha256Hex(JSON.stringify(clause.deontic));
-      const smtFormulaSha256 = sha256Hex(fullSmtExecuted);
-      const astSnapshotSha256 = sha256Hex(String(fastApiLogsPlaintextPii));
-
-      proofs.push({
-        clauseId: clause.id,
-        citation: clause.citation,
-        title: clause.title,
-        frameworkId: clause.frameworkId,
-        category: clause.category,
-        severity: clause.severity,
-        status: z3Result === 'sat' ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION',
-        z3SolverStatus: z3Result === 'sat' ? 'sat' : 'unsat',
-        z3SolveTimeMs: solveMs,
-        smtLib2Executed: fullSmtExecuted,
-        unsatCoreAssertions,
-        counterexampleWitness,
-        formalProofSteps,
-        opaRegoTriggeredDenials,
-        affectedGraphNodeIds,
-        offendingLocations,
-        cryptographicProvenance: {
-          statuteSha256,
-          deonticIrSha256,
-          smtFormulaSha256,
-          astSnapshotSha256,
-          merkleProofHash: sha256Hex(
-            `${statuteSha256}:${deonticIrSha256}:${smtFormulaSha256}:${astSnapshotSha256}`
-          ),
-          timestampIso: new Date().toISOString(),
-        },
-      });
+      proofs.push(
+        proofSkeleton(clause, {
+          z3Result,
+          solveMs,
+          fullSmtExecuted,
+          unsatCoreAssertions,
+          counterexampleWitness,
+          z3ModelAssignments,
+          repairTargets,
+          formalProofSteps,
+          opaRegoTriggeredDenials,
+          affectedGraphNodeIds,
+          offendingLocations,
+          astSnapshot: fastApiLogsPlaintextPii,
+        })
+      );
       continue;
     }
 
@@ -432,18 +695,50 @@ export async function verifyRepositoryAgainstClauses(
       const sAstHuman = Z3.Bool.const('ai_engine_has_human_oversight');
       const sAstAudit = Z3.Bool.const('ai_engine_writes_audit_log');
 
-      solver.add(sLawConf.eq(reqConfPct));
-      solver.add(sAstHuman.eq(true));
-      solver.add(sAstConf.ge(sLawConf));
-      solver.add(sAstAudit.eq(true));
-
-      solver.add(sAstConf.eq(aiConfidencePct));
-      solver.add(sAstHuman.eq(aiHasHumanGate));
-      solver.add(sAstAudit.eq(aiWritesAuditLog));
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `law_eu_ai_act_min_confidence_${reqConfPct}pct`,
+        sLawConf.eq(reqConfPct)
+      );
+      assertAndTrackNamed(solver, Z3, 'inv_eu_ai_act_human_oversight_gate', sAstHuman.eq(true));
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        'inv_eu_ai_act_confidence_threshold',
+        sAstConf.ge(sLawConf)
+      );
+      assertAndTrackNamed(solver, Z3, 'inv_eu_ai_act_article12_audit_log', sAstAudit.eq(true));
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_ai_confidence_${aiConfidencePct}pct`,
+        sAstConf.eq(aiConfidencePct)
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_ai_human_gate_${aiHasHumanGate}`,
+        sAstHuman.eq(aiHasHumanGate)
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_ai_audit_log_${aiWritesAuditLog}`,
+        sAstAudit.eq(aiWritesAuditLog)
+      );
 
       const z3Result = await solver.check();
       const solveMs = Math.max(0.3, Math.round((performance.now() - t0) * 100) / 100);
       totalZ3ExecutionMs += solveMs;
+      const solverCore = z3Result === 'unsat' ? readUnsatCore(solver) : [];
+      z3ModelAssignments =
+        z3Result === 'sat'
+          ? readModelAssignments(solver, [
+              { name: 'statutory_min_confidence_pct', expr: sLawConf },
+              { name: 'ai_engine_confidence_gate_pct', expr: sAstConf },
+            ])
+          : {};
 
       fullSmtExecuted = `${clause.compiled.smtLib2Snippet}
 
@@ -452,7 +747,8 @@ export async function verifyRepositoryAgainstClauses(
 (assert (! (= ai_engine_has_human_oversight ${aiHasHumanGate}) :named ast_ai_human_gate_${aiHasHumanGate}))
 (assert (! (= ai_engine_writes_audit_log ${aiWritesAuditLog}) :named ast_ai_audit_log_${aiWritesAuditLog}))
 (check-sat)
-; Z3 Solver Result: ${z3Result} (${solveMs} ms)`;
+; Z3 Solver Result: ${z3Result} (${solveMs} ms)
+; unsat-core: ${solverCore.join(', ') || 'n/a'}`;
 
       counterexampleWitness = {
         statutory_min_confidence_pct: reqConfPct,
@@ -470,41 +766,82 @@ export async function verifyRepositoryAgainstClauses(
         },
         {
           stepNumber: 2,
-          ruleName: 'TypeScript AST Extraction (services/ai_credit_triage.ts)',
+          ruleName: `TypeScript AST Extraction (${aiFinding?.filePath || 'typescript'})`,
           formula: `ConfidenceGate = ${aiConfidencePct}% ∧ HumanOversightGate = ${aiHasHumanGate} ∧ AuditLog = ${aiWritesAuditLog}`,
-          justification: `Extracted from VariableDeclaration nodes in services/ai_credit_triage.ts`,
+          justification: `Extracted from VariableDeclaration nodes in ${aiFinding?.filePath || 'typescript'}`,
         }
       );
 
       if (z3Result === 'unsat') {
         affectedGraphNodeIds.push('node-ai-engine');
         unsatCoreAssertions.push(
-          `law_eu_ai_act_min_confidence_${reqConfPct}pct`,
-          `ast_ai_confidence_${aiConfidencePct}pct`,
-          `ast_ai_human_gate_${aiHasHumanGate}`
+          ...(solverCore.length > 0
+            ? solverCore
+            : [
+                `law_eu_ai_act_min_confidence_${reqConfPct}pct`,
+                `ast_ai_confidence_${aiConfidencePct}pct`,
+                `ast_ai_human_gate_${aiHasHumanGate}`,
+              ])
         );
         opaRegoTriggeredDenials.push(
-          `VIOLATION [${clause.citation}]: AI Triage Engine allows autonomous decisions at ${aiConfidencePct}% (< ${reqConfPct}%) with ENFORCE_HUMAN_OVERSIGHT_GATE=${aiHasHumanGate}`
+          `VIOLATION [${clause.citation}]: AI engine allows autonomous decisions at ${aiConfidencePct}% (< ${reqConfPct}%) with human_oversight=${aiHasHumanGate}`
         );
         offendingLocations.push({
           nodeId: 'node-ai-engine',
-          filePath: 'services/ai_credit_triage.ts',
+          filePath: aiFinding?.filePath || 'services/ai_credit_triage.ts',
           language: 'typescript',
           line: aiFinding?.line ?? 19,
           endLine: aiFinding?.endLine ?? 37,
-          codeSnippet:
-            aiFinding?.codeSnippet ||
-            'const MIN_CONFIDENCE_FOR_AUTO_APPROVAL = 0.68;\nconst ENFORCE_HUMAN_OVERSIGHT_GATE = false;',
-          explanation: `High-risk AI decision function 'evaluateClinicalAndCreditRisk' sets MIN_CONFIDENCE_FOR_AUTO_APPROVAL = ${(
+          codeSnippet: aiFinding?.codeSnippet || 'const MIN_CONFIDENCE_FOR_AUTO_APPROVAL = 0.68;',
+          explanation: `High-risk AI function '${aiFinding?.functionName || 'evaluate'}' sets confidence gate = ${(
             aiConfidencePct / 100
           ).toFixed(2)} (below statutory ${(reqConfPct / 100).toFixed(
             2
           )}) and disables human oversight escalation.`,
-          astNodeType: 'TypeScript::FunctionDeclaration(evaluateClinicalAndCreditRisk)',
-          remediationPreview: `Set MIN_CONFIDENCE_FOR_AUTO_APPROVAL = ${(reqConfPct / 100).toFixed(
+          astNodeType: aiFinding?.astNodeKind || 'TypeScript::FunctionDeclaration',
+          remediationPreview: `Set confidence gate = ${(reqConfPct / 100).toFixed(
             2
-          )}, ENFORCE_HUMAN_OVERSIGHT_GATE = true, and WRITE_IMMUTABLE_AUDIT_LOG = true`,
+          )}, enable human oversight, and write an immutable audit log`,
         });
+        if (aiConfidencePct < reqConfPct) {
+          repairTargets.push({
+            factLabel: `ast_ai_confidence_${aiConfidencePct}pct`,
+            z3Variable: 'ai_engine_confidence_gate_pct',
+            repairAction: 'RAISE_CONFIDENCE_GATE',
+            findingId: aiFinding?.id || 'ast-ts-ai',
+            nodeId: 'node-ai-engine',
+            filePath: aiFinding?.filePath || 'services/ai_credit_triage.ts',
+            language: 'typescript',
+            currentValue: aiConfidencePct / 100,
+            requiredValue: reqConfPct / 100,
+          });
+        }
+        if (!aiHasHumanGate) {
+          repairTargets.push({
+            factLabel: `ast_ai_human_gate_${aiHasHumanGate}`,
+            z3Variable: 'ai_engine_has_human_oversight',
+            repairAction: 'ENABLE_HUMAN_OVERSIGHT',
+            findingId: aiFinding?.id || 'ast-ts-ai',
+            nodeId: 'node-ai-engine',
+            filePath: aiFinding?.filePath || 'services/ai_credit_triage.ts',
+            language: 'typescript',
+            currentValue: false,
+            requiredValue: true,
+          });
+        }
+        if (!aiWritesAuditLog) {
+          repairTargets.push({
+            factLabel: `ast_ai_audit_log_${aiWritesAuditLog}`,
+            z3Variable: 'ai_engine_writes_audit_log',
+            repairAction: 'ENABLE_AUDIT_LOG',
+            findingId: aiFinding?.id || 'ast-ts-ai',
+            nodeId: 'node-ai-engine',
+            filePath: aiFinding?.filePath || 'services/ai_credit_triage.ts',
+            language: 'typescript',
+            currentValue: false,
+            requiredValue: true,
+          });
+        }
         formalProofSteps.push({
           stepNumber: 3,
           ruleName: 'Q.E.D. — Linear Arithmetic & Gate Contradiction (UNSAT)',
@@ -520,41 +857,254 @@ export async function verifyRepositoryAgainstClauses(
         });
       }
 
-      const statuteSha256 = sha256Hex(clause.rawLegalText);
-      const deonticIrSha256 = sha256Hex(JSON.stringify(clause.deontic));
-      const smtFormulaSha256 = sha256Hex(fullSmtExecuted);
-      const astSnapshotSha256 = sha256Hex(
-        JSON.stringify({ aiConfidencePct, aiHasHumanGate, aiWritesAuditLog })
+      proofs.push(
+        proofSkeleton(clause, {
+          z3Result,
+          solveMs,
+          fullSmtExecuted,
+          unsatCoreAssertions,
+          counterexampleWitness,
+          z3ModelAssignments,
+          repairTargets,
+          formalProofSteps,
+          opaRegoTriggeredDenials,
+          affectedGraphNodeIds,
+          offendingLocations,
+          astSnapshot: { aiConfidencePct, aiHasHumanGate, aiWritesAuditLog },
+        })
+      );
+      continue;
+    }
+
+    if (clause.category === 'ENCRYPTION_AT_REST') {
+      const reqEnc = clause.deontic.extractedParameters.requireEncryptionAtRest ?? true;
+      const reqTenantKms = clause.deontic.extractedParameters.requiresTenantIsolatedKeys ?? false;
+      const sReqEnc = Z3.Bool.const('statutory_requires_encryption_at_rest');
+      const sPgEnc = Z3.Bool.const('postgres_encrypted_at_rest');
+      const sReqKms = Z3.Bool.const('statutory_requires_tenant_kms');
+      const sPgKms = Z3.Bool.const('postgres_tenant_kms_isolated');
+
+      assertAndTrackNamed(solver, Z3, 'law_encryption_at_rest', sReqEnc.eq(reqEnc));
+      assertAndTrackNamed(solver, Z3, 'law_requires_tenant_kms', sReqKms.eq(reqTenantKms));
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        'inv_all_pii_columns_encrypted',
+        Z3.Implies(sReqEnc, sPgEnc.eq(true))
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        'inv_tenant_kms_for_encrypted_store',
+        Z3.Implies(sReqKms, sPgKms.eq(true))
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_postgres_encrypted_${postgresEncryptedAtRest}`,
+        sPgEnc.eq(postgresEncryptedAtRest)
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_postgres_tenant_kms_${postgresTenantKmsIsolated}`,
+        sPgKms.eq(postgresTenantKmsIsolated)
       );
 
-      proofs.push({
-        clauseId: clause.id,
-        citation: clause.citation,
-        title: clause.title,
-        frameworkId: clause.frameworkId,
-        category: clause.category,
-        severity: clause.severity,
-        status: z3Result === 'sat' ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION',
-        z3SolverStatus: z3Result === 'sat' ? 'sat' : 'unsat',
-        z3SolveTimeMs: solveMs,
-        smtLib2Executed: fullSmtExecuted,
-        unsatCoreAssertions,
-        counterexampleWitness,
-        formalProofSteps,
-        opaRegoTriggeredDenials,
-        affectedGraphNodeIds,
-        offendingLocations,
-        cryptographicProvenance: {
-          statuteSha256,
-          deonticIrSha256,
-          smtFormulaSha256,
-          astSnapshotSha256,
-          merkleProofHash: sha256Hex(
-            `${statuteSha256}:${deonticIrSha256}:${smtFormulaSha256}:${astSnapshotSha256}`
-          ),
-          timestampIso: new Date().toISOString(),
-        },
-      });
+      const z3Result = await solver.check();
+      const solveMs = Math.max(0.3, Math.round((performance.now() - t0) * 100) / 100);
+      totalZ3ExecutionMs += solveMs;
+      const solverCore = z3Result === 'unsat' ? readUnsatCore(solver) : [];
+      z3ModelAssignments =
+        z3Result === 'sat'
+          ? readModelAssignments(solver, [{ name: 'postgres_encrypted_at_rest', expr: sPgEnc }])
+          : {};
+
+      fullSmtExecuted = `${clause.compiled.smtLib2Snippet}
+
+; --- Extracted Live SQL Schema Facts ---
+(assert (! (= postgres_encrypted_at_rest ${postgresEncryptedAtRest}) :named ast_postgres_encrypted_${postgresEncryptedAtRest}))
+(check-sat)
+; Z3 Solver Result: ${z3Result} (${solveMs} ms)
+; unsat-core: ${solverCore.join(', ') || 'n/a'}`;
+
+      counterexampleWitness = {
+        postgres_encrypted_at_rest: postgresEncryptedAtRest,
+        unencrypted_pii_columns: (patientTable?.unencryptedPiiColumns || []).join(', ') || 'none',
+        postgres_tenant_kms_isolated: postgresTenantKmsIsolated,
+      };
+
+      if (z3Result === 'unsat') {
+        affectedGraphNodeIds.push('node-postgres-schema');
+        unsatCoreAssertions.push(
+          ...(solverCore.length > 0 ? solverCore : ['law_encryption_at_rest', `ast_postgres_encrypted_${postgresEncryptedAtRest}`])
+        );
+        opaRegoTriggeredDenials.push(
+          `VIOLATION [${clause.citation}]: Table '${patientTable?.tableName || 'pii'}' stores unencrypted PII columns [${(patientTable?.unencryptedPiiColumns || []).join(', ')}]`
+        );
+        offendingLocations.push({
+          nodeId: 'node-postgres-schema',
+          filePath: patientTable?.filePath || sqlFinding?.filePath || 'schema/postgres_pii.sql',
+          language: 'sql',
+          line: patientTable?.startLine ?? 1,
+          endLine: patientTable?.endLine ?? 1,
+          codeSnippet: sqlFinding?.codeSnippet || '',
+          explanation: `PII columns lack @encrypted annotations or encryption-at-rest markers.`,
+          astNodeType: `SQL::CreateTableStatement(${patientTable?.tableName || 'pii'})`,
+          remediationPreview: `Annotate PII columns with -- @encrypted(AES-256-GCM) and add tenant_kms_key_id if required`,
+        });
+        for (const col of patientTable?.unencryptedPiiColumns || ['pii']) {
+          repairTargets.push({
+            factLabel: `ast_unencrypted_col_${col}`,
+            z3Variable: 'postgres_encrypted_at_rest',
+            repairAction: 'ENCRYPT_COLUMN',
+            findingId: sqlFinding?.id || 'ast-sql',
+            nodeId: 'node-postgres-schema',
+            filePath: patientTable?.filePath || 'schema/postgres_pii.sql',
+            language: 'sql',
+            anchorSymbol: col,
+            currentValue: false,
+            requiredValue: true,
+          });
+        }
+        formalProofSteps.push({
+          stepNumber: 1,
+          ruleName: 'Q.E.D. — Encryption-at-Rest Obligation Violated (UNSAT)',
+          formula: `UNSAT_CORE = { ${unsatCoreAssertions.join(', ')} }`,
+          justification: `Proven by Z3 in ${solveMs} ms.`,
+        });
+      } else {
+        formalProofSteps.push({
+          stepNumber: 1,
+          ruleName: 'Q.E.D. — Encryption-at-Rest Proven (SAT)',
+          formula: `SAT: All PII columns encrypted at rest.`,
+          justification: `Proven by Z3 in ${solveMs} ms.`,
+        });
+      }
+
+      proofs.push(
+        proofSkeleton(clause, {
+          z3Result,
+          solveMs,
+          fullSmtExecuted,
+          unsatCoreAssertions,
+          counterexampleWitness,
+          z3ModelAssignments,
+          repairTargets,
+          formalProofSteps,
+          opaRegoTriggeredDenials,
+          affectedGraphNodeIds,
+          offendingLocations,
+          astSnapshot: { postgresEncryptedAtRest, unencrypted: patientTable?.unencryptedPiiColumns },
+        })
+      );
+      continue;
+    }
+
+    if (clause.category === 'RIGHT_TO_ERASURE_CASCADE') {
+      const reqCascade = clause.deontic.extractedParameters.requireCascadeErasure ?? true;
+      const sReq = Z3.Bool.const('statutory_requires_cascade_erasure');
+      const sHas = Z3.Bool.const('postgres_has_cascade_erasure');
+
+      assertAndTrackNamed(solver, Z3, 'law_gdpr_art17_cascade_erasure', sReq.eq(reqCascade));
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        'inv_fk_on_delete_cascade',
+        Z3.Implies(sReq, sHas.eq(true))
+      );
+      assertAndTrackNamed(
+        solver,
+        Z3,
+        `ast_postgres_cascade_${postgresHasCascade}`,
+        sHas.eq(postgresHasCascade)
+      );
+
+      const z3Result = await solver.check();
+      const solveMs = Math.max(0.3, Math.round((performance.now() - t0) * 100) / 100);
+      totalZ3ExecutionMs += solveMs;
+      const solverCore = z3Result === 'unsat' ? readUnsatCore(solver) : [];
+      z3ModelAssignments =
+        z3Result === 'sat'
+          ? readModelAssignments(solver, [{ name: 'postgres_has_cascade_erasure', expr: sHas }])
+          : {};
+
+      fullSmtExecuted = `${clause.compiled.smtLib2Snippet}
+
+; --- Extracted Live SQL FK Facts ---
+(assert (! (= postgres_has_cascade_erasure ${postgresHasCascade}) :named ast_postgres_cascade_${postgresHasCascade}))
+(check-sat)
+; Z3 Solver Result: ${z3Result} (${solveMs} ms)
+; unsat-core: ${solverCore.join(', ') || 'n/a'}`;
+
+      counterexampleWitness = {
+        statutory_requires_cascade_erasure: reqCascade,
+        postgres_has_cascade_erasure: postgresHasCascade,
+      };
+
+      if (z3Result === 'unsat') {
+        affectedGraphNodeIds.push('node-postgres-schema');
+        unsatCoreAssertions.push(
+          ...(solverCore.length > 0
+            ? solverCore
+            : ['law_gdpr_art17_cascade_erasure', `ast_postgres_cascade_${postgresHasCascade}`])
+        );
+        opaRegoTriggeredDenials.push(
+          `VIOLATION [${clause.citation}]: PII table '${patientTable?.tableName || 'pii'}' lacks ON DELETE CASCADE erasure edges`
+        );
+        offendingLocations.push({
+          nodeId: 'node-postgres-schema',
+          filePath: erasureFinding?.filePath || patientTable?.filePath || 'schema/postgres_pii.sql',
+          language: 'sql',
+          line: erasureFinding?.line ?? patientTable?.startLine ?? 1,
+          endLine: erasureFinding?.endLine ?? patientTable?.endLine ?? 1,
+          codeSnippet: erasureFinding?.codeSnippet || sqlFinding?.codeSnippet || '',
+          explanation: `Foreign keys referencing the PII parent table do not declare ON DELETE CASCADE.`,
+          astNodeType: 'SQL::ForeignKeyConstraint',
+          remediationPreview: `Add ON DELETE CASCADE to every FK that references the PII parent table`,
+        });
+        repairTargets.push({
+          factLabel: `ast_postgres_cascade_${postgresHasCascade}`,
+          z3Variable: 'postgres_has_cascade_erasure',
+          repairAction: 'CASCADE_FOREIGN_KEY',
+          findingId: sqlFinding?.id || 'ast-sql',
+          nodeId: 'node-postgres-schema',
+          filePath: patientTable?.filePath || 'schema/postgres_pii.sql',
+          language: 'sql',
+          currentValue: false,
+          requiredValue: true,
+        });
+        formalProofSteps.push({
+          stepNumber: 1,
+          ruleName: 'Q.E.D. — Erasure Cascade Obligation Violated (UNSAT)',
+          formula: `UNSAT_CORE = { ${unsatCoreAssertions.join(', ')} }`,
+          justification: `Proven by Z3 in ${solveMs} ms.`,
+        });
+      } else {
+        formalProofSteps.push({
+          stepNumber: 1,
+          ruleName: 'Q.E.D. — Erasure Cascade Proven (SAT)',
+          formula: `SAT: Dependent PII rows cascade-delete with the parent subject.`,
+          justification: `Proven by Z3 in ${solveMs} ms.`,
+        });
+      }
+
+      proofs.push(
+        proofSkeleton(clause, {
+          z3Result,
+          solveMs,
+          fullSmtExecuted,
+          unsatCoreAssertions,
+          counterexampleWitness,
+          z3ModelAssignments,
+          repairTargets,
+          formalProofSteps,
+          opaRegoTriggeredDenials,
+          affectedGraphNodeIds,
+          offendingLocations,
+          astSnapshot: postgresHasCascade,
+        })
+      );
       continue;
     }
 
@@ -568,13 +1118,28 @@ export async function verifyRepositoryAgainstClauses(
     const sAllowsNonEu = Z3.Bool.const('statutory_allows_non_eu_egress');
     const sTargetsNonEu = Z3.Bool.const('egress_targets_non_eu_region');
 
-    solver.add(sAllowsNonEu.eq(false));
-    solver.add(Z3.Implies(Z3.Not(sAllowsNonEu), sTargetsNonEu.eq(false)));
-    solver.add(sTargetsNonEu.eq(!isRegionAllowed));
+    assertAndTrackNamed(solver, Z3, 'law_gdpr_ch5_sovereign_residency', sAllowsNonEu.eq(false));
+    assertAndTrackNamed(
+      solver,
+      Z3,
+      'inv_gdpr_art44_no_unapproved_egress',
+      Z3.Implies(Z3.Not(sAllowsNonEu), sTargetsNonEu.eq(false))
+    );
+    assertAndTrackNamed(
+      solver,
+      Z3,
+      `ast_egress_region_${egressRegion.replace(/-/g, '_')}`,
+      sTargetsNonEu.eq(!isRegionAllowed)
+    );
 
     const z3Result = await solver.check();
     const solveMs = Math.max(0.3, Math.round((performance.now() - t0) * 100) / 100);
     totalZ3ExecutionMs += solveMs;
+    const solverCore = z3Result === 'unsat' ? readUnsatCore(solver) : [];
+    z3ModelAssignments =
+      z3Result === 'sat'
+        ? readModelAssignments(solver, [{ name: 'egress_targets_non_eu_region', expr: sTargetsNonEu }])
+        : {};
 
     fullSmtExecuted = `${clause.compiled.smtLib2Snippet}
 
@@ -584,7 +1149,8 @@ export async function verifyRepositoryAgainstClauses(
       '_'
     )}))
 (check-sat)
-; Z3 Solver Result: ${z3Result} (${solveMs} ms)`;
+; Z3 Solver Result: ${z3Result} (${solveMs} ms)
+; unsat-core: ${solverCore.join(', ') || 'n/a'}`;
 
     counterexampleWitness = {
       allowed_regions: allowedRegions.join(', '),
@@ -603,33 +1169,48 @@ export async function verifyRepositoryAgainstClauses(
         stepNumber: 2,
         ruleName: 'TypeScript AST Constant Extraction',
         formula: `REPLICA_TARGET_REGION = "${egressRegion}"`,
-        justification: `Extracted from services/cross_border_sync.ts:${crossBorderFinding?.line ?? 11}`,
+        justification: `Extracted from ${crossBorderFinding?.filePath || 'typescript'}:${crossBorderFinding?.line ?? 0}`,
       }
     );
 
     if (z3Result === 'unsat') {
       affectedGraphNodeIds.push('node-cross-border');
       unsatCoreAssertions.push(
-        'law_gdpr_ch5_sovereign_residency',
-        'inv_gdpr_art44_no_unapproved_egress',
-        `ast_egress_region_${egressRegion.replace(/-/g, '_')}`
+        ...(solverCore.length > 0
+          ? solverCore
+          : [
+              'law_gdpr_ch5_sovereign_residency',
+              'inv_gdpr_art44_no_unapproved_egress',
+              `ast_egress_region_${egressRegion.replace(/-/g, '_')}`,
+            ])
       );
       opaRegoTriggeredDenials.push(
         `VIOLATION [${clause.citation}]: Cross-border replication targets unapproved jurisdiction '${egressRegion}'`
       );
       offendingLocations.push({
         nodeId: 'node-cross-border',
-        filePath: 'services/cross_border_sync.ts',
+        filePath: crossBorderFinding?.filePath || 'services/cross_border_sync.ts',
         language: 'typescript',
         line: crossBorderFinding?.line ?? 11,
         endLine: crossBorderFinding?.endLine ?? 22,
         codeSnippet:
-          crossBorderFinding?.codeSnippet || 'const REPLICA_TARGET_REGION = "us-east-1";',
-        explanation: `Replication service 'replicatePatientTelemetry' routes patient telemetry to '${egressRegion}', outside approved EEA sovereign zones (${allowedRegions.join(
+          crossBorderFinding?.codeSnippet || `const REPLICA_TARGET_REGION = "${egressRegion}";`,
+        explanation: `Replication routes patient telemetry to '${egressRegion}', outside approved EEA sovereign zones (${allowedRegions.join(
           ', '
         )}).`,
         astNodeType: 'TypeScript::VariableDeclaration(REPLICA_TARGET_REGION)',
-        remediationPreview: `Set REPLICA_TARGET_REGION = "eu-central-1" and ENFORCE_EU_SOVEREIGN_BOUNDARY = true`,
+        remediationPreview: `Set replica region to "${allowedRegions[0] || 'eu-central-1'}" and enforce the sovereign boundary`,
+      });
+      repairTargets.push({
+        factLabel: `ast_egress_region_${egressRegion.replace(/-/g, '_')}`,
+        z3Variable: 'egress_targets_non_eu_region',
+        repairAction: 'PIN_EGRESS_REGION',
+        findingId: crossBorderFinding?.id || 'ast-ts-egress',
+        nodeId: 'node-cross-border',
+        filePath: crossBorderFinding?.filePath || 'services/cross_border_sync.ts',
+        language: 'typescript',
+        currentValue: egressRegion,
+        requiredValue: allowedRegions[0] || 'eu-central-1',
       });
       formalProofSteps.push({
         stepNumber: 3,
@@ -646,42 +1227,24 @@ export async function verifyRepositoryAgainstClauses(
       });
     }
 
-    const statuteSha256 = sha256Hex(clause.rawLegalText);
-    const deonticIrSha256 = sha256Hex(JSON.stringify(clause.deontic));
-    const smtFormulaSha256 = sha256Hex(fullSmtExecuted);
-    const astSnapshotSha256 = sha256Hex(egressRegion);
-
-    proofs.push({
-      clauseId: clause.id,
-      citation: clause.citation,
-      title: clause.title,
-      frameworkId: clause.frameworkId,
-      category: clause.category,
-      severity: clause.severity,
-      status: z3Result === 'sat' ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION',
-      z3SolverStatus: z3Result === 'sat' ? 'sat' : 'unsat',
-      z3SolveTimeMs: solveMs,
-      smtLib2Executed: fullSmtExecuted,
-      unsatCoreAssertions,
-      counterexampleWitness,
-      formalProofSteps,
-      opaRegoTriggeredDenials,
-      affectedGraphNodeIds,
-      offendingLocations,
-      cryptographicProvenance: {
-        statuteSha256,
-        deonticIrSha256,
-        smtFormulaSha256,
-        astSnapshotSha256,
-        merkleProofHash: sha256Hex(
-          `${statuteSha256}:${deonticIrSha256}:${smtFormulaSha256}:${astSnapshotSha256}`
-        ),
-        timestampIso: new Date().toISOString(),
-      },
-    });
+    proofs.push(
+      proofSkeleton(clause, {
+        z3Result,
+        solveMs,
+        fullSmtExecuted,
+        unsatCoreAssertions,
+        counterexampleWitness,
+        z3ModelAssignments,
+        repairTargets,
+        formalProofSteps,
+        opaRegoTriggeredDenials,
+        affectedGraphNodeIds,
+        offendingLocations,
+        astSnapshot: egressRegion,
+      })
+    );
   }
 
-  // Helper to collect violated clauses for each architecture graph node
   const violationsForNode = (nodeId: string) =>
     proofs
       .filter((p) => p.status === 'UNSAT_VIOLATION' && p.affectedGraphNodeIds.includes(nodeId))
@@ -697,17 +1260,17 @@ export async function verifyRepositoryAgainstClauses(
     {
       id: 'node-fastapi-endpoint',
       label: 'FastAPI Intake Endpoint',
-      sublabel: 'api/fastapi_intake.py · POST /api/v1/patients/intake',
+      sublabel: `${fastApiFinding?.filePath || 'api/fastapi_intake.py'} · ${fastApiFinding?.functionName || 'POST'}`,
       nodeRole: 'FASTAPI_ENDPOINT',
       layer: 'INGRESS_API',
       language: 'python',
-      filePath: 'api/fastapi_intake.py',
+      filePath: fastApiFinding?.filePath || 'api/fastapi_intake.py',
       line: fastApiFinding?.line ?? 29,
       endLine: fastApiFinding?.endLine ?? 49,
       status: fastApiViolations.length > 0 ? 'VIOLATION' : 'COMPLIANT',
       violatedClauseIds: fastApiViolations,
       dataClassifications: ['DIRECT_IDENTIFIER (SSN, Email)', 'HEALTH_PHI (Diagnosis)'],
-      astSummary: 'Python::AsyncFunctionDef(ingest_patient_pii) + Call(logger.info)',
+      astSummary: `Python::${fastApiFinding?.astNodeKind || 'AsyncFunctionDef'} + Call(logger)`,
       metrics: {
         tenant_kms_isolated: fastApiUsesTenantKms,
         logs_plaintext_pii: fastApiLogsPlaintextPii,
@@ -717,17 +1280,17 @@ export async function verifyRepositoryAgainstClauses(
     {
       id: 'node-postgres-schema',
       label: 'Postgres PII Schema',
-      sublabel: 'schema/postgres_pii.sql · TABLE patient_records',
+      sublabel: `${patientTable?.filePath || 'schema/postgres_pii.sql'} · TABLE ${patientTable?.tableName || 'pii'}`,
       nodeRole: 'POSTGRES_SCHEMA',
       layer: 'DATA_STORAGE',
       language: 'sql',
-      filePath: 'schema/postgres_pii.sql',
+      filePath: patientTable?.filePath || 'schema/postgres_pii.sql',
       line: patientTable?.startLine ?? 4,
       endLine: patientTable?.endLine ?? 14,
       status: postgresViolations.length > 0 ? 'VIOLATION' : 'COMPLIANT',
       violatedClauseIds: postgresViolations,
       dataClassifications: ['DIRECT_IDENTIFIER', 'HEALTH_PHI'],
-      astSummary: 'SQL::CreateTableStatement(patient_records · 8 columns)',
+      astSummary: `SQL::CreateTableStatement(${patientTable?.tableName || 'pii'} · ${patientTable?.columns.length || 0} columns)`,
       metrics: {
         retention_ttl_hours: `${postgresRetentionHours}h`,
         tenant_kms_column: postgresTenantKmsIsolated,
@@ -737,17 +1300,17 @@ export async function verifyRepositoryAgainstClauses(
     {
       id: 'node-redis-worker',
       label: 'Redis Cache & Purge Worker',
-      sublabel: 'workers/redis_cache_worker.py · RedisSessionCacheWorker',
+      sublabel: `${redisFinding?.filePath || 'workers/redis_cache_worker.py'} · ${redisFinding?.functionName || 'cache'}`,
       nodeRole: 'REDIS_WORKER',
       layer: 'CACHE_AND_WORKERS',
       language: 'python',
-      filePath: 'workers/redis_cache_worker.py',
+      filePath: redisFinding?.filePath || 'workers/redis_cache_worker.py',
       line: redisFinding?.line ?? 7,
       endLine: redisFinding?.endLine ?? 28,
       status: redisViolations.length > 0 ? 'VIOLATION' : 'COMPLIANT',
       violatedClauseIds: redisViolations,
       dataClassifications: ['EPHEMERAL_SESSION_PII'],
-      astSummary: 'Python::ClassDef(RedisSessionCacheWorker) · setex()',
+      astSummary: `${redisFinding?.astNodeKind || 'Python::ClassDef'} · setex()`,
       metrics: {
         cache_ttl_hours: `${redisTtlHours}h (${Math.round((redisTtlHours / 24) * 10) / 10}d)`,
         tenant_kms_envelope: redisUsesTenantKms,
@@ -756,17 +1319,17 @@ export async function verifyRepositoryAgainstClauses(
     {
       id: 'node-ai-engine',
       label: 'AI Clinical & Credit Triage',
-      sublabel: 'services/ai_credit_triage.ts · evaluateClinicalAndCreditRisk()',
+      sublabel: `${aiFinding?.filePath || 'services/ai_credit_triage.ts'} · ${aiFinding?.functionName || 'evaluate'}()`,
       nodeRole: 'AI_DECISION_ENGINE',
       layer: 'SERVICE_LOGIC',
       language: 'typescript',
-      filePath: 'services/ai_credit_triage.ts',
+      filePath: aiFinding?.filePath || 'services/ai_credit_triage.ts',
       line: aiFinding?.line ?? 19,
       endLine: aiFinding?.endLine ?? 37,
       status: aiViolations.length > 0 ? 'VIOLATION' : 'COMPLIANT',
       violatedClauseIds: aiViolations,
       dataClassifications: ['HIGH_RISK_AI_SCORING', 'HEALTH_PHI'],
-      astSummary: 'TS::FunctionDeclaration(evaluateClinicalAndCreditRisk)',
+      astSummary: aiFinding?.astNodeKind || 'TS::FunctionDeclaration',
       metrics: {
         confidence_gate: `${aiConfidencePct}%`,
         human_oversight_gate: aiHasHumanGate,
@@ -776,17 +1339,17 @@ export async function verifyRepositoryAgainstClauses(
     {
       id: 'node-cross-border',
       label: 'Cross-Border Telemetry Sync',
-      sublabel: 'services/cross_border_sync.ts · replicatePatientTelemetry()',
+      sublabel: `${crossBorderFinding?.filePath || 'services/cross_border_sync.ts'} · ${crossBorderFinding?.functionName || 'replicate'}()`,
       nodeRole: 'CROSS_BORDER_SYNC',
       layer: 'EXTERNAL_EGRESS',
       language: 'typescript',
-      filePath: 'services/cross_border_sync.ts',
+      filePath: crossBorderFinding?.filePath || 'services/cross_border_sync.ts',
       line: crossBorderFinding?.line ?? 11,
       endLine: crossBorderFinding?.endLine ?? 22,
       status: crossBorderViolations.length > 0 ? 'VIOLATION' : 'COMPLIANT',
       violatedClauseIds: crossBorderViolations,
       dataClassifications: ['REPLICATED_PATIENT_TELEMETRY'],
-      astSummary: 'TS::FunctionDeclaration(replicatePatientTelemetry)',
+      astSummary: crossBorderFinding?.astNodeKind || 'TS::FunctionDeclaration',
       metrics: {
         replica_region: egressRegion,
         eu_sovereign: egressRegion.startsWith('eu-'),
@@ -799,7 +1362,7 @@ export async function verifyRepositoryAgainstClauses(
       id: 'edge-fastapi-to-postgres',
       source: 'node-fastapi-endpoint',
       target: 'node-postgres-schema',
-      label: 'INSERT patient_records (SSN, PHI)',
+      label: 'INSERT PII records',
       dataPayload: ['ssn', 'email', 'diagnosis_code'],
       isEncrypted: true,
       isTenantIsolated: fastApiUsesTenantKms && postgresTenantKmsIsolated,
