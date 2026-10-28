@@ -21,49 +21,60 @@ When a statutory clause is amended or a code commit introduces a compliance regr
 
 ## System Architecture
 
-```text
-+---------------------------------------------------------------------------------------------------+
-|                                   1. NORMATIVE INGESTION LAYER                                    |
-|  EUR-Lex SPARQL/REST  |  U.S. Federal Register API  |  Enterprise DPA / MSA  |  BYOC Custom Prose |
-+-------------------------------------------------+-------------------------------------------------+
-                                                  |
-                                                  v
-+---------------------------------------------------------------------------------------------------+
-|                           2. DEONTIC & NEURO-SYMBOLIC COMPILATION LAYER                           |
-|  Modal Deontic IR: O(phi), F(phi), P(phi)                                                         |
-|  |-- First-Order Predicate Logic: forall x in PII_Store : Encrypted(x) ^ TenantKMS(x) ^ TTL <= 72 |
-|  |-- SMT-LIB2 Generator: QF_LIA & QF_UF Theories with Named Assertions (:named ...)               |
-|  |-- Policy-as-Code Synthesis: Open Policy Agent (OPA Rego) deny[msg] Rules                       |
-|  +-- Structural Query Synthesis: Polyglot AST & SQL DDL S-Expression Queries                      |
-+-------------------------------------------------+-------------------------------------------------+
-                                                  |
-                                                  v
-+---------------------------------------------------------------------------------------------------+
-|                           3. POLYGLOT AST & RUNTIME INTROSPECTION LAYER                           |
-|  Target Git Repository (target-repo/)                                                             |
-|  |-- PostgreSQL / SQLite DDL Parser (schema/postgres_pii.sql) -> Table & Column Metadata          |
-|  |-- Python 3.12 Native `ast` Module (api/fastapi_intake.py, workers/redis_cache_worker.py)       |
-|  +-- TypeScript 5.7 Compiler API `ts.createSourceFile` (services/ai_credit_triage.ts, ...)        |
-+-------------------------------------------------+-------------------------------------------------+
-                                                  |
-                                                  v
-+---------------------------------------------------------------------------------------------------+
-|                         4. FORMAL VERIFICATION, MULTI-LLM & RAG MESH                              |
-|  |-- Microsoft Z3 Theorem Prover (z3-solver v4.13.4): check-sat, get-unsat-core, get-model        |
-|  |-- Local Ollama Multi-LLM Daemon (:11434):                                                      |
-|  |     * all-minilm:latest (384-d Dense Neural Embeddings for Contextual + Graph RAG)             |
-|  |     * qwen2.5-coder:0.5b (Polyglot AST Triage & CEGIS Patch Generation)                        |
-|  |     * dolphin3:latest (Llama-3.1 8B Q4_K_M Deontic Legal Interpretation)                       |
-|  +-- Persistent SQLite3 Compliance & Vector Ledger (data/lexcompiler_enterprise.db)               |
-+-------------------------------------------------+-------------------------------------------------+
-                                                  |
-                                                  v
-+---------------------------------------------------------------------------------------------------+
-|                        5. AUTONOMOUS REMEDIATION & ATTESTATION ENFORCER                           |
-|  |-- Pre-Merge Z3 Sandbox Gate: Verifies Patched AST Satisfies All Clauses (UNSAT -> SAT)         |
-|  |-- Cryptographic Conformity Authority: RFC 8032 Ed25519 Signature + SHA-256 Merkle Audit Root   |
-|  +-- DevSecOps Integration: OASIS SARIF v2.1.0 Export + GitHub Actions Workflow Gate              |
-+---------------------------------------------------------------------------------------------------+
+```mermaid
+flowchart TB
+    subgraph L1["1. Normative & Statutory Ingestion Layer"]
+        EUR["EUR-Lex SPARQL / REST Feed"]
+        FED["U.S. Federal Register API"]
+        DPA["Enterprise DPA & MSA Clauses"]
+        BYOC["Universal BYOC Custom Prose"]
+    end
+
+    subgraph L2["2. Deontic & Neuro-Symbolic Compilation Layer (lex-deontic-compiler-mcp)"]
+        DEONTIC["Modal Deontic Extractor: O(phi), F(phi), P(phi)"]
+        FOL["First-Order Predicate Logic Normalizer"]
+        SMT["SMT-LIB2 Generator (QF_LIA & QF_UF Named Assertions)"]
+        REGO["Open Policy Agent (OPA Rego) deny[msg] Compiler"]
+        ASTQ["Polyglot AST & SQL DDL S-Expression Query Generator"]
+    end
+
+    subgraph L3["3. Polyglot AST & Runtime Introspection Layer (lex-polyglot-ast-mcp)"]
+        SQL["PostgreSQL / SQLite DDL Parser (schema/postgres_pii.sql)"]
+        PY["Python 3.12 Native ast Parser (api/fastapi_intake.py, workers/redis_cache_worker.py)"]
+        TS["TypeScript 5.7 Compiler API (services/ai_credit_triage.ts, services/cross_border_sync.ts)"]
+        SANDBOX["Isolated Runtime Sandbox (SQLite3 + Python 3.12 + Git Worktree)"]
+    end
+
+    subgraph L4["4. Formal Verification, Multi-LLM & Hybrid RAG Mesh"]
+        Z3["Microsoft Z3 Theorem Prover v4.13.4 (check-sat, get-unsat-core, get-model)"]
+        RAG["Contextual + Graph RAG (all-minilm 384-d Neural Embeddings + BM25 RRF + Neo4j Cypher)"]
+        LLM["Local Ollama Multi-LLM Daemon (:11434) (qwen2.5-coder:0.5b + dolphin3:latest 8B)"]
+        LEDGER["Persistent SQLite3 Compliance & Vector Ledger (lexcompiler_enterprise.db)"]
+    end
+
+    subgraph L5["5. Autonomous Remediation & Cryptographic Attestation (lex-remediation-pr-mcp)"]
+        CEGIS["CEGIS Polyglot Unified Diff Synthesizer"]
+        GATE["Pre-Merge Z3 Sandbox Verification Gate (Proves UNSAT -> SAT)"]
+        CERT["RFC 8032 Ed25519 Conformity Certificate & SHA-256 Merkle Root"]
+        SARIF["OASIS SARIF v2.1.0 Export & GitHub Actions CI Gate"]
+    end
+
+    EUR & FED & DPA & BYOC --> DEONTIC
+    DEONTIC --> FOL
+    FOL --> SMT & REGO & ASTQ
+    ASTQ --> SQL & PY & TS
+    SQL & PY & TS --> SANDBOX
+    SMT --> Z3
+    SANDBOX --> Z3
+    SQL & PY & TS --> RAG
+    DEONTIC --> RAG
+    RAG <--> LLM
+    Z3 --> LEDGER
+    RAG --> LEDGER
+    Z3 -- "UNSAT Core & Witness Model" --> CEGIS
+    LLM -- "AST Patch Candidate" --> CEGIS
+    CEGIS --> GATE
+    GATE -- "Verified SAT_COMPLIANT" --> CERT & SARIF
 ```
 
 ---
@@ -144,60 +155,6 @@ LexCompiler implements 6 custom MCP servers supporting `stdio` (`server/mcp/stdi
 - **Live Runtime Sandbox (`server/sandbox/realWorldSandbox.ts`)**: Executes `target-repo/schema/postgres_pii.sql` in SQLite3, runs `target-repo/api/fastapi_intake.py` and `target-repo/workers/redis_cache_worker.py` in Python 3.12, captures live stdout logs and Redis `SETEX` TTL parameters, and manages Git commits in an isolated repository worktree.
 - **RFC 8032 Ed25519 Conformity Certificates (`server/enterprise/enterpriseSuite.ts`)**: Signs canonical Z3 Merkle proof payloads using Node's native `crypto.sign(null, payload, ed25519PrivateKey)` with live tamper detection via `crypto.verify`.
 - **OASIS SARIF v2.1.0 & GitHub Actions Gate (`.github/workflows/lexcompiler-gate.yml`)**: Exports static analysis results compatible with GitHub Advanced Security Code Scanning.
-
----
-
-## Repository Structure
-
-```text
-.
-├── .github/workflows/
-│   └── lexcompiler-gate.yml          # CI/CD Z3 Formal Verification & SARIF Upload Action
-├── server/
-│   ├── agents/
-│   │   └── multiAgentOrchestrator.ts # 6-Agent Neuro-Symbolic Pipeline & Prompt Registry
-│   ├── analyzer/
-│   │   ├── astAnalyzer.ts            # SQL DDL, Python 3.12 ast, and TypeScript AST Parsers
-│   │   └── repoBaseline.ts           # Target Repository File Manager
-│   ├── compiler/
-│   │   └── legalCompiler.ts          # Deontic IR, SMT-LIB2, OPA Rego & AST Query Compiler
-│   ├── enterprise/
-│   │   └── enterpriseSuite.ts        # Ed25519 Signing, SARIF v2.1.0 & BYOC Custom Scanner
-│   ├── mcp/
-│   │   ├── mcpSuite.ts               # 6 Custom MCP Servers & JSON-RPC 2.0 Dispatcher
-│   │   └── stdio-server.ts           # Standard I/O MCP Transport Entrypoint
-│   ├── optimization/
-│   │   └── tokenOptimizer.ts         # Codeburn, Graphify, and Caveman Token Compressors
-│   ├── prover/
-│   │   └── z3Engine.ts               # Microsoft Z3 SMT Solver & Unsat Core Extractor
-│   ├── rag/
-│   │   └── hybridRagEngine.ts        # Contextual + Graph RAG + Ollama Neural Embeddings
-│   ├── remediation/
-│   │   └── prSynthesizer.ts          # CEGIS Patch Generator & Pre-PR Z3 Sandbox Gate
-│   ├── sandbox/
-│   │   └── realWorldSandbox.ts       # Real SQLite3, Python 3.12, TS & Git Sandbox Executor
-│   ├── services/
-│   │   └── realAiServiceMesh.ts      # Live Ollama (:11434) & SQLite Vector Ledger Client
-│   ├── cli-realworld-demo.ts         # End-to-End 6-Stage Real-World CLI Verification
-│   ├── cli-verify.ts                 # Headless Z3 CLI Verification Runner
-│   ├── index.ts                      # Express API & Production Static Server (:3001)
-│   └── lexcompiler.test.ts           # Vitest Automated Verification Suite
-├── shared/
-│   └── types.ts                      # Shared TypeScript Domain & Protocol Contracts
-├── src/
-│   ├── components/                   # React 19 Control Plane Modules
-│   ├── App.tsx                       # Main Application Shell
-│   └── index.css                     # Design System Stylesheet
-├── target-repo/                      # Polyglot Target Application Under Verification
-│   ├── api/fastapi_intake.py
-│   ├── schema/postgres_pii.sql
-│   ├── services/ai_credit_triage.ts
-│   ├── services/cross_border_sync.ts
-│   └── workers/redis_cache_worker.py
-├── Dockerfile
-├── docker-compose.yml
-└── package.json
-```
 
 ---
 
