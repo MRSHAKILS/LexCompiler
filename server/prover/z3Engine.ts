@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { init as initZ3 } from 'z3-solver';
+import { buildRegoInput, evaluateRegoPolicy } from '../policy/opaEvaluator.js';
 import { sha256Hex } from '../util/hash.js';
 import type {
   ArchitectureGraphEdge,
@@ -185,8 +186,8 @@ function planClause(
     const reqKms = p.requiresTenantIsolatedKeys ?? retention;
     const reqEnc = p.requireEncryptionAtRest ?? true;
     const sMax = Z3.Int.const('law_max_retention_minutes');
-    const sKms = Z3.Bool.const('law_requires_tenant_kms');
-    const sEnc = Z3.Bool.const('law_requires_encryption_at_rest');
+    const sKms = Z3.Bool.const('law_requires_tenant_kms__value');
+    const sEnc = Z3.Bool.const('law_requires_encryption_at_rest__value');
     if (retention) {
       law(`law_max_retention_${sanitize(fmtHours(maxHours))}`, sMax.eq(minutes(maxHours)), `max retention = ${fmtHours(maxHours)}`);
     }
@@ -374,7 +375,7 @@ function planClause(
 
   if (clause.category === 'PII_LOGGING_BAN') {
     const forbid = p.forbidPlaintextLogging ?? true;
-    const sForbid = Z3.Bool.const('law_forbids_plaintext_pii_logs');
+    const sForbid = Z3.Bool.const('law_forbids_plaintext_pii_logs__value');
     law('law_forbids_plaintext_pii_logs', sForbid.eq(forbid), `plaintext PII in logs forbidden = ${forbid}`);
     for (const f of byType('LOGGER_CALL').filter((x) => x.metadata.logsPlaintextPii)) {
       const inst = findingInstance('log', 'node-fastapi-endpoint', f);
@@ -413,8 +414,8 @@ function planClause(
     const reqHuman = p.requireHumanOversightGate ?? true;
     const reqAudit = p.requireImmutableAuditLog ?? true;
     const sConf = Z3.Int.const('law_min_confidence_pct');
-    const sHuman = Z3.Bool.const('law_requires_human_oversight');
-    const sAudit = Z3.Bool.const('law_requires_audit_log');
+    const sHuman = Z3.Bool.const('law_requires_human_oversight__value');
+    const sAudit = Z3.Bool.const('law_requires_audit_log__value');
     law(`law_min_confidence_${minConf}pct`, sConf.eq(minConf), `minimum confidence gate = ${minConf}%`);
     law('law_requires_human_oversight', sHuman.eq(reqHuman), `human oversight required = ${reqHuman}`);
     law('law_requires_audit_log', sAudit.eq(reqAudit), `immutable audit log required = ${reqAudit}`);
@@ -493,7 +494,7 @@ function planClause(
 
   if (clause.category === 'RIGHT_TO_ERASURE_CASCADE') {
     const req = p.requireCascadeErasure ?? true;
-    const sReq = Z3.Bool.const('law_requires_cascade_erasure');
+    const sReq = Z3.Bool.const('law_requires_cascade_erasure__value');
     law('law_requires_cascade_erasure', sReq.eq(req), `cascade erasure required = ${req}`);
     for (const t of piiTables) {
       const finding = tableFinding(t);
@@ -626,6 +627,7 @@ export async function verifyRepositoryAgainstClauses(
   merkleAuditRoot: string;
 }> {
   const Z3 = await getZ3Context();
+  const regoInput = buildRegoInput(sqlTables, astFindings);
   const proofs: ClauseVerificationProof[] = [];
   let totalZ3ExecutionMs = 0;
 
@@ -635,6 +637,8 @@ export async function verifyRepositoryAgainstClauses(
     const solver = new Z3.Solver();
     solver.set('timeout', SOLVER_TIMEOUT_MS);
 
+    // Assumption literals must never share a name with a model variable (law values use
+    // a `__value` suffix), or the tracker would constrain the variable it guards.
     const trackers = new Map<string, Z3Any>();
     const track = (name: string, expr: Z3Any) => {
       let tracker = trackers.get(name);
@@ -774,6 +778,12 @@ ${assertionsSmt}
       });
     }
 
+    // Evaluate the clause's generated Rego with OPA when it is installed.
+    const opa = await evaluateRegoPolicy(clause.category, clause.compiled.opaRegoRule, regoInput);
+    if (opa.evaluated) {
+      opaRegoTriggeredDenials.splice(0, opaRegoTriggeredDenials.length, ...opa.denials);
+    }
+
     const statuteSha256 = sha256Hex(clause.rawLegalText);
     const deonticIrSha256 = sha256Hex(JSON.stringify(clause.deontic));
     const smtFormulaSha256 = sha256Hex(assertionsSmt);
@@ -795,6 +805,9 @@ ${assertionsSmt}
       counterexampleWitness: witness,
       formalProofSteps,
       opaRegoTriggeredDenials,
+      policyDenialSource: opa.evaluated ? 'opa' : 'z3-derived',
+      // A missing binary is expected; any other OPA failure is reported.
+      ...(opa.error && !opa.error.startsWith('opa binary not found') ? { opaError: opa.error } : {}),
       affectedGraphNodeIds: [...affected],
       offendingLocations,
       applicableInstanceCount: plan.checks.length,

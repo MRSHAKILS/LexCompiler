@@ -121,13 +121,24 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - **Tests:** `server/githubPr.test.ts` covers the call sequence against a mocked GitHub.
 - **UI:** local bundles show their bundle id (`PR-LEX-…`) instead of a fabricated PR number, and static "PR #409" labels were removed.
 
+### Step 8 · OPA Rego evaluation, prover fix, regression tests
+- **V5 — real OPA evaluation:**
+  - **Policies:** generated policies are Rego v1 (`import rego.v1`, `deny contains msg if`), built from the compiled bounds by `server/policy/regoPolicies.ts`, and iterate over every construct instance.
+  - **Evaluation:** `server/policy/opaEvaluator.ts` builds the input document from the analyzer facts and runs `opa eval` whenever an `opa` binary is available (`LEXCOMPILER_OPA_BIN` or PATH). `opaRegoTriggeredDenials` then holds OPA's own output (`policyDenialSource: 'opa'`); without OPA they are derived from Z3 (`'z3-derived'`).
+  - **Where OPA comes from:** CI installs OPA 1.4.2 (`open-policy-agent/setup-opa`), and the Docker image copies `opa` from the official `openpolicyagent/opa:1.4.2-static` image.
+- **Prover fix:** an assumption literal could share its name with a law variable (e.g. `law_requires_tenant_kms`), which wrongly refuted any clause whose boolean law value was `false`. Law values now use a `__value` suffix. This was found by the new BYOC regression test.
+- **A4 — taint origin:** leaked fields report the original PII field even through aliases (`x = payload.ssn` → `ssn`).
+- **T1 — regression tests:**
+  - **`server/analysis.test.ts`:** the compiler (strictest duration, number words, negation, LLM validation), the analyzer (constant folding, TTL units, taint through aliases, false-positive avoidance, multi-line SQL / constraints / ALTER TABLE), the prover (every instance reported, missing constructs not applicable, executed SMT), BYOC, and remediation (edit engine, user code kept, safe helpers).
+  - **`server/opa.test.ts`:** OPA agreement with Z3 before and after remediation; it runs wherever OPA is installed (CI).
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
 
 | # | Item | Why it couldn't be finished here | What remains |
 | :-- | :--- | :--- | :--- |
-| L-1 | **OPA Rego evaluation (V5)** | No OPA binary or Rego WASM in this environment | Install `opa` (v1.x), migrate the generated Rego to v1 syntax (`deny contains msg if { ... }`), evaluate it with `opa eval` (or compile to WASM and use `@open-policy-agent/opa-wasm`) against the analyzer facts, and fill `opaRegoTriggeredDenials` from real OPA output. |
+| L-1 | **OPA Rego evaluation (V5)** | Running a downloaded OPA binary was not permitted in this session | Implemented (Step 8): Rego v1 policies, the `opa eval` integration, OPA in CI and Docker. Remaining: run `npm test` locally with `opa` on PATH (or check the CI run) to confirm `server/opa.test.ts` passes against real OPA. |
 | L-2 | **6-agent crew (AI1)** — CrewAI, DSPy, Hermes, LangGraph, Pydantic-AI, OpenAI Swarm with Claude / DeepSeek / GPT-4o / Gemini / Llama / Qwen | Needs provider API keys, Python agent frameworks, and local GGUF models | Each agent already calls its real MCP tool with measured latency and tokens (Step 5). Remaining: put the named framework and LLM in front of each tool call (agent reasoning, tool selection, structured outputs). |
 | L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No PostgreSQL/pgvector or Neo4j service | Retrieval, 2-hop traversal, and neural dense ranking now run in memory (Step 5). Remaining: persist chunk vectors in pgvector (HNSW, 384-d), store the knowledge graph in Neo4j, and run the traversal as Cypher. Add a BGE cross-encoder reranker. |
 | L-4 | **RAGAS evaluation (AI3)** | Needs an evaluation dataset and a judge LLM | Metrics are now computed against category-derived labels (Step 5). Remaining: a hand-labelled question set and RAGAS with a judge LLM. |

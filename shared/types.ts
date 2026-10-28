@@ -314,7 +314,12 @@ export interface ClauseVerificationProof {
   repairTargets?: Z3RepairTarget[];
   counterexampleWitness: Record<string, string | number | boolean>;
   formalProofSteps: Z3FormalProofStep[];
+  /** Denials from `opa eval` when OPA is installed; otherwise derived from the Z3 result. */
   opaRegoTriggeredDenials: string[];
+  /** 'opa' when the generated Rego was evaluated by OPA, 'z3-derived' otherwise. */
+  policyDenialSource?: 'opa' | 'z3-derived';
+  /** OPA evaluation error, if OPA was available but failed. */
+  opaError?: string;
   affectedGraphNodeIds: string[];
   offendingLocations: Array<{
     nodeId: string;

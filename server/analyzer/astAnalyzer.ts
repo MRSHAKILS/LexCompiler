@@ -923,10 +923,12 @@ for node in ast.walk(tree):
 
 # --- PII taint: seeds are PII-named parameters; propagate through assignments to a fixpoint.
 tainted = set()
+origin = {}  # tainted name -> PII field it carries
 for f in functions:
     for a in f["args"]:
         if PII.search(a):
             tainted.add(a)
+            origin[a] = a
 
 def is_sanitizer_call(n):
     return isinstance(n, ast.Call) and bool(SANITIZER.search(dotted(n.func).split(".")[-1] or ""))
@@ -941,7 +943,7 @@ def tainted_leaves(expr):
         if isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str) and PII.search(n.slice.value):
             out.append((n, n.slice.value)); return
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in tainted:
-            out.append((n, n.id)); return
+            out.append((n, origin.get(n.id, n.id))); return
         for c in ast.iter_child_nodes(n):
             visit(c)
     visit(expr)
@@ -951,11 +953,13 @@ changed = True
 while changed:
     changed = False
     for node in assign_nodes:
-        if tainted_leaves(node.value):
+        leaves = tainted_leaves(node.value)
+        if leaves:
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for t in targets:
                 if isinstance(t, ast.Name) and t.id not in tainted:
                     tainted.add(t.id)
+                    origin[t.id] = leaves[0][1]
                     changed = True
 
 def is_log_sink(name):

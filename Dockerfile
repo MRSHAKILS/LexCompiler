@@ -12,6 +12,9 @@ FROM node:22-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends python3 git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+# OPA evaluates the generated Rego policies (LEXCOMPILER_OPA_BIN defaults to `opa` on PATH)
+COPY --from=openpolicyagent/opa:1.4.2-static /opa /usr/local/bin/opa
+
 WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3001 \

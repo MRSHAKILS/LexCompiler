@@ -28,6 +28,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Setup Open Policy Agent (evaluates the generated Rego in tests)
+        uses: open-policy-agent/setup-opa@v2
+        with:
+          version: 1.4.2
+
       - name: Install Dependencies
         run: npm ci
 

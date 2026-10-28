@@ -10,6 +10,21 @@ import type {
 import { runRealLlmInference } from '../services/realAiServiceMesh.js';
 
 export { sha256Hex } from '../util/hash.js';
+import { regoPolicyFor, type RegoBounds } from '../policy/regoPolicies.js';
+
+function regoBounds(b: ExtractedDeonticBounds): RegoBounds {
+  return {
+    maxRetentionHours: b.maxRetentionHours,
+    requiresTenantIsolatedKeys: b.requiresTenantIsolatedKeys,
+    requireEncryptionAtRest: b.requireEncryptionAtRest,
+    forbidPlaintextLogging: b.forbidPlaintextLogging,
+    minAiConfidenceThreshold: b.minAiConfidenceThreshold,
+    requireHumanOversightGate: b.requireHumanOversightGate,
+    requireImmutableAuditLog: true,
+    requireCascadeErasure: b.requireCascadeErasure,
+    allowedDataRegions: b.allowedDataRegions,
+  };
+}
 
 const BANGLA_DIGIT_MAP: Record<string, string> = {
   '০': '0',
@@ -498,34 +513,7 @@ function compileFromBounds(
 (assert (! (<= postgres_retention_hours statutory_max_ttl_hours) :named inv_postgres_retention_bound))
 (assert (! (=> statutory_requires_tenant_kms (= fastapi_uses_tenant_kms true)) :named inv_fastapi_tenant_kms_envelope))
 (assert (! (<= redis_worker_ttl_hours statutory_max_ttl_hours) :named inv_redis_ttl_within_${maxRetentionHours}h))`,
-      opaRegoRule: `package lexcompiler.dpa.retention_and_kms
-
-default compliant = false
-
-statutory_max_hours := ${maxRetentionHours}
-requires_tenant_kms := ${requiresTenantIsolatedKeys}
-
-deny[msg] {
-  input.postgres_schema.retention_hours > statutory_max_hours
-  msg := sprintf("VIOLATION [${citation}]: Postgres PII retention (%dh) exceeds statutory limit (%dh)", [input.postgres_schema.retention_hours, statutory_max_hours])
-}
-
-deny[msg] {
-  requires_tenant_kms
-  not input.postgres_schema.has_tenant_key_isolation
-  msg := "VIOLATION [${citation}]: Postgres table 'patient_records' lacks tenant-isolated KMS key column (tenant_kms_key_id)"
-}
-
-deny[msg] {
-  requires_tenant_kms
-  not input.fastapi_endpoint.uses_tenant_isolated_kms
-  msg := "VIOLATION [${citation}]: FastAPI endpoint '/api/v1/patients/intake' persists PII without tenant-isolated KMS encryption envelope"
-}
-
-deny[msg] {
-  input.redis_worker.ttl_hours > statutory_max_hours
-  msg := sprintf("VIOLATION [${citation}]: Redis cache worker TTL (%dh) exceeds statutory purge window (%dh)", [input.redis_worker.ttl_hours, statutory_max_hours])
-}`,
+      opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
       astPatternQuery: `; Tree-sitter / Polyglot AST Query (${citation})
 (sql_create_table
   table_name: (identifier) @table (#match? @table "patient_records")
@@ -569,14 +557,7 @@ deny[msg] {
 
 (assert (! (= law_forbids_plaintext_pii_logs ${forbidPlaintextLogging}) :named law_hipaa_gdpr_no_pii_logs))
 (assert (! (=> law_forbids_plaintext_pii_logs (= fastapi_logs_plaintext_pii false)) :named inv_zero_plaintext_pii_in_logs))`,
-      opaRegoRule: `package lexcompiler.hipaa.pii_logging
-
-deny[msg] {
-  ${forbidPlaintextLogging}
-  finding := input.ast_findings[_]
-  finding.metadata.logsPlaintextPii == true
-  msg := sprintf("VIOLATION [${citation}]: Unredacted PII/PHI logged in %s:%d (%v)", [finding.filePath, finding.line, finding.metadata.leakedFields])
-}`,
+      opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
       astPatternQuery: `(call
   function: (attribute object: (identifier) @log_obj (#match? @log_obj "^(logger|logging|console)$")
                        attribute: (identifier) @method (#match? @method "^(info|warn|error|debug)$"))
@@ -625,21 +606,7 @@ deny[msg] {
 (assert (! (= ai_engine_has_human_oversight true) :named inv_eu_ai_act_human_oversight_gate))
 (assert (! (>= ai_engine_confidence_gate_pct statutory_min_confidence_pct) :named inv_eu_ai_act_confidence_threshold))
 (assert (! (= ai_engine_writes_audit_log true) :named inv_eu_ai_act_article12_audit_log))`,
-      opaRegoRule: `package lexcompiler.eu_ai_act.article14
-
-statutory_min_confidence := ${minAiConfidenceThreshold}
-
-deny[msg] {
-  node := input.ai_nodes[_]
-  node.aiConfidenceThreshold < statutory_min_confidence
-  msg := sprintf("VIOLATION [${citation}]: AI triage confidence gate (%.2f) is below statutory threshold (%.2f)", [node.aiConfidenceThreshold, statutory_min_confidence])
-}
-
-deny[msg] {
-  node := input.ai_nodes[_]
-  not node.hasHumanOversightGate
-  msg := "VIOLATION [${citation}]: High-risk AI inference executes autonomously without mandatory Human-in-the-Loop escalation gate"
-}`,
+      opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
       astPatternQuery: `(function_declaration
   name: (identifier) @fn (#eq? @fn "evaluateClinicalAndCreditRisk")
   body: (statement_block
@@ -689,14 +656,7 @@ deny[msg] {
 (assert (! (= statutory_requires_tenant_kms ${requiresTenantIsolatedKeys}) :named law_requires_tenant_kms))
 (assert (! (=> statutory_requires_encryption_at_rest (= postgres_encrypted_at_rest true)) :named inv_all_pii_columns_encrypted))
 (assert (! (=> statutory_requires_tenant_kms (= postgres_tenant_kms_isolated true)) :named inv_tenant_kms_for_encrypted_store))`,
-      opaRegoRule: `package lexcompiler.crypto.encryption_at_rest
-
-deny[msg] {
-  table := input.sql_tables[_]
-  table.containsPII
-  count(table.unencryptedPiiColumns) > 0
-  msg := sprintf("VIOLATION [${citation}]: Table '%s' stores unencrypted PII columns %v", [table.tableName, table.unencryptedPiiColumns])
-}`,
+      opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
       astPatternQuery: `(sql_column_definition
   name: (identifier) @col (#match? @col "ssn|email|phone|patient_|biometric_")
   annotation: (comment) @enc (#match? @enc "@encrypted"))`,
@@ -732,14 +692,7 @@ deny[msg] {
 
 (assert (! (= statutory_requires_cascade_erasure true) :named law_gdpr_art17_cascade_erasure))
 (assert (! (=> statutory_requires_cascade_erasure (= postgres_has_cascade_erasure true)) :named inv_fk_on_delete_cascade))`,
-      opaRegoRule: `package lexcompiler.gdpr.erasure_cascade
-
-deny[msg] {
-  table := input.sql_tables[_]
-  table.containsPII
-  not table.hasErasureCascade
-  msg := sprintf("VIOLATION [${citation}]: PII table '%s' lacks ON DELETE CASCADE erasure edges", [table.tableName])
-}`,
+      opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
       astPatternQuery: `(sql_foreign_key
   references: (identifier) @parent
   on_delete: (keyword) @action (#eq? @action "CASCADE"))`,
@@ -782,19 +735,7 @@ deny[msg] {
 
 (assert (! (= statutory_allows_non_eu_egress ${allowsUsEast}) :named law_gdpr_ch5_sovereign_residency))
 (assert (! (=> (not statutory_allows_non_eu_egress) (= egress_targets_non_eu_region false)) :named inv_gdpr_art44_no_unapproved_egress))`,
-    opaRegoRule: `package lexcompiler.gdpr.cross_border
-
-allowed_regions := ${JSON.stringify(allowedDataRegions)}
-
-deny[msg] {
-  egress := input.egress_nodes[_]
-  not region_allowed(egress.egressRegion)
-  msg := sprintf("VIOLATION [${citation}]: Cross-border PII transfer to unapproved region '%s' (allowed: %v)", [egress.egressRegion, allowed_regions])
-}
-
-region_allowed(r) {
-  r == allowed_regions[_]
-}`,
+    opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
     astPatternQuery: `(variable_declarator
   name: (identifier) @region_const (#eq? @region_const "REPLICA_TARGET_REGION")
   value: (string) @region_val (#match? @region_val "^(eu-central-1|eu-west-1)$"))`,
