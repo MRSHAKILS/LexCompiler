@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import { analyzeFullRepository } from '../analyzer/astAnalyzer.js';
+import { analyzeFullRepositoryAsync } from '../analyzer/astAnalyzer.js';
 import { readTargetRepoFiles } from '../analyzer/repoBaseline.js';
 import {
   compileLegalProseToFormalPolicy,
@@ -283,7 +283,7 @@ export async function executeMcpTool(
   if (!tool) throw new McpError(-32602, `Unknown tool "${toolName}" on ${serverId}`);
   validateArguments(tool.inputSchema, args);
 
-  const repo = () => analyzeFullRepository(readTargetRepoFiles());
+  const repo = () => analyzeFullRepositoryAsync(readTargetRepoFiles());
   switch (toolName) {
     case 'fetch_live_regulatory_feed': {
       const feed = await fetchLiveRegulatoryFeed();
@@ -305,7 +305,7 @@ export async function executeMcpTool(
       return { ...compileLegalProseToFormalPolicy(text, category, 'CLAUSE-MCP-COMPILE', String(args.citation || 'Custom clause')) };
     }
     case 'scan_polyglot_repository_ast': {
-      const { sqlTables, astFindings, enrichedFiles } = repo();
+      const { sqlTables, astFindings, enrichedFiles } = await repo();
       return {
         filesScanned: enrichedFiles.length,
         totalAstNodes: enrichedFiles.reduce((acc, f) => acc + (f.astNodeCount || 0), 0),
@@ -314,7 +314,7 @@ export async function executeMcpTool(
       };
     }
     case 'prove_repository_compliance_z3': {
-      const { sqlTables, astFindings } = repo();
+      const { sqlTables, astFindings } = await repo();
       const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
       return {
         totalSolveTimeMs: verification.totalZ3ExecutionMs,
@@ -331,13 +331,13 @@ export async function executeMcpTool(
       };
     }
     case 'hybrid_contextual_graph_rag_query': {
-      const { sqlTables, astFindings } = repo();
+      const { sqlTables, astFindings } = await repo();
       const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
       const topK = typeof args.topK === 'number' ? args.topK : 4;
       return { ...executeHybridRagQuery(String(args.query), clauses, sqlTables, astFindings, verification.proofs, topK) };
     }
     case 'synthesize_and_verify_remediation_pr': {
-      const { sqlTables, astFindings, enrichedFiles } = repo();
+      const { sqlTables, astFindings, enrichedFiles } = await repo();
       const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
       const pr = await synthesizeRemediationPullRequest(clauses, enrichedFiles, verification.proofs);
       return pr ? { ...pr } : { status: 'ALL_COMPLIANT_NO_PR_NEEDED', merkleAuditRoot: verification.merkleAuditRoot };
@@ -361,7 +361,7 @@ async function readResource(serverId: string, uri: string, clauses: LegalClause[
     return readTargetRepoFiles().map((f) => ({ path: f.path, language: f.language, bytes: f.content.length }));
   }
   if (uri === `lex://${serverId}/proofs/latest`) {
-    const { sqlTables, astFindings } = analyzeFullRepository(readTargetRepoFiles());
+    const { sqlTables, astFindings } = await analyzeFullRepositoryAsync(readTargetRepoFiles());
     const v = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
     return v.proofs.map((p) => ({ clauseId: p.clauseId, status: p.status, unsatCore: p.unsatCoreAssertions }));
   }

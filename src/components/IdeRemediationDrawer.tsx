@@ -4,7 +4,6 @@ import {
   Check,
   CheckCircle2,
   Code,
-  FileCheck2,
   FileDiff,
   GitPullRequest,
   Lock,

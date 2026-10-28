@@ -1,18 +1,12 @@
 import React, { useState } from 'react';
 import {
-  Activity,
   Bot,
-  CheckCircle2,
   Cpu,
-  HardDrive,
-  Layers,
   Network,
   Play,
   Radio,
   Server,
-  Sparkles,
   Terminal,
-  Workflow,
   Zap,
 } from 'lucide-react';
 import type {

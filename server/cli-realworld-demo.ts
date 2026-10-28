@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { useScratchFixtureCopy } from './cli/scratchFixture.js';
+import { enterScratchFixtureCopy } from './cli/scratchFixture.js';
 
 /**
  * End-to-end demo on the bundled fixture: run the target app, prove violations in Z3,
@@ -9,7 +9,7 @@ import { useScratchFixtureCopy } from './cli/scratchFixture.js';
  */
 async function runRealWorldScenario() {
   const inPlace = process.argv.includes('--in-place');
-  const repo = inPlace ? 'target-repo/' : useScratchFixtureCopy('realworld');
+  const repo = inPlace ? 'target-repo/' : enterScratchFixtureCopy('realworld');
 
   const { analyzeFullRepository } = await import('./analyzer/astAnalyzer.js');
   const { readTargetRepoFiles, resetTargetRepoToBaseline, writeTargetRepoFile } = await import(
@@ -39,7 +39,7 @@ async function runRealWorldScenario() {
   const clauses = getInitialClauses();
 
   console.log('--- [1] Runtime sandbox (pre-remediation) ---');
-  const pre = executeRealWorldSandboxVerification();
+  const pre = await executeRealWorldSandboxVerification();
   console.log(`  git ${pre.git.branch} @ ${pre.git.headCommit}`);
   console.log(`  SQL: ${pre.sqlDatabaseExecution.engine}, retention default ${pre.sqlDatabaseExecution.actualDefaultRetentionHours}h`);
   console.log(`  FastAPI log: ${pre.pythonFastApiExecution.capturedLoggerOutput}`);
@@ -107,7 +107,7 @@ async function runRealWorldScenario() {
   }
 
   console.log('\n--- [6] Runtime sandbox & Z3 proof (post-patch) ---');
-  const post = executeRealWorldSandboxVerification();
+  const post = await executeRealWorldSandboxVerification();
   console.log(`  git log: ${post.git.commitLog.join(' | ')}`);
   console.log(`  FastAPI log: ${post.pythonFastApiExecution.capturedLoggerOutput}`);
   console.log(`  Redis SETEX TTL: ${post.pythonRedisWorkerExecution.capturedSetexTtlHours}h`);

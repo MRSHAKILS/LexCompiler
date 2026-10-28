@@ -1,20 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import {
-  AlertTriangle,
-  BookOpen,
   CheckCircle2,
-  Code2,
-  Cpu,
   Edit3,
   ExternalLink,
-  FileText,
   Flame,
   Globe,
   Play,
   Radio,
   Scale,
   ShieldAlert,
-  Sparkles,
 } from 'lucide-react';
 import type {
   ClauseVerificationProof,

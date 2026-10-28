@@ -1,4 +1,5 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -50,6 +51,8 @@ export interface RealWorldSandboxReport {
     violatedGdprArt44: boolean;
   };
 }
+
+const execFileAsync = promisify(execFile);
 
 /** Separate Git dir tracking the demo fixture's history (never the user's own `.git`). */
 const SANDBOX_GIT_DIR = path.resolve(process.env.LEXCOMPILER_SANDBOX_GIT_DIR || path.join(process.cwd(), 'data', 'sandbox-git'));
@@ -115,7 +118,7 @@ export function resetTargetRepoGitHistory(): void {
  * Executes the actual target-repo SQL DDL, Python 3 endpoints/workers, and TypeScript services
  * in a real local sandbox environment and returns the concrete runtime outputs.
  */
-export function executeRealWorldSandboxVerification(): RealWorldSandboxReport {
+export async function executeRealWorldSandboxVerification(): Promise<RealWorldSandboxReport> {
   if (!TARGET_REPO_IS_FIXTURE) {
     throw new Error('The runtime sandbox only supports the bundled demo fixture, not LEXCOMPILER_TARGET_REPO repositories.');
   }
@@ -352,13 +355,14 @@ print(json.dumps({
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(path.join(TARGET_REPO_ROOT, relPath), dest);
     }
-    stdout = execFileSync('python3', ['-I', '-c', pyRunnerScript, workDir], {
+    const { stdout: out } = await execFileAsync('python3', ['-I', '-c', pyRunnerScript, workDir], {
       cwd: workDir,
       env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
       encoding: 'utf8',
       timeout: 5000,
       maxBuffer: 2 * 1024 * 1024,
     });
+    stdout = out;
   } finally {
     fs.rmSync(workDir, { recursive: true, force: true });
   }

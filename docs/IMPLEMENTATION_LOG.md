@@ -92,6 +92,23 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **AI1 — agent pipeline** (`server/agents/multiAgentOrchestrator.ts`): the six-agent report now runs each agent's MCP tool through the JSON-RPC handler. It records measured latency, real token counts of raw and optimized inputs and of the output, `COMPLETED`/`FAILED` status, and a summary built from the tool's result.
 - **Tests:** RAG, token, and agent assertions now check computed behaviour instead of constants.
 
+### Step 6 · Runtime, operations, CI
+- **S6, P2 — no blocking subprocesses:**
+  - **Ledger:** the SQLite ledger runs in-process via Node's built-in `node:sqlite` (no Python subprocess per read or write).
+  - **Embeddings:** neural embeddings persist in `neural_vector_store` and are reused across restarts.
+  - **Python parsing:** files are parsed concurrently in child processes (`analyzeFullRepositoryAsync`) before analysis, so request handlers no longer block on `python3`.
+  - **Sandbox:** the runtime sandbox runs its Python asynchronously.
+- **P1 — serialized mutations:** state-changing endpoints (clause edits, presets, locale, apply PR/node, file updates, reset) run one at a time, so file writes and Git commits cannot interleave.
+- **D2 — real health check:** `/api/health` runs a Z3 self-test, a `python3` probe, a ledger check, and an MCP ping. It returns `503` when degraded.
+- **D1 — production build and Docker:**
+  - **Compiled server:** `npm run build` compiles the server to `dist-server/`, and `npm start` runs it with plain Node (`npm run start:tsx` keeps the tsx path).
+  - **Image:** the Dockerfile is a multi-stage build with `npm ci --omit=dev`, runs as the non-root `node` user, and keeps a `/app/data` volume.
+  - **Compose:** adds the data volume and an optional `ollama` service (`--profile ollama`).
+- **T2, T3, C3 — CI** (`.github/workflows/lexcompiler-gate.yml`):
+  - **Checks:** `npm ci`, typecheck (client + server), ESLint (`eslint.config.js`, typescript-eslint, react-hooks), tests, the `verify:cli` gate, `verify:realworld`, and the build.
+  - **SARIF:** exported via `npm run sarif` and uploaded as a build artifact.
+  - **Lint cleanup:** 55 unused imports/variables were removed.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -110,5 +127,6 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-10 | **Real PostgreSQL execution (X2)** | No PostgreSQL server | Execute `schema/*.sql` on a disposable PostgreSQL instance instead of SQLite, and run FastAPI/Pydantic/Redis for real instead of shims and mocks. |
 | L-11 | **Tree-sitter queries (L3)** | Native Tree-sitter grammars can't be installed here | Add `tree-sitter` with the Python/TypeScript/SQL grammars and execute the generated `astPatternQuery` strings. |
 | L-12 | **External MCP servers** (postgres-pgvector, neo4j-cypher, github, filesystem, duckdb, n8n) | The services aren't available here | Run and wire each server, then list them as integrated once they answer `initialize`. |
+| L-15 | **GitHub code-scanning upload** | Enabling code scanning is a repository setting | CI already produces `lexcompiler.sarif`. Enable code scanning, add `security-events: write`, and add `github/codeql-action/upload-sarif` for scans of real repositories (not the intentionally non-compliant fixture). |
 | L-13 | **EUR-Lex SPARQL ingestion** | The EUR-Lex SPARQL endpoint isn't reachable from this session | Query the CELLAR SPARQL endpoint for amendments to the tracked CELEX numbers and replace the curated excerpts with official text. |
-| L-14 | **Docker Ollama service & image check (D1)** | Docker isn't available in this session | Run `docker compose up --build`, enable the Ollama service, and confirm that the health check and non-root image work. |
+| L-14 | **Docker image verification (D1)** | Docker isn't available in this session | The Dockerfile and compose file are written (Step 6). Remaining: run `LEXCOMPILER_API_TOKEN=… docker compose --profile ollama up --build`, pull the models, and confirm the health check and the non-root image. |

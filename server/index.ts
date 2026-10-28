@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import path from 'node:path';
 import cors from 'cors';
 import express from 'express';
@@ -5,7 +6,7 @@ import {
   buildMultiAgentExecutionReport,
   getPromptLibraryCatalog,
 } from './agents/multiAgentOrchestrator.js';
-import { analyzeFullRepository } from './analyzer/astAnalyzer.js';
+import { analyzeFullRepositoryAsync } from './analyzer/astAnalyzer.js';
 import {
   ensureTargetRepoFilesExist,
   readTargetRepoFiles,
@@ -29,10 +30,11 @@ import { loadActiveClauseState, saveActiveClauseState } from './state.js';
 import {
   compressLegalProseCaveman,
   compressRepoToGraphifySExpr,
+  countTokens,
   pruneCodeWithCodeburn,
   runTokenOptimizationBenchmark,
 } from './optimization/tokenOptimizer.js';
-import { verifyRepositoryAgainstClauses } from './prover/z3Engine.js';
+import { verifyRepositoryAgainstClauses, z3SelfTest } from './prover/z3Engine.js';
 import {
   executeHybridRagQuery,
   executeRealNeuralRagQuery,
@@ -94,6 +96,32 @@ app.use(
 app.use(express.json({ limit: '5mb' }));
 app.use('/api', createApiGuard(securityConfig));
 
+/**
+ * Requests that rewrite target-repo files, commit, or change clauses run one at a time,
+ * so concurrent edits cannot interleave file writes and Git commits.
+ */
+let repoMutationQueue: Promise<void> = Promise.resolve();
+function serializeRepoMutations(_req: express.Request, res: express.Response, next: express.NextFunction): void {
+  const previous = repoMutationQueue;
+  let release!: () => void;
+  repoMutationQueue = new Promise<void>((resolve) => (release = resolve));
+  res.once('finish', () => release());
+  res.once('close', () => release());
+  previous.then(() => next());
+}
+app.post(
+  [
+    '/api/clauses/compile',
+    '/api/clauses/mutate-preset',
+    '/api/clauses/switch-locale',
+    '/api/remediation/apply-node',
+    '/api/remediation/apply-pr',
+    '/api/repo/update-file',
+    '/api/repo/reset',
+  ],
+  serializeRepoMutations
+);
+
 // Ensure real target repository files, Git repo & SQLite ledger exist on disk
 ensureTargetRepoFilesExist();
 ensureTargetRepoGitInitialized();
@@ -114,7 +142,7 @@ async function buildFullComplianceReport(
   options: { recordToLedger?: boolean } = {}
 ): Promise<FullComplianceScanReport> {
   const rawFiles = readTargetRepoFiles();
-  const { sqlTables, astFindings, enrichedFiles } = analyzeFullRepository(rawFiles);
+  const { sqlTables, astFindings, enrichedFiles } = await analyzeFullRepositoryAsync(rawFiles);
   const { proofs, architectureGraph, totalZ3ExecutionMs, merkleAuditRoot } =
     await verifyRepositoryAgainstClauses(activeClauses, sqlTables, astFindings);
 
@@ -173,12 +201,38 @@ async function buildFullComplianceReport(
   };
 }
 
-app.get('/api/health', (_req, res) => {
-  res.json({
-    status: 'ok',
+let python3Version: Promise<string | null> | null = null;
+function checkPython3(): Promise<string | null> {
+  python3Version ??= new Promise((resolve) => {
+    execFile('python3', ['--version'], { timeout: 3000 }, (err, stdout, stderr) =>
+      resolve(err ? null : `${stdout || stderr}`.trim())
+    );
+  });
+  return python3Version;
+}
+
+/** Checks the dependencies scans need; 503 when Z3 or python3 is unavailable. */
+app.get('/api/health', async (_req, res) => {
+  const [z3, python, mcp] = await Promise.all([
+    z3SelfTest(),
+    checkPython3(),
+    handleMcpMessage('lex-z3-prover-mcp', { jsonrpc: '2.0', id: 'health', method: 'ping' }, activeClauses),
+  ]);
+  let ledgerOk = true;
+  try {
+    ensurePersistentSqliteDb();
+  } catch {
+    ledgerOk = false;
+  }
+  const healthy = z3.ok && Boolean(python) && ledgerOk;
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'degraded',
     service: 'LexCompiler Neuro-Symbolic Law-to-AST Engine',
-    z3Solver: 'ready',
-    mcpServersOnline: 6,
+    z3Solver: z3.ok ? 'ready' : `failed: ${z3.error || 'self-test'}`,
+    z3SelfTestMs: z3.latencyMs,
+    python3: python || 'unavailable',
+    ledger: ledgerOk ? 'ready' : 'unavailable',
+    mcpServersOnline: mcp?.result ? getMcpServersCatalog().length : 0,
     ragEngine: 'Contextual + Graph RAG + BM25/pgvector RRF + CRAG',
     astParsers: ['python3-ast', 'typescript-compiler-api', 'postgres-ddl-cst'],
     timestamp: new Date().toISOString(),
@@ -301,7 +355,7 @@ app.post('/api/rag/query', async (req, res) => {
         : 'Which SQL tables and Python endpoints violate the 72-hour retention and tenant-isolated KMS requirement?';
 
     const rawFiles = readTargetRepoFiles();
-    const { sqlTables, astFindings } = analyzeFullRepository(rawFiles);
+    const { sqlTables, astFindings } = await analyzeFullRepositoryAsync(rawFiles);
     const verification = await verifyRepositoryAgainstClauses(
       activeClauses,
       sqlTables,
@@ -329,7 +383,7 @@ app.post('/api/rag/query', async (req, res) => {
 app.get('/api/ai-heavy/overview', async (_req, res) => {
   try {
     const rawFiles = readTargetRepoFiles();
-    const { sqlTables, astFindings, enrichedFiles } = analyzeFullRepository(rawFiles);
+    const { sqlTables, astFindings, enrichedFiles } = await analyzeFullRepositoryAsync(rawFiles);
     const verification = await verifyRepositoryAgainstClauses(
       activeClauses,
       sqlTables,
@@ -378,14 +432,14 @@ app.get('/api/ai-heavy/overview', async (_req, res) => {
   }
 });
 
-app.post('/api/optimization/compress', (req, res) => {
+app.post('/api/optimization/compress', async (req, res) => {
   try {
     const { rawLegalText, rawCodeText } = (req.body || {}) as {
       rawLegalText?: string;
       rawCodeText?: string;
     };
     const rawFiles = readTargetRepoFiles();
-    const { sqlTables, astFindings } = analyzeFullRepository(rawFiles);
+    const { sqlTables, astFindings } = await analyzeFullRepositoryAsync(rawFiles);
 
     const sampleLegal =
       rawLegalText ||
@@ -398,10 +452,8 @@ app.post('/api/optimization/compress', (req, res) => {
     const graphifyCompressed = compressRepoToGraphifySExpr(sqlTables, astFindings);
 
     res.json({
-      rawTokens: Math.ceil((sampleLegal.length + sampleCode.length) / 3.6),
-      compressedTokens: Math.ceil(
-        (cavemanCompressed.length + graphifyCompressed.length) / 3.6
-      ),
+      rawTokens: countTokens(sampleLegal) + countTokens(sampleCode),
+      compressedTokens: countTokens(cavemanCompressed) + countTokens(graphifyCompressed),
       cavemanCompressed,
       codeburnCompressed,
       graphifyCompressed,
@@ -782,7 +834,7 @@ app.post('/api/clauses/switch-locale', async (req, res) => {
   }
 });
 
-app.get('/api/sandbox/verify-runtime', (_req, res) => {
+app.get('/api/sandbox/verify-runtime', async (_req, res) => {
   if (!securityConfig.runtimeSandboxEnabled) {
     res.status(403).json({
       error:
@@ -793,7 +845,7 @@ app.get('/api/sandbox/verify-runtime', (_req, res) => {
     return;
   }
   try {
-    const runtimeReport = executeRealWorldSandboxVerification();
+    const runtimeReport = await executeRealWorldSandboxVerification();
     res.json(runtimeReport);
   } catch (err) {
     console.error('Error executing real-world sandbox verification:', err);

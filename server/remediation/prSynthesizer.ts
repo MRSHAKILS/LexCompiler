@@ -1,5 +1,5 @@
 import { createTwoFilesPatch } from 'diff';
-import { analyzeFullRepository, checkSourceSyntax } from '../analyzer/astAnalyzer.js';
+import { analyzeFullRepositoryAsync, checkSourceSyntax } from '../analyzer/astAnalyzer.js';
 import { verifyRepositoryAgainstClauses } from '../prover/z3Engine.js';
 import { sha256Hex } from '../util/hash.js';
 import type {
@@ -310,7 +310,7 @@ export async function synthesizeRemediationPullRequest(
   const originals = new Map(currentFiles.map((f) => [f.path, f.content]));
   let files: TargetRepoFile[] = currentFiles.map((f) => ({ ...f }));
   let proofs = currentProofs;
-  let analysis = analyzeFullRepository(files);
+  let analysis = await analyzeFullRepositoryAsync(files);
   let verifyMs = 0;
   let merkleAuditRoot = '';
   let rounds = 0;
@@ -358,7 +358,7 @@ export async function synthesizeRemediationPullRequest(
 
     if (!changed) break;
     rounds++;
-    analysis = analyzeFullRepository(files);
+    analysis = await analyzeFullRepositoryAsync(files);
     const verification = await verifyRepositoryAgainstClauses(clauses, analysis.sqlTables, analysis.astFindings);
     proofs = verification.proofs;
     verifyMs += verification.totalZ3ExecutionMs;

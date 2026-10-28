@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import ts from 'typescript';
 import type {
@@ -1052,6 +1052,44 @@ function parsePythonAstCached(content: string): ParsedPythonAst | null {
   return parsed;
 }
 
+/** Parses a Python file in a child process without blocking the event loop. */
+function parsePythonAstAsync(content: string): Promise<ParsedPythonAst | null> {
+  return new Promise((resolve) => {
+    const child = spawn('python3', ['-I', '-c', PYTHON_AST_SCRIPT], { stdio: ['pipe', 'pipe', 'ignore'] });
+    let out = '';
+    const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => (out += chunk));
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+    child.on('close', () => {
+      clearTimeout(timer);
+      try {
+        resolve(JSON.parse(out) as ParsedPythonAst);
+      } catch {
+        resolve(null);
+      }
+    });
+    child.stdin.end(content);
+  });
+}
+
+/**
+ * Parses every uncached Python file concurrently in child processes so the following
+ * synchronous analysis is served from the cache instead of blocking the event loop.
+ */
+export async function primePythonAstCache(files: TargetRepoFile[]): Promise<void> {
+  const pending = files.filter((f) => f.language === 'python' && !pythonAstCache.has(sha256Hex(f.content)));
+  await Promise.all(
+    pending.map(async (f) => {
+      const parsed = await parsePythonAstAsync(f.content);
+      if (parsed) pythonAstCache.set(sha256Hex(f.content), parsed);
+    })
+  );
+}
+
 function anchorFromSpan(
   role: SourceEditAnchor['role'],
   symbol: string,
@@ -1497,6 +1535,12 @@ export function checkSourceSyntax(file: TargetRepoFile): { passed: boolean; mess
   }
   const { syntaxError } = parseSqlSchemaFile(file);
   return syntaxError ? { passed: false, message: syntaxError } : { passed: true };
+}
+
+/** analyzeFullRepository with Python parsing done off the event loop. */
+export async function analyzeFullRepositoryAsync(files: TargetRepoFile[]): Promise<ReturnType<typeof analyzeFullRepository>> {
+  await primePythonAstCache(files);
+  return analyzeFullRepository(files);
 }
 
 export function analyzeFullRepository(files: TargetRepoFile[]): {

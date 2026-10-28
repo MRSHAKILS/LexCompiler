@@ -1,6 +1,6 @@
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { performance } from 'node:perf_hooks';
 import { sha256Hex } from '../util/hash.js';
 
@@ -48,45 +48,41 @@ export interface RealLlmGenerationResult {
   timestamp: string;
 }
 
+let ledgerDb: DatabaseSync | null = null;
+
 /**
- * Initializes the persistent SQLite3 database on disk (`data/lexcompiler_enterprise.db`)
- * with tables for compliance scan audits, neural vector embeddings, and Ed25519 certificates.
+ * Opens the persistent SQLite ledger (`data/lexcompiler_enterprise.db`) in-process with
+ * Node's built-in `node:sqlite`, creating the audit-ledger and vector-store tables.
  */
-export function ensurePersistentSqliteDb(): void {
+function getLedgerDb(): DatabaseSync {
+  if (ledgerDb) return ledgerDb;
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const initPy = `
-import sqlite3, sys
-db_path = sys.argv[1]
-conn = sqlite3.connect(db_path)
-cur = conn.cursor()
-cur.execute("""
-CREATE TABLE IF NOT EXISTS compliance_audit_ledger (
-    scan_id TEXT PRIMARY KEY,
-    commit_hash TEXT NOT NULL,
-    compliant_count INT NOT NULL,
-    violated_count INT NOT NULL,
-    z3_solve_ms REAL NOT NULL,
-    merkle_root TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-""")
-cur.execute("""
-CREATE TABLE IF NOT EXISTS neural_vector_store (
-    text_sha256 TEXT PRIMARY KEY,
-    model_name TEXT NOT NULL,
-    dimensions INT NOT NULL,
-    embedding_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-""")
-conn.commit()
-conn.close()
-`;
-  try {
-    execFileSync('python3', ['-c', initPy, SQLITE_DB_PATH], { timeout: 3000 });
-  } catch {
-    // ignore if python3 busy
-  }
+  const db = new DatabaseSync(SQLITE_DB_PATH);
+  db.exec(`
+    PRAGMA journal_mode = WAL;
+    CREATE TABLE IF NOT EXISTS compliance_audit_ledger (
+      scan_id TEXT PRIMARY KEY,
+      commit_hash TEXT NOT NULL,
+      compliant_count INT NOT NULL,
+      violated_count INT NOT NULL,
+      z3_solve_ms REAL NOT NULL,
+      merkle_root TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS neural_vector_store (
+      text_sha256 TEXT PRIMARY KEY,
+      model_name TEXT NOT NULL,
+      dimensions INT NOT NULL,
+      embedding_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  ledgerDb = db;
+  return db;
+}
+
+export function ensurePersistentSqliteDb(): void {
+  getLedgerDb();
 }
 
 export function recordScanToPersistentSqlite(scan: {
@@ -97,37 +93,29 @@ export function recordScanToPersistentSqlite(scan: {
   z3SolveMs: number;
   merkleRoot: string;
 }): void {
-  ensurePersistentSqliteDb();
-  const py = `
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-cur = conn.cursor()
-cur.execute(
-  "INSERT OR REPLACE INTO compliance_audit_ledger (scan_id, commit_hash, compliant_count, violated_count, z3_solve_ms, merkle_root, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-  (sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), float(sys.argv[6]), sys.argv[7])
-)
-conn.commit()
-conn.close()
-`;
-  try {
-    execFileSync(
-      'python3',
-      [
-        '-c',
-        py,
-        SQLITE_DB_PATH,
-        scan.scanId,
-        scan.commitHash,
-        String(scan.compliantCount),
-        String(scan.violatedCount),
-        String(scan.z3SolveMs),
-        scan.merkleRoot,
-      ],
-      { timeout: 3000 }
-    );
-  } catch {
-    // ignore
-  }
+  getLedgerDb()
+    .prepare(
+      `INSERT OR REPLACE INTO compliance_audit_ledger
+        (scan_id, commit_hash, compliant_count, violated_count, z3_solve_ms, merkle_root, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`
+    )
+    .run(scan.scanId, scan.commitHash, scan.compliantCount, scan.violatedCount, scan.z3SolveMs, scan.merkleRoot);
+}
+
+function loadStoredEmbedding(hash: string): number[] | null {
+  const row = getLedgerDb()
+    .prepare('SELECT embedding_json FROM neural_vector_store WHERE text_sha256 = ?')
+    .get(hash) as { embedding_json?: string } | undefined;
+  return row?.embedding_json ? (JSON.parse(row.embedding_json) as number[]) : null;
+}
+
+function storeEmbedding(hash: string, model: string, embedding: number[]): void {
+  getLedgerDb()
+    .prepare(
+      `INSERT OR REPLACE INTO neural_vector_store (text_sha256, model_name, dimensions, embedding_json, updated_at)
+        VALUES (?, ?, ?, ?, datetime('now'))`
+    )
+    .run(hash, model, embedding.length, JSON.stringify(embedding));
 }
 
 export function getSqliteLedgerStats(): {
@@ -137,46 +125,31 @@ export function getSqliteLedgerStats(): {
   cachedVectorsCount: number;
   recentAudits: Array<Record<string, unknown>>;
 } {
-  ensurePersistentSqliteDb();
-  const py = `
-import sqlite3, sys, json, os
-db_path = sys.argv[1]
-conn = sqlite3.connect(db_path)
-cur = conn.cursor()
-audit_cnt = cur.execute("SELECT COUNT(*) FROM compliance_audit_ledger").fetchone()[0]
-vec_cnt = cur.execute("SELECT COUNT(*) FROM neural_vector_store").fetchall()[0][0]
-rows = cur.execute("SELECT scan_id, commit_hash, compliant_count, violated_count, z3_solve_ms, merkle_root, created_at FROM compliance_audit_ledger ORDER BY created_at DESC LIMIT 5").fetchall()
-recent = [
-  {"scanId": r[0], "commitHash": r[1], "compliant": r[2], "violated": r[3], "z3Ms": r[4], "merkleRoot": r[5], "createdAt": r[6]}
-  for r in rows
-]
-conn.close()
-print(json.dumps({
-  "dbSizeBytes": os.path.getsize(db_path) if os.path.exists(db_path) else 0,
-  "auditRowsCount": audit_cnt,
-  "cachedVectorsCount": vec_cnt,
-  "recentAudits": recent
-}))
-`;
-  try {
-    const out = execFileSync('python3', ['-c', py, SQLITE_DB_PATH], {
-      encoding: 'utf8',
-      timeout: 3000,
-    });
-    const parsed = JSON.parse(out);
-    return {
-      dbPath: 'data/lexcompiler_enterprise.db',
-      ...parsed,
-    };
-  } catch {
-    return {
-      dbPath: 'data/lexcompiler_enterprise.db',
-      dbSizeBytes: 16384,
-      auditRowsCount: 1,
-      cachedVectorsCount: neuralEmbeddingCache.size,
-      recentAudits: [],
-    };
-  }
+  const db = getLedgerDb();
+  const count = (table: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+  const recentAudits = (
+    db
+      .prepare(
+        `SELECT scan_id, commit_hash, compliant_count, violated_count, z3_solve_ms, merkle_root, created_at
+          FROM compliance_audit_ledger ORDER BY created_at DESC LIMIT 5`
+      )
+      .all() as Array<Record<string, unknown>>
+  ).map((r) => ({
+    scanId: r.scan_id,
+    commitHash: r.commit_hash,
+    compliant: r.compliant_count,
+    violated: r.violated_count,
+    z3Ms: r.z3_solve_ms,
+    merkleRoot: r.merkle_root,
+    createdAt: r.created_at,
+  }));
+  return {
+    dbPath: path.relative(process.cwd(), SQLITE_DB_PATH) || SQLITE_DB_PATH,
+    dbSizeBytes: fs.existsSync(SQLITE_DB_PATH) ? fs.statSync(SQLITE_DB_PATH).size : 0,
+    auditRowsCount: count('compliance_audit_ledger'),
+    cachedVectorsCount: count('neural_vector_store'),
+    recentAudits,
+  };
 }
 
 /**
@@ -248,8 +221,9 @@ export async function computeRealNeuralEmbedding(text: string): Promise<{
   fromCache: boolean;
 }> {
   const hash = sha256Hex(text);
-  const cached = neuralEmbeddingCache.get(hash);
+  const cached = neuralEmbeddingCache.get(hash) || loadStoredEmbedding(hash);
   if (cached) {
+    neuralEmbeddingCache.set(hash, cached);
     return {
       embedding: cached,
       modelUsed: 'all-minilm:latest (Ollama 384-d Neural Cache)',
@@ -278,6 +252,7 @@ export async function computeRealNeuralEmbedding(text: string): Promise<{
       if (data.embedding && data.embedding.length > 0) {
         const rounded = data.embedding.map((v) => Math.round(v * 10000) / 10000);
         neuralEmbeddingCache.set(hash, rounded);
+        storeEmbedding(hash, 'all-minilm:latest', rounded);
         const latencyMs = Math.round((performance.now() - t0) * 100) / 100;
         return {
           embedding: rounded,

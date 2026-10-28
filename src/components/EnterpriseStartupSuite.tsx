@@ -1,19 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import {
-  AlertOctagon,
-  Award,
-  Building2,
   CheckCircle2,
-  DollarSign,
-  FileCheck2,
-  FileCode2,
   KeyRound,
-  Lock,
   Play,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
-  Terminal,
   TrendingUp,
 } from 'lucide-react';
 import type { FullComplianceScanReport } from '../../shared/types';
@@ -27,7 +19,7 @@ export const EnterpriseStartupSuite: React.FC<EnterpriseStartupSuiteProps> = ({ 
   const [byocClause, setByocClause] = useState(
     'Section 7.1 (Global Fintech & Healthcare MSA): All customer payment tokens and PII must be encrypted at rest with tenant-isolated KMS keys, strictly prohibited from plaintext logging, and purged within 48 hours.'
   );
-  const [byocCitation, setByocCitation] = useState('Custom Enterprise MSA §7.1 / PCI-DSS 4.0');
+  const [byocCitation] = useState('Custom Enterprise MSA §7.1 / PCI-DSS 4.0');
   const [byocCode, setByocCode] = useState(`# Custom Enterprise Payment & PII Service (Paste any code to test)
 import logging
 logger = logging.getLogger("enterprise.payments")

@@ -30,6 +30,22 @@ async function getZ3Context(): Promise<Z3Any> {
   return z3ContextPromise;
 }
 
+/** Solves a trivial formula; used by the health check. */
+export async function z3SelfTest(): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+  const t0 = performance.now();
+  try {
+    const Z3 = await getZ3Context();
+    const solver = new Z3.Solver();
+    const x = Z3.Int.const('health_x');
+    solver.add(x.gt(1), x.lt(3));
+    const result = await solver.check();
+    solver.release?.();
+    return { ok: result === 'sat', latencyMs: Math.round((performance.now() - t0) * 100) / 100 };
+  } catch (err) {
+    return { ok: false, latencyMs: Math.round(performance.now() - t0), error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** Binary SHA-256 Merkle root (last node duplicated on odd levels). */
 export function merkleRoot(leaves: string[]): string {
   if (leaves.length === 0) return sha256Hex('');

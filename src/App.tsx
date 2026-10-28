@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Activity,
   BookOpen,
   Bot,
   Cpu,
@@ -8,13 +7,11 @@ import {
   Flame,
   GitBranch,
   GitPullRequest,
-  Layers,
   PanelLeftClose,
   PanelLeftOpen,
   Radio,
   RotateCcw,
   Scale,
-  Server,
   ShieldAlert,
   ShieldCheck,
   Sparkles,

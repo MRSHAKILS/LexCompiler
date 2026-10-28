@@ -83,7 +83,7 @@ export function compressLegalProseCaveman(rawProse: string): string {
  * TypeScript, and SQL while preserving indentation (so Python stays valid).
  */
 export function pruneCodeWithCodeburn(rawCode: string): string {
-  const withoutDocstrings = rawCode.replace(/^[ \t]*("""|\'\'\')[\s\S]*?\1[ \t]*$/gm, '');
+  const withoutDocstrings = rawCode.replace(/^[ \t]*("""|''')[\s\S]*?\1[ \t]*$/gm, '');
   return withoutDocstrings
     .split('\n')
     .map((l) => l.replace(/\s+$/, ''))

@@ -1,4 +1,4 @@
-import { useScratchFixtureCopy } from './cli/scratchFixture.js';
+import { enterScratchFixtureCopy } from './cli/scratchFixture.js';
 
 /**
  * Compliance gate.
@@ -12,7 +12,7 @@ import { useScratchFixtureCopy } from './cli/scratchFixture.js';
  */
 async function main() {
   const realRepo = Boolean(process.env.LEXCOMPILER_TARGET_REPO) && process.env.LEXCOMPILER_TARGET_REPO_IS_FIXTURE !== '1';
-  if (!realRepo) useScratchFixtureCopy('verify');
+  if (!realRepo) enterScratchFixtureCopy('verify');
 
   const { analyzeFullRepository } = await import('./analyzer/astAnalyzer.js');
   const { readTargetRepoFiles, resetTargetRepoToBaseline, TARGET_REPO_ROOT } = await import('./analyzer/repoBaseline.js');

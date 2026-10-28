@@ -7,7 +7,7 @@ import path from 'node:path';
  * and demo CLIs can reset, patch, and commit without touching the working tree.
  * Must run before any module that reads LEXCOMPILER_TARGET_REPO is imported.
  */
-export function useScratchFixtureCopy(label: string): string {
+export function enterScratchFixtureCopy(label: string): string {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), `lexcompiler-${label}-`));
   const repo = path.join(scratch, 'target-repo');
   fs.cpSync(path.resolve(process.cwd(), 'target-repo'), repo, {
