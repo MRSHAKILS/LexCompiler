@@ -14,6 +14,73 @@ Every finding from the previous revision was re-checked against the new code and
 
 ---
 
+## 0. Status on Branch `claude/compassionate-hypatia-3mjhsk`
+
+The audit below is kept as written. This table records where each finding stands after the remediation work on this branch. "Step N" refers to Part 1 of [`IMPLEMENTATION_LOG.md`](IMPLEMENTATION_LOG.md), and "L-N" to the items in its Part 2 that need a local environment.
+
+**Tally:** 43 fixed · 11 partial · 2 open (56 findings).
+
+| # | Status | How / where |
+| :-- | :--- | :--- |
+| S1 | ✅ Fixed | Path allowlist on `update-file` (Step 1) |
+| S2 | ◐ Partial | Opt-in sandbox, temp copy, rlimits, Node permission model (Steps 1, 7). Container isolation: L-9 |
+| S3 | ✅ Fixed | Loopback bind, bearer token, CORS allowlist, Host and client-header guards (Step 1) |
+| S4 | ✅ Fixed | Verification uses only the server's trusted key (Step 4) |
+| S5 | ✅ Fixed | Server-side `OPENAI_API_KEY` is preferred; the API is authenticated (Step 11) |
+| S6 | ◐ Partial | Python parsing is warmed asynchronously (`spawn`); some Git and fallback paths still run synchronously |
+| V1 | ✅ Fixed | Status reflects the post-patch proof; apply returns 409 on violations; UI wording fixed (Step 1) |
+| V2 | ✅ Fixed | Unsat cores come from solver assumption literals (Step 2); repair targets are the law bounds themselves |
+| V3 | ⬜ Open | Proofs are over extracted facts. Symbolic semantics: L-16 |
+| V4 | ✅ Fixed | Displayed and hashed SMT-LIB2 is `solver.toString()` of what ran (Step 2) |
+| V5 | ✅ Fixed | Rego v1 policies evaluated with `opa eval` (Step 8). Local confirmation: L-1 |
+| V6 | ✅ Fixed | Allowed regions come from the clause; membership decided by Z3 over an enumerated universe (Step 2) |
+| V7 | ✅ Fixed | `UNKNOWN_NEEDS_REVIEW` status; missing constructs are "not applicable" (Step 2) |
+| V8 | ✅ Fixed | Every construct instance is checked separately (Step 2); graph nodes are per role |
+| L1 | ✅ Fixed | Strictest bound, number words, negation, permissions (Step 2) |
+| L2 | ◐ Partial | Category is inferred from the prose when not supplied; new categories: L-17 |
+| L3 | ✅ Fixed | Rego from compiled bounds (Step 8), executed SMT (Step 2), real Tree-sitter queries (Step 9) |
+| L4 | ✅ Fixed | Curated excerpts labelled `ILLUSTRATIVE` (Step 1); official text via EUR-Lex: L-13 |
+| L5 | ✅ Fixed | LLM values validated and only fill missing bounds (Step 2) |
+| A1 | ◐ Partial | Detection uses constant folding, taint, and sinks, but still relies on naming heuristics to classify PII |
+| A2 | ✅ Fixed | Constant folding and unit conversion (Step 2) |
+| A3 | ✅ Fixed | Tokenizer-based SQL parser: multi-line, table constraints, ALTER TABLE (Step 2) |
+| A4 | ✅ Fixed | Intra-procedural taint with an origin map (Steps 2, 8). Inter-procedural: L-16 |
+| A5 | ✅ Fixed | `LEXCOMPILER_TARGET_REPO` scans any repository (Step 6) |
+| R1 | ✅ Fixed | Anchor-based edits (Step 2) |
+| R2 | ✅ Fixed | Keyed HMAC redaction; fail-closed tenant-KMS helper (Step 2) |
+| R3 | ✅ Fixed | — |
+| R4 | ✅ Fixed | GitHub REST pull requests (Step 7). Live end-to-end run: L-7 |
+| R5 | ✅ Fixed | Strictest target across clauses (Step 2) |
+| B1 | ✅ Fixed | Only facts present in the scanned file apply; regression test (Step 8) |
+| B2 | ✅ Fixed | — |
+| X1 | ◐ Partial | TypeScript now executes (Step 7); container isolation: L-9 |
+| X2 | ⬜ Open | PostgreSQL / FastAPI / Redis runtimes: L-10 |
+| C1 | ✅ Fixed | Persistent key, published (Step 4). HSM/KMS: L-8 |
+| C2 | ✅ Fixed | Binary Merkle tree; real Git identity (Step 4) |
+| C3 | ✅ Fixed | SARIF casing and repository URI fixed (Step 4) |
+| C4 | ✅ Fixed | — |
+| AI1 | ◐ Partial | Agents call the real MCP tools with measured latency and tokens (Step 5). Named frameworks and LLMs: L-2 |
+| AI2 | ◐ Partial | 384-d feature-hashed embeddings, corrected BM25, 2-hop traversal, RRF (Step 5). pgvector/Neo4j: L-3 |
+| AI3 | ◐ Partial | Metrics computed against category-derived labels (Step 5). RAGAS with a judge LLM: L-4 |
+| AI4 | ✅ Fixed | Real o200k tokenizer; measured stages (Step 5). LLMLingua-2: L-5 |
+| AI5 | ✅ Fixed | Fallbacks report `available: false` instead of fabricated numbers (Step 5) |
+| M1 | ✅ Fixed | JSON-RPC 2.0 / MCP: initialize negotiation, error codes, streamable HTTP (Step 3) |
+| M2 | ✅ Fixed | Stdio server reads persisted clauses (Step 3) |
+| P1 | ◐ Partial | Clause state persisted to `data/` (Step 3). Multi-tenant: L-18 |
+| P2 | ✅ Fixed | Reads are side-effect free (Step 4) |
+| P3 | ✅ Fixed | Contexts released; solver timeout (Step 2) |
+| T1 | ✅ Fixed | 45 tests across 7 files, including regression tests (Step 8) |
+| T2 | ✅ Fixed | CI type-checks both projects and lints (Step 6) |
+| T3 | ✅ Fixed | `verify:cli` exits non-zero and runs in CI (Step 6) |
+| T4 | ✅ Fixed | Tests and CLIs run on scratch copies (Step 6) |
+| D1 | ✅ Fixed | Non-root multi-stage image, data volume, OPA, optional Ollama profile (Step 6). Local build: L-14 |
+| D2 | ✅ Fixed | Health reports each dependency (Step 6) |
+| DOC1 | ◐ Partial | New features documented (Step 10); remaining features tracked in `docs/IMPLEMENTATION_LOG.md` Part 2 |
+| DOC2 | ✅ Fixed | `LICENSE` added (Step 10) |
+| U1 | ◐ Partial | Hard-coded success claims removed (Step 1); accessibility and frontend tests remain |
+
+---
+
 ## 1. Executive Summary
 
 LexCompiler is a working **demo** with a polished UI. Parts of it are real:

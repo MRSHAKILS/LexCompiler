@@ -294,7 +294,9 @@ export async function runRealLlmInference(params: {
   const maxTokens = params.maxTokens || 140;
   const temperature = params.temperature ?? 0.2;
 
-  // If user supplied a live Cloud Frontier API key in the UI, call the cloud endpoint directly
+  // Cloud mode: prefer the server's own OPENAI_API_KEY so the browser never has to send a key.
+  const serverKey = process.env.OPENAI_API_KEY;
+  if (serverKey && params.cloudProvider === 'openai') params = { ...params, cloudApiKey: serverKey };
   if (params.cloudApiKey && params.cloudProvider === 'openai') {
     try {
       const resp = await fetch('https://api.openai.com/v1/chat/completions', {

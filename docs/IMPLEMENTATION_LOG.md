@@ -143,6 +143,10 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **`.env.example`:** lists every new environment variable.
 - **`LICENSE`:** MIT, matching the README; `package.json` declares `"license": "MIT"`.
 
+### Step 11 · Server-side cloud key, limitations status
+- **S5:** cloud mode now prefers the server's `OPENAI_API_KEY`, so the browser never has to send a key. The console offers a "Cloud: OpenAI (server OPENAI_API_KEY)" option; a key typed in the UI is still accepted over the authenticated API.
+- **`docs/LIMITATIONS_REPORT.md`:** a new §0 records the status of every finding on this branch, with the step that addressed it or the Part 2 item that completes it.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
