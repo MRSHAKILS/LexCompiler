@@ -7,6 +7,7 @@ import {
   getPromptLibraryCatalog,
 } from './agents/multiAgentOrchestrator.js';
 import { analyzeFullRepositoryAsync } from './analyzer/astAnalyzer.js';
+import { runTreeSitterQueries } from './analyzer/treeSitter.js';
 import {
   ensureTargetRepoFilesExist,
   readTargetRepoFiles,
@@ -177,6 +178,15 @@ async function buildFullComplianceReport(
     });
   }
 
+  const structuralQueryMatches: FullComplianceScanReport['structuralQueryMatches'] = {};
+  for (const clause of activeClauses) {
+    try {
+      structuralQueryMatches[clause.id] = await runTreeSitterQueries(clause.compiled.astPatternQuery, enrichedFiles);
+    } catch {
+      structuralQueryMatches[clause.id] = [];
+    }
+  }
+
   return {
     scanId,
     timestamp: new Date().toISOString(),
@@ -198,6 +208,7 @@ async function buildFullComplianceReport(
     proofs,
     remediationPR,
     mutationPresets: getMutationPresets(),
+    structuralQueryMatches,
     files: enrichedFiles,
   };
 }

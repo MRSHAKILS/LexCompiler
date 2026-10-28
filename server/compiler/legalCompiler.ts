@@ -11,6 +11,7 @@ import { runRealLlmInference } from '../services/realAiServiceMesh.js';
 
 export { sha256Hex } from '../util/hash.js';
 import { regoPolicyFor, type RegoBounds } from '../policy/regoPolicies.js';
+import { treeSitterQueriesFor } from '../analyzer/treeSitter.js';
 
 function regoBounds(b: ExtractedDeonticBounds): RegoBounds {
   return {
@@ -514,16 +515,7 @@ function compileFromBounds(
 (assert (! (=> statutory_requires_tenant_kms (= fastapi_uses_tenant_kms true)) :named inv_fastapi_tenant_kms_envelope))
 (assert (! (<= redis_worker_ttl_hours statutory_max_ttl_hours) :named inv_redis_ttl_within_${maxRetentionHours}h))`,
       opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
-      astPatternQuery: `; Tree-sitter / Polyglot AST Query (${citation})
-(sql_create_table
-  table_name: (identifier) @table (#match? @table "patient_records")
-  column_def: (column_definition name: (identifier) @kms_col (#eq? @kms_col "tenant_kms_key_id"))?)
-(python_function_definition
-  name: (identifier) @fn (#eq? @fn "ingest_patient_pii")
-  body: (block (call function: (attribute attribute: (identifier) @crypto_call))))
-(python_assignment
-  left: (identifier) @const (#eq? @const "PII_CACHE_TTL_HOURS")
-  right: (integer) @ttl_val (#le? @ttl_val ${maxRetentionHours}))`,
+      astPatternQuery: treeSitterQueriesFor(category),
     };
 
     return { deontic, compiled };
@@ -558,10 +550,7 @@ function compileFromBounds(
 (assert (! (= law_forbids_plaintext_pii_logs ${forbidPlaintextLogging}) :named law_hipaa_gdpr_no_pii_logs))
 (assert (! (=> law_forbids_plaintext_pii_logs (= fastapi_logs_plaintext_pii false)) :named inv_zero_plaintext_pii_in_logs))`,
       opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
-      astPatternQuery: `(call
-  function: (attribute object: (identifier) @log_obj (#match? @log_obj "^(logger|logging|console)$")
-                       attribute: (identifier) @method (#match? @method "^(info|warn|error|debug)$"))
-  arguments: (argument_list (string) @interpolated_pii (#match? @interpolated_pii "(ssn|diagnosis|patient_email)")))`,
+      astPatternQuery: treeSitterQueriesFor(category),
     };
 
     return { deontic, compiled };
@@ -607,11 +596,7 @@ function compileFromBounds(
 (assert (! (>= ai_engine_confidence_gate_pct statutory_min_confidence_pct) :named inv_eu_ai_act_confidence_threshold))
 (assert (! (= ai_engine_writes_audit_log true) :named inv_eu_ai_act_article12_audit_log))`,
       opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
-      astPatternQuery: `(function_declaration
-  name: (identifier) @fn (#eq? @fn "evaluateClinicalAndCreditRisk")
-  body: (statement_block
-    (variable_declarator name: (identifier) @gate (#eq? @gate "MIN_CONFIDENCE_FOR_AUTO_APPROVAL")
-                         value: (number) @val)))`,
+      astPatternQuery: treeSitterQueriesFor(category),
     };
 
     return { deontic, compiled };
@@ -657,9 +642,7 @@ function compileFromBounds(
 (assert (! (=> statutory_requires_encryption_at_rest (= postgres_encrypted_at_rest true)) :named inv_all_pii_columns_encrypted))
 (assert (! (=> statutory_requires_tenant_kms (= postgres_tenant_kms_isolated true)) :named inv_tenant_kms_for_encrypted_store))`,
       opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
-      astPatternQuery: `(sql_column_definition
-  name: (identifier) @col (#match? @col "ssn|email|phone|patient_|biometric_")
-  annotation: (comment) @enc (#match? @enc "@encrypted"))`,
+      astPatternQuery: treeSitterQueriesFor(category),
     };
     return { deontic, compiled };
   }
@@ -693,9 +676,7 @@ function compileFromBounds(
 (assert (! (= statutory_requires_cascade_erasure true) :named law_gdpr_art17_cascade_erasure))
 (assert (! (=> statutory_requires_cascade_erasure (= postgres_has_cascade_erasure true)) :named inv_fk_on_delete_cascade))`,
       opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
-      astPatternQuery: `(sql_foreign_key
-  references: (identifier) @parent
-  on_delete: (keyword) @action (#eq? @action "CASCADE"))`,
+      astPatternQuery: treeSitterQueriesFor(category),
     };
     return { deontic, compiled };
   }
@@ -736,9 +717,7 @@ function compileFromBounds(
 (assert (! (= statutory_allows_non_eu_egress ${allowsUsEast}) :named law_gdpr_ch5_sovereign_residency))
 (assert (! (=> (not statutory_allows_non_eu_egress) (= egress_targets_non_eu_region false)) :named inv_gdpr_art44_no_unapproved_egress))`,
     opaRegoRule: regoPolicyFor(category, regoBounds(bounds), citation),
-    astPatternQuery: `(variable_declarator
-  name: (identifier) @region_const (#eq? @region_const "REPLICA_TARGET_REGION")
-  value: (string) @region_val (#match? @region_val "^(eu-central-1|eu-west-1)$"))`,
+    astPatternQuery: treeSitterQueriesFor(category),
   };
 
   return { deontic, compiled };

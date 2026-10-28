@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { analyzeFullRepositoryAsync } from '../analyzer/astAnalyzer.js';
+import { runTreeSitterQueries } from '../analyzer/treeSitter.js';
 import { readTargetRepoFiles } from '../analyzer/repoBaseline.js';
 import {
   compileLegalProseToFormalPolicy,
@@ -306,7 +307,12 @@ export async function executeMcpTool(
     }
     case 'scan_polyglot_repository_ast': {
       const { sqlTables, astFindings, enrichedFiles } = await repo();
+      const structuralQueryMatches: Record<string, unknown> = {};
+      for (const clause of clauses) {
+        structuralQueryMatches[clause.id] = await runTreeSitterQueries(clause.compiled.astPatternQuery, enrichedFiles);
+      }
       return {
+        structuralQueryMatches,
         filesScanned: enrichedFiles.length,
         totalAstNodes: enrichedFiles.reduce((acc, f) => acc + (f.astNodeCount || 0), 0),
         sqlTables,

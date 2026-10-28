@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyzeFullRepositoryAsync, parseSqlSchemaFile } from './analyzer/astAnalyzer.js';
 import { INITIAL_REPO_FILES } from './analyzer/repoBaseline.js';
+import { runTreeSitterQueries } from './analyzer/treeSitter.js';
 import { compileLegalProseToFormalPolicy, getInitialClauses, mergeLlmBounds, extractDeonticBoundsFromProse } from './compiler/legalCompiler.js';
 import { executeByocCustomScan } from './enterprise/enterpriseSuite.js';
 import { verifyRepositoryAgainstClauses } from './prover/z3Engine.js';
@@ -150,5 +151,17 @@ describe('remediation', () => {
     expect(api.patchedContent).toContain('TENANT_KMS_CLIENT is not configured');
     expect(api.syntaxCheck?.passed).toBe(true);
     expect(pr!.status).toBe('READY_TO_MERGE');
+  });
+});
+
+describe('tree-sitter structural queries', () => {
+  it('compile to real queries and locate the constrained constructs', async () => {
+    const [retention, logging, ai, egress] = getInitialClauses();
+    const files = fixture();
+    const ttl = await runTreeSitterQueries(retention.compiled.astPatternQuery, files);
+    expect(ttl).toContainEqual(expect.objectContaining({ filePath: 'workers/redis_cache_worker.py', captures: expect.objectContaining({ name: 'PII_CACHE_TTL_HOURS', value: '720' }) }));
+    expect((await runTreeSitterQueries(logging.compiled.astPatternQuery, files)).some((m) => m.captures.method === 'info')).toBe(true);
+    expect((await runTreeSitterQueries(ai.compiled.astPatternQuery, files)).map((m) => m.captures.name)).toContain('MIN_CONFIDENCE_FOR_AUTO_APPROVAL');
+    expect((await runTreeSitterQueries(egress.compiled.astPatternQuery, files))[0].captures.value).toBe('"us-east-1"');
   });
 });

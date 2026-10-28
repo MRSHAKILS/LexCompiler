@@ -645,4 +645,6 @@ export interface FullComplianceScanReport {
   remediationPR: RemediationPullRequest | null;
   mutationPresets: RegulatoryMutationPreset[];
   files: TargetRepoFile[];
+  /** Tree-sitter matches of each clause's structural query (clause id → matches). */
+  structuralQueryMatches?: Record<string, Array<{ filePath: string; language: string; line: number; captures: Record<string, string> }>>;
 }

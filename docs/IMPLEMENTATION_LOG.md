@@ -132,6 +132,12 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - **`server/analysis.test.ts`:** the compiler (strictest duration, number words, negation, LLM validation), the analyzer (constant folding, TTL units, taint through aliases, false-positive avoidance, multi-line SQL / constraints / ALTER TABLE), the prover (every instance reported, missing constructs not applicable, executed SMT), BYOC, and remediation (edit engine, user code kept, safe helpers).
   - **`server/opa.test.ts`:** OPA agreement with Z3 before and after remediation; it runs wherever OPA is installed (CI).
 
+### Step 9 · Real Tree-sitter structural queries (L3)
+- **Queries:** `astPatternQuery` is no longer pseudo-syntax. `server/analyzer/treeSitter.ts` generates real Tree-sitter S-expression queries per rule category, with one section per grammar (`;; @language python|typescript`), using grouped `#match?` predicates.
+- **Execution:** the queries run with the WebAssembly Python and TypeScript grammars from `@vscode/tree-sitter-wasm@0.3.1`, so no native build is needed. Each match reports its file, line, and named captures.
+- **Where they run:** the full scan report (`structuralQueryMatches`, per clause) and the AST MCP tool.
+- **Test:** `server/analysis.test.ts` checks that each clause's query finds the construct it constrains in the fixture (the Redis TTL, the logger calls, the confidence threshold, and the egress region).
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -148,7 +154,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-8 | **Hardware-backed signing (C1)** | No KMS/HSM available | The key now persists in a file or an env PEM and is published (Step 4). Remaining: keep the Ed25519 key in AWS KMS / Cloud KMS / an HSM, and add RFC 3161 timestamping and revocation. |
 | L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | TypeScript now runs for real under Node's permission model, and Python under rlimits (Steps 1, 7). Remaining: run both in an unprivileged container (or gVisor/nsjail/Firecracker) with no network access. |
 | L-10 | **Real PostgreSQL execution (X2)** | No PostgreSQL server | Execute `schema/*.sql` on a disposable PostgreSQL instance instead of SQLite, and run FastAPI/Pydantic/Redis for real instead of shims and mocks. |
-| L-11 | **Tree-sitter queries (L3)** | Native Tree-sitter grammars can't be installed here | Add `tree-sitter` with the Python/TypeScript/SQL grammars and execute the generated `astPatternQuery` strings. |
+| L-11 | **Tree-sitter queries (L3)** | The WASM grammar bundle has no SQL grammar | Python and TypeScript queries now run for real (Step 9). Remaining: add a SQL grammar (e.g. `tree-sitter-sql` built to WASM) and run DDL queries over `schema/*.sql` instead of matching embedded `CREATE TABLE` strings. |
 | L-12 | **External MCP servers** (postgres-pgvector, neo4j-cypher, github, filesystem, duckdb, n8n) | The services aren't available here | Run and wire each server, then list them as integrated once they answer `initialize`. |
 | L-15 | **GitHub code-scanning upload** | Enabling code scanning is a repository setting | CI already produces `lexcompiler.sarif`. Enable code scanning, add `security-events: write`, and add `github/codeql-action/upload-sarif` for scans of real repositories (not the intentionally non-compliant fixture). |
 | L-13 | **EUR-Lex SPARQL ingestion** | The EUR-Lex SPARQL endpoint isn't reachable from this session | Query the CELLAR SPARQL endpoint for amendments to the tracked CELEX numbers and replace the curated excerpts with official text. |
