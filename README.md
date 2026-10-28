@@ -235,6 +235,9 @@ Only a `READY_TO_MERGE` remediation (post-patch Z3 `SAT`) can be opened. Optiona
 | `LEXCOMPILER_POSTGRES_URL` | unset (in-process PostgreSQL via PGlite) | PostgreSQL server for the sandbox schema run |
 | `LEXCOMPILER_REDIS_URL` | unset (fakeredis) | Redis server for the sandbox cache worker |
 | `LEXCOMPILER_SANDBOX_PYTHON` | `.venv` Python | Interpreter for the runtime sandbox |
+| `LEXCOMPILER_PGVECTOR_URL` | unset (PGlite in `data/pgvector`) | PostgreSQL + pgvector server for RAG chunk vectors |
+| `LEXCOMPILER_NEO4J_URL`, `LEXCOMPILER_NEO4J_USER`, `LEXCOMPILER_NEO4J_PASSWORD`, `LEXCOMPILER_NEO4J_DATABASE` | unset (in-memory graph) | Neo4j for the Graph RAG traversal (Cypher) |
+| `LEXCOMPILER_RERANKER_MODEL`, `LEXCOMPILER_RERANKER_LOCAL_DIR`, `LEXCOMPILER_RERANKER_DTYPE` | unset | BGE cross-encoder reranker through transformers.js (`npm install @huggingface/transformers`) |
 | `LEXCOMPILER_OPA_BIN` | `opa` on `PATH` | OPA binary |
 | `LEXCOMPILER_PYTHON` | first of `python3`, `python`, `py -3` that is Python >= 3.10 | Python interpreter for AST parsing and the runtime sandbox |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |

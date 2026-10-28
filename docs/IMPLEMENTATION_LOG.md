@@ -162,6 +162,18 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **CI and Docker:** CI runs `npm run setup:sandbox`, and the Docker image builds the same `.venv`. A `.dockerignore` keeps local artefacts out of the build context.
 - **Tests:** `server/postgres.test.ts` covers the schema run, the retention purge, the erasure cascade, a RESTRICT foreign key, and invalid DDL. `verify:realworld` gained PostgreSQL, HTTP and Redis TTL checks.
 
+### Step 13 · pgvector, Neo4j Graph RAG, cross-encoder reranking (L-3)
+- **pgvector:** `server/rag/vectorStore.ts` keeps chunk vectors in PostgreSQL with pgvector 0.8 and an HNSW cosine index.
+  - **Where:** PGlite persisted in `data/pgvector`, or a PostgreSQL server via `LEXCOMPILER_PGVECTOR_URL`.
+  - **Separation:** each embedding model gets its own table (feature hashing and `all-minilm` vectors are never mixed).
+  - **Sync:** rows are synced by content hash; changed chunks are re-embedded, and removed ones are deleted.
+  - **Search:** runs through the index, with `hnsw.ef_search` widened to cover `k`.
+  - **Concurrency:** a pid lock stops two processes opening the same PGlite directory; a second process uses an in-memory database.
+- **Neo4j:** `server/rag/graphStore.ts` loads the statute ↔ code entity graph into Neo4j (`LEXCOMPILER_NEO4J_URL`, `_USER`, `_PASSWORD`, `_DATABASE`). The 2-hop traversal runs as Cypher (`MATCH p = (s)-[:LEX_REL*0..2]-(m) RETURN m.key, min(length(p))`). Without Neo4j, an in-memory graph applies the same semantics.
+- **Reranker:** `server/rag/reranker.ts` runs a BGE cross-encoder (`LEXCOMPILER_RERANKER_MODEL`, e.g. `Xenova/bge-reranker-base`, through transformers.js). When it is enabled, it reorders the fused top 2 × k candidates.
+- **Wiring:** `/api/rag/query`, the AI overview and the MCP RAG tool use the store-backed pipeline. `vectorDbBackend` and `graphDbBackend` report the backend that actually served the query.
+- **Tests:** `server/rag.test.ts` covers the pgvector ordering, refreshes and deletions, more than 40 results, and dimension checks. It also proves that the store-backed pipeline (pgvector plus the Cypher graph store) ranks exactly as the in-process pipeline does, and that a cross-encoder decides the final order.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -170,7 +182,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | :-- | :--- | :--- | :--- |
 | L-1 | **OPA Rego evaluation (V5)** | Running a downloaded OPA binary was not permitted in this session | Implemented (Step 8): Rego v1 policies, the `opa eval` integration, OPA in CI and Docker. Remaining: run `npm test` locally with `opa` on PATH (or check the CI run) to confirm `server/opa.test.ts` passes against real OPA. |
 | L-2 | **6-agent crew (AI1)** — CrewAI, DSPy, Hermes, LangGraph, Pydantic-AI, OpenAI Swarm with Claude / DeepSeek / GPT-4o / Gemini / Llama / Qwen | Needs provider API keys, Python agent frameworks, and local GGUF models | Each agent already calls its real MCP tool with measured latency and tokens (Step 5). Remaining: put the named framework and LLM in front of each tool call (agent reasoning, tool selection, structured outputs). |
-| L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No PostgreSQL/pgvector or Neo4j service | Retrieval, 2-hop traversal, and neural dense ranking now run in memory (Step 5). Remaining: persist chunk vectors in pgvector (HNSW, 384-d), store the knowledge graph in Neo4j, and run the traversal as Cypher. Add a BGE cross-encoder reranker. |
+| L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No Neo4j server, and Hugging Face downloads are blocked here | Implemented (Step 13). Remaining: (1) start Neo4j (`docker run -p 7687:7687 -e NEO4J_AUTH=neo4j/<password> neo4j:5`), set `LEXCOMPILER_NEO4J_URL=bolt://localhost:7687` and the password, and run a RAG query; `graphDbBackend` must read `Neo4j`. (2) Optionally point `LEXCOMPILER_PGVECTOR_URL` at a PostgreSQL server with pgvector. (3) `npm install @huggingface/transformers`, set `LEXCOMPILER_RERANKER_MODEL=Xenova/bge-reranker-base`, run a query, and confirm `evaluationMethod` names the reranker. |
 | L-4 | **RAGAS evaluation (AI3)** | Needs an evaluation dataset and a judge LLM | Metrics are now computed against category-derived labels (Step 5). Remaining: a hand-labelled question set and RAGAS with a judge LLM. |
 | L-5 | **Token-optimisation benchmark (AI4)** — LLMLingua-2, semantic dedup, KV-cache pinning | Needs the LLMLingua-2 model and provider cache telemetry | Real tokenizer and measured stages are done (Step 5). Remaining: run LLMLingua-2 compression, dedup by neural embedding cosine similarity, and read cache-hit tokens from provider usage fields. |
 | L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | Run `ollama serve` and pull the models; the LLM fallback, embeddings, and multi-model pipeline then use them (`available: true`). |

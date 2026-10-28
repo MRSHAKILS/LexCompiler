@@ -36,7 +36,7 @@ import {
 } from './optimization/tokenOptimizer.js';
 import { verifyRepositoryAgainstClauses, z3SelfTest } from './prover/z3Engine.js';
 import {
-  executeHybridRagQuery,
+  executeStoreBackedRagQuery,
   executeRealNeuralRagQuery,
 } from './rag/hybridRagEngine.js';
 import { GitHubPrError, githubPrOptionsFromEnv, openGitHubPullRequest } from './remediation/githubPr.js';
@@ -417,7 +417,7 @@ app.get('/api/ai-heavy/overview', async (_req, res) => {
       astFindings
     );
 
-    const defaultRagReport = executeHybridRagQuery(
+    const defaultRagReport = await executeStoreBackedRagQuery(
       'Which SQL tables and Python endpoints violate GDPR Art. 17 72-hour retention and tenant-isolated KMS encryption?',
       activeClauses,
       sqlTables,
