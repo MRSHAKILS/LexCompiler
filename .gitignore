@@ -9,3 +9,4 @@ video-build/
 .env
 INTERNAL_AUDIT.md
 repos/
+.venv-agents/

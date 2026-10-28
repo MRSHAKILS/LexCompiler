@@ -37,7 +37,7 @@ import {
   compressRepoToGraphifySExpr,
   countTokens,
   pruneCodeWithCodeburn,
-  runTokenOptimizationBenchmark,
+  runTokenOptimizationBenchmarkAsync,
 } from './optimization/tokenOptimizer.js';
 import { verifyRepositoryAgainstClauses, z3SelfTest } from './prover/z3Engine.js';
 import {
@@ -425,7 +425,7 @@ app.get('/api/ai-heavy/overview', async (_req, res) => {
       pr
     );
 
-    const tokenBenchmark = runTokenOptimizationBenchmark(
+    const tokenBenchmark = await runTokenOptimizationBenchmarkAsync(
       activeClauses,
       enrichedFiles,
       sqlTables,

@@ -254,6 +254,29 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - rotation and revocation;
   - a fake TSA built with pkijs (self-signed RSA certificate, signed attributes): the token verifies, and is rejected for other data or after tampering.
 
+### Step 19 · LLM agents, framework adapters, labelled RAG evaluation, model-based token stages (L-2, L-4, L-5)
+- **L-2 · LLM agents (TypeScript):** `server/agents/llmClient.ts` speaks two protocols.
+  - **OpenAI-compatible:** OpenAI, DeepSeek, Gemini's OpenAI endpoint, Groq/Together/vLLM for Llama, and Ollama `/v1`.
+  - **Anthropic Messages:** the system prompt is prompt-cached.
+  - **Usage:** both report provider usage, including cached prompt tokens.
+  - **Agent loop:** `server/agents/agentRuntime.ts` gives the model the agent's MCP tools (from `tools/list`). Each tool call is executed through the real MCP handler, and the final answer is validated against a JSON schema, with one correction turn.
+  - **Configuration:** each agent reads `LEXCOMPILER_AGENT_<ID>_MODEL`, `_PROVIDER`, `_BASE_URL` and `_API_KEY`, falling back to `LEXCOMPILER_LLM_*`.
+  - **Orchestrator:** a configured agent runs as `LLM_AGENT` with measured usage; the rest stay `DIRECT_TOOL_CALL`.
+- **L-2 · Python framework adapters (`agents/`):** each one drives LexCompiler's MCP servers over streamable HTTP.
+  - **The six adapters:** Pydantic-AI (Z3 critic, typed output), LangGraph (RAG state machine: retrieve → CRAG grade → rewrite → answer), Hermes-style function calling on Ollama Qwen (AST mapper), CrewAI (horizon scanner), DSPy ReAct with a typed signature (deontic extractor), and the OpenAI Agents SDK, Swarm's successor, with a reviewer handoff (remediation).
+  - **CLI:** `python -m lexcompiler_agents <agent-id>`.
+  - **Tested:** pytest covers Pydantic-AI (`TestModel`), LangGraph, and Hermes (stub Ollama), and CI runs it. The LangGraph adapter was also run against a live server.
+- **L-4 · Evaluation:** `server/rag/eval/dataset.json` holds 16 hand-labelled questions with graded relevance.
+  - **Metrics:** `server/rag/evaluation.ts` computes P@k, R@k, MRR, nDCG@k and hit rate.
+  - **Judge:** a RAGAS-style LLM judge scores faithfulness (supported claims ÷ claims) and answer relevancy.
+  - **Running it:** `npm run eval:rag`. Measured on the fixture: MRR 0.656, nDCG@5 0.542, hit rate 0.938, now enforced as a regression floor.
+- **L-5 · Token stages:**
+  - **LLMLingua-2:** a Python sidecar (`agents/lexcompiler_agents/llmlingua_compress.py`, enabled by `LEXCOMPILER_LLMLINGUA_PYTHON`).
+  - **Dedup:** by neural-embedding cosine (Ollama `all-minilm`).
+  - **Cache hit rate:** measured from provider usage fields (`prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens`, `cache_read_input_tokens`).
+  - **Wiring:** the AI overview runs the async benchmark, and each stage names the technique that actually ran.
+- **Tests:** `server/agents.test.ts`, `server/evaluation.test.ts`, `server/tokens.test.ts`, `agents/tests/`.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -261,10 +284,10 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | # | Item | Why it couldn't be finished here | What remains |
 | :-- | :--- | :--- | :--- |
 | L-1 | **OPA Rego evaluation (V5)** | Running a downloaded OPA binary was not permitted in this session | Implemented (Step 8): Rego v1 policies, the `opa eval` integration, OPA in CI and Docker. Remaining: run `npm test` locally with `opa` on PATH (or check the CI run) to confirm `server/opa.test.ts` passes against real OPA. |
-| L-2 | **6-agent crew (AI1)** — CrewAI, DSPy, Hermes, LangGraph, Pydantic-AI, OpenAI Swarm with Claude / DeepSeek / GPT-4o / Gemini / Llama / Qwen | Needs provider API keys, Python agent frameworks, and local GGUF models | Each agent already calls its real MCP tool with measured latency and tokens (Step 5). Remaining: put the named framework and LLM in front of each tool call (agent reasoning, tool selection, structured outputs). |
+| L-2 | **6-agent crew (AI1)** | Needs provider API keys and local GGUF models | Implemented (Step 19). Remaining: set `LEXCOMPILER_LLM_*` / `LEXCOMPILER_AGENT_<ID>_*` (Claude, DeepSeek, GPT-4o, Gemini, Llama, Qwen) and run the pipeline. `pip install -r agents/requirements.txt`, then run `python -m lexcompiler_agents <agent-id>` for the CrewAI, DSPy and OpenAI Agents adapters (Pydantic-AI, LangGraph and Hermes are already tested). |
 | L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No Neo4j server, and Hugging Face downloads are blocked here | Implemented (Step 13). Remaining: (1) start Neo4j (`docker run -p 7687:7687 -e NEO4J_AUTH=neo4j/<password> neo4j:5`), set `LEXCOMPILER_NEO4J_URL=bolt://localhost:7687` and the password, and run a RAG query; `graphDbBackend` must read `Neo4j`. (2) Optionally point `LEXCOMPILER_PGVECTOR_URL` at a PostgreSQL server with pgvector. (3) `npm install @huggingface/transformers`, set `LEXCOMPILER_RERANKER_MODEL=Xenova/bge-reranker-base`, run a query, and confirm `evaluationMethod` names the reranker. |
-| L-4 | **RAGAS evaluation (AI3)** | Needs an evaluation dataset and a judge LLM | Metrics are now computed against category-derived labels (Step 5). Remaining: a hand-labelled question set and RAGAS with a judge LLM. |
-| L-5 | **Token-optimisation benchmark (AI4)** — LLMLingua-2, semantic dedup, KV-cache pinning | Needs the LLMLingua-2 model and provider cache telemetry | Real tokenizer and measured stages are done (Step 5). Remaining: run LLMLingua-2 compression, dedup by neural embedding cosine similarity, and read cache-hit tokens from provider usage fields. |
+| L-4 | **RAGAS evaluation (AI3)** | Needs a judge LLM | Labelled set, IR metrics and judge implemented (Step 19). Remaining: set `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL` (or `LEXCOMPILER_LLM_*`) and run `npm run eval:rag`; optionally also run the Python `ragas` package on the same dataset. |
+| L-5 | **Token-optimisation benchmark (AI4)** | Hugging Face downloads are blocked here | Implemented (Step 19). Remaining: `pip install llmlingua` (downloads the xlm-roberta model) and set `LEXCOMPILER_LLMLINGUA_PYTHON`. Run Ollama with `all-minilm` for neural dedup, and run an LLM agent so cache hits are measured. |
 | L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | Run `ollama serve` and pull the models; the LLM fallback, embeddings, and multi-model pipeline then use them (`available: true`). |
 | L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Implemented and tested against a mocked API (Step 7). Remaining: set `LEXCOMPILER_GITHUB_TOKEN` / `LEXCOMPILER_GITHUB_REPO`, open one real PR end to end, and optionally persist the returned PR number. |
 | L-8 | **Hardware-backed signing (C1)** | No cloud KMS account or TSA reachable here | Implemented (Step 18) and tested against fakes. Remaining: create a KMS key (GCP `EC_SIGN_ED25519` with HSM protection, or AWS `ECC_NIST_P256` SIGN_VERIFY), set `LEXCOMPILER_SIGNER` and the key id, set `LEXCOMPILER_TSA_URL` (e.g. `https://freetsa.org/tsr`), then issue and verify one certificate. |

@@ -228,6 +228,19 @@ Set `LEXCOMPILER_OIDC_ISSUER` and `LEXCOMPILER_OIDC_CLIENT_ID` (plus `LEXCOMPILE
 
 Projects (`/api/projects`) each have their own repository (inside `LEXCOMPILER_PROJECT_REPOS_ROOT`, default `repos/`), members (`viewer`, `editor`, `owner`), clauses, and scan history.
 
+### LLM Agents and Framework Adapters
+
+Set `LEXCOMPILER_LLM_MODEL` (plus `LEXCOMPILER_LLM_PROVIDER` = `openai` | `anthropic`, `LEXCOMPILER_LLM_BASE_URL`, `LEXCOMPILER_LLM_API_KEY`), or per agent `LEXCOMPILER_AGENT_<ID>_MODEL` (e.g. `LEXCOMPILER_AGENT_Z3_FORMAL_CRITIC_MODEL=deepseek-reasoner` with `LEXCOMPILER_AGENT_Z3_FORMAL_CRITIC_BASE_URL=https://api.deepseek.com/v1`). Configured agents reason over their MCP tools with real tool calls and return validated structured output; the others call their tool directly.
+
+The Python adapters in `agents/` run each agent in its named framework (CrewAI, DSPy, Hermes, LangGraph, Pydantic-AI, OpenAI Agents SDK) against a running server:
+
+```bash
+pip install -r agents/requirements.txt
+cd agents && python -m lexcompiler_agents agent-contextual-graph-rag
+```
+
+`npm run eval:rag` scores retrieval on the labelled dataset (`server/rag/eval/dataset.json`); with `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL` set it also runs the RAGAS-style judge.
+
 ### Configuration Reference
 
 | Variable | Default | Purpose |

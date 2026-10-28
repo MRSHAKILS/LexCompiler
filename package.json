@@ -18,7 +18,8 @@
     "lint": "eslint .",
     "sarif": "tsx server/cli-sarif.ts",
     "setup:sandbox": "tsx server/cli/setup-sandbox.ts",
-    "build:sql-grammar": "tsx server/cli/build-sql-grammar.ts"
+    "build:sql-grammar": "tsx server/cli/build-sql-grammar.ts",
+    "eval:rag": "tsx server/cli-eval-rag.ts"
   },
   "dependencies": {
     "@aws-sdk/client-kms": "3.1150.0",

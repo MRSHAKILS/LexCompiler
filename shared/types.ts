@@ -617,6 +617,11 @@ export interface AgentExecutionStep {
   status: 'COMPLETED' | 'FAILED';
   reasoningSummary: string;
   structuredArtifactPreview: string;
+  /** LLM_AGENT: a configured model chose and called the tools; DIRECT_TOOL_CALL: no model configured. */
+  execution?: 'LLM_AGENT' | 'DIRECT_TOOL_CALL';
+  /** Provider-reported usage when an LLM ran (including cached prompt tokens). */
+  llmUsage?: { promptTokens: number; completionTokens: number; cachedPromptTokens: number; cacheWriteTokens: number };
+  toolCallsMade?: Array<{ name: string; ok: boolean; latencyMs: number }>;
 }
 
 export interface MultiAgentPipelineReport {

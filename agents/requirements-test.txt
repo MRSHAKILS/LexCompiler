@@ -1,0 +1,3 @@
+pydantic-ai-slim==2.55.0
+langgraph==1.2.10
+pytest>=8

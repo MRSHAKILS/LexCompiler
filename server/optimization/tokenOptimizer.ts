@@ -1,3 +1,5 @@
+import { computeRealNeuralEmbedding } from '../services/realAiServiceMesh.js';
+import { compressWithLlmLingua, deduplicateByEmbedding, measuredCacheTelemetry } from './neuralCompression.js';
 import { countTokens as countO200kTokens } from 'gpt-tokenizer/encoding/o200k_base';
 import { sha256Hex } from '../util/hash.js';
 import type {
@@ -189,11 +191,22 @@ const pct = (before: number, after: number) => (before > 0 ? Math.round(((before
  * The cache stage counts the static ontology prefix at the provider's cache-read price
  * (LEXCOMPILER_CACHE_READ_MULTIPLIER), and latency/cost use the stated assumptions.
  */
+/** Results of the model-based stages, when those models are available (see the async variant). */
+export interface NeuralStageInputs {
+  /** LLMLingua-2 output per clause, in clause order. */
+  legalCompressed?: string[];
+  /** Embedding-based dedup over the stage-4 segments. */
+  dedup?: { kept: string[]; removed: string[]; method: string };
+  /** Provider-reported cache usage from LLM agent runs. */
+  cache?: { promptTokens: number; cachedPromptTokens: number; cacheHitRatePercent: number };
+}
+
 export function runTokenOptimizationBenchmark(
   clauses: LegalClause[],
   files: TargetRepoFile[],
   sqlTables: SQLTableSchema[],
-  astFindings: ASTFindingNode[]
+  astFindings: ASTFindingNode[],
+  neural: NeuralStageInputs = {}
 ): TokenOptimizationBenchmarkReport {
   const a = benchmarkAssumptions();
   const staticPrefix = clauses.map((c) => `${c.compiled.smtLib2Snippet}\n${c.compiled.opaRegoRule}`).join('\n\n');
@@ -213,7 +226,7 @@ export function runTokenOptimizationBenchmark(
   const afterGraphify = prefixTokens + legalTokens + countTokens(graph);
 
   // Stage 3: Caveman legal prose slimming
-  const caveman = clauses.map((c) => `${c.citation}: ${compressLegalProseCaveman(c.rawLegalText)}`).join('\n');
+  const caveman = clauses.map((c, i) => `${c.citation}: ${neural.legalCompressed?.[i] ?? compressLegalProseCaveman(c.rawLegalText)}`).join('\n');
   const afterCaveman = prefixTokens + countTokens(caveman) + countTokens(graph);
 
   // Stage 4: near-duplicate removal across clause sentences and graph nodes
@@ -221,13 +234,14 @@ export function runTokenOptimizationBenchmark(
     ...caveman.split(/(?<=[.;])\s+|\n/).filter((x) => x.trim()),
     ...graph.split(/(?=\((?:SQLTable|ASTNode) )/).filter((x) => x.trim()),
   ];
-  const dedup = deduplicateSegments(segments);
+  const dedup = neural.dedup || deduplicateSegments(segments);
   const afterDedup = prefixTokens + countTokens(dedup.kept.join('\n'));
 
   // Stage 5: static ontology prefix served from the provider prompt cache
   const dynamicTokens = afterDedup - prefixTokens;
   const billableEquivalent = Math.round(dynamicTokens + prefixTokens * a.cacheReadMultiplier);
-  const cachedPrefixHitRatePercent = afterDedup > 0 ? Math.round((prefixTokens / afterDedup) * 1000) / 10 : 0;
+  // Measured from provider usage fields when LLM agents have run; otherwise the prefix share.
+  const cachedPrefixHitRatePercent = neural.cache ? neural.cache.cacheHitRatePercent : afterDedup > 0 ? Math.round((prefixTokens / afterDedup) * 1000) / 10 : 0;
 
   const saved = (before: number, after: number) => Math.round(((before - after) / a.prefillTokensPerSecond) * 1000 * 10) / 10;
   const stages: TokenOptimizationStageMetric[] = [
@@ -257,15 +271,17 @@ export function runTokenOptimizationBenchmark(
     },
     {
       techniqueId: 'opt-llmlingua-caveman',
-      techniqueName: 'Caveman — Normative Legal Prose Slimmer',
+      techniqueName: neural.legalCompressed ? 'LLMLingua-2 — Token-Classification Prompt Compression' : 'Caveman — Normative Legal Prose Slimmer',
       category: 'LLMLingua-2 / Caveman (Perplexity Token Slimming)',
       tokensBefore: afterGraphify,
       tokensAfter: afterCaveman,
       reductionPercent: pct(afterGraphify, afterCaveman),
       latencySavedMs: saved(afterGraphify, afterCaveman),
-      description: 'Drops recital stopwords while keeping deontic operators, numbers, and citations.',
+      description: neural.legalCompressed
+        ? 'LLMLingua-2 (xlm-roberta token classifier) keeps the tokens it scores as informative; deontic operators, numbers and citations are force-kept.'
+        : 'Drops recital stopwords while keeping deontic operators, numbers, and citations.',
       beforeSnippet: clauses[0]?.rawLegalText.slice(0, 190) || '',
-      afterSnippet: compressLegalProseCaveman(clauses[0]?.rawLegalText || '').slice(0, 160),
+      afterSnippet: (neural.legalCompressed?.[0] ?? compressLegalProseCaveman(clauses[0]?.rawLegalText || '')).slice(0, 160),
     },
     {
       techniqueId: 'opt-semantic-dedup',
@@ -275,7 +291,7 @@ export function runTokenOptimizationBenchmark(
       tokensAfter: afterDedup,
       reductionPercent: pct(afterCaveman, afterDedup),
       latencySavedMs: saved(afterCaveman, afterDedup),
-      description: `Removed ${dedup.removed.length} of ${segments.length} segments with word-trigram Jaccard ≥ 0.8 to an earlier segment.`,
+      description: `Removed ${dedup.removed.length} of ${segments.length} segments ${neural.dedup ? `(${neural.dedup.method})` : 'with word-trigram Jaccard ≥ 0.8 to an earlier segment'}.`,
       beforeSnippet: dedup.removed[0]?.slice(0, 160) || 'No near-duplicate segments found.',
       afterSnippet: dedup.kept.slice(0, 2).join(' | ').slice(0, 160),
     },
@@ -287,7 +303,9 @@ export function runTokenOptimizationBenchmark(
       tokensAfter: billableEquivalent,
       reductionPercent: pct(afterDedup, billableEquivalent),
       latencySavedMs: saved(afterDedup, billableEquivalent),
-      description: `Pins the ${prefixTokens}-token static SMT-LIB2/Rego ontology as a cached prefix, billed at ${a.cacheReadMultiplier}× the input price on cache hits.`,
+      description: `Pins the ${prefixTokens}-token static SMT-LIB2/Rego ontology as a cached prefix, billed at ${a.cacheReadMultiplier}× the input price on cache hits.${
+        neural.cache ? ` Measured: providers served ${neural.cache.cachedPromptTokens} of ${neural.cache.promptTokens} prompt tokens from cache (${neural.cache.cacheHitRatePercent}%).` : ''
+      }`,
       beforeSnippet: staticPrefix.slice(0, 160),
       afterSnippet: `cache_control: ephemeral · prefix sha256 ${sha256Hex(staticPrefix).slice(0, 12)} · ${prefixTokens} tokens`,
     },
@@ -304,4 +322,31 @@ export function runTokenOptimizationBenchmark(
     estimatedCostPer1kScansOptimizedUsd: costPer1k(billableEquivalent),
     stages,
   };
+}
+
+/**
+ * Benchmark with the model-based stages when available: LLMLingua-2 (LEXCOMPILER_LLMLINGUA_PYTHON),
+ * neural-embedding dedup (Ollama all-minilm), and measured provider cache telemetry.
+ */
+export async function runTokenOptimizationBenchmarkAsync(
+  clauses: LegalClause[],
+  files: TargetRepoFile[],
+  sqlTables: SQLTableSchema[],
+  astFindings: ASTFindingNode[],
+  deps: { embed?: (text: string) => Promise<number[]> } = {}
+): Promise<TokenOptimizationBenchmarkReport> {
+  const neural: NeuralStageInputs = {};
+  const lingua = await compressWithLlmLingua(clauses.map((c) => c.rawLegalText));
+  if (lingua) neural.legalCompressed = lingua;
+  const embed = deps.embed || (async (t: string) => (await computeRealNeuralEmbedding(t)).embedding);
+  const probe = await embed('probe');
+  if (probe.length) {
+    const caveman = clauses.map((c, i) => `${c.citation}: ${neural.legalCompressed?.[i] ?? compressLegalProseCaveman(c.rawLegalText)}`).join('\n');
+    const graph = compressRepoToGraphifySExpr(sqlTables, astFindings);
+    const segments = [...caveman.split(/(?<=[.;])\s+|\n/).filter((x) => x.trim()), ...graph.split(/(?=\((?:SQLTable|ASTNode) )/).filter((x) => x.trim())];
+    neural.dedup = { ...(await deduplicateByEmbedding(segments, embed)), method: `neural embedding cosine ≥ 0.92 (${probe.length}-d)` };
+  }
+  const cache = measuredCacheTelemetry();
+  if (cache) neural.cache = cache;
+  return runTokenOptimizationBenchmark(clauses, files, sqlTables, astFindings, neural);
 }
