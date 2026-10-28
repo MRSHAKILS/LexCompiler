@@ -28,23 +28,44 @@ export function compileLegalProseToFormalPolicy(
   clauseId: string,
   citation: string
 ): { deontic: DeonticExtraction; compiled: CompiledPolicyArtifacts } {
-  const normalized = rawText.trim();
+  const banglaDigitMap: Record<string, string> = {
+    '০': '0',
+    '১': '1',
+    '২': '2',
+    '৩': '3',
+    '৪': '4',
+    '৫': '5',
+    '৬': '6',
+    '৭': '7',
+    '৮': '8',
+    '৯': '9',
+  };
+  const normalized = rawText
+    .trim()
+    .replace(/[০-৯]/g, (d) => banglaDigitMap[d] || d);
   const lower = normalized.toLowerCase();
 
-  // Extract temporal retention bounds from natural language ("within 72 hours", "within 30 days", etc.)
+  // Extract temporal retention bounds from English or pure Bangla natural language ("within 72 hours", "৭২ ঘণ্টা", "৪৮ ঘণ্টার মধ্যে", "30 days", "৩০ দিন")
   let maxRetentionHours = 720; // default 30 days = 720 hours
-  const hoursMatch = lower.match(/(\d+)\s*(?:hours|hour|hrs|hr|h)\b/);
-  const daysMatch = lower.match(/(\d+)\s*(?:days|day|d)\b/);
-  if (hoursMatch) {
-    maxRetentionHours = parseInt(hoursMatch[1], 10);
-  } else if (daysMatch) {
-    maxRetentionHours = parseInt(daysMatch[1], 10) * 24;
+  const enHoursMatch = lower.match(/(\d+)\s*(?:hours|hour|hrs|hr|h)\b/);
+  const bnHoursMatch = lower.match(/(\d+)\s*(?:ঘণ্টা|ঘন্টা)/);
+  const enDaysMatch = lower.match(/(\d+)\s*(?:days|day|d)\b/);
+  const bnDaysMatch = lower.match(/(\d+)\s*(?:দিন)/);
+
+  if (enHoursMatch) {
+    maxRetentionHours = parseInt(enHoursMatch[1], 10);
+  } else if (bnHoursMatch) {
+    maxRetentionHours = parseInt(bnHoursMatch[1], 10);
+  } else if (enDaysMatch) {
+    maxRetentionHours = parseInt(enDaysMatch[1], 10) * 24;
+  } else if (bnDaysMatch) {
+    maxRetentionHours = parseInt(bnDaysMatch[1], 10) * 24;
   }
   const maxRetentionDays = Math.max(1, Math.round((maxRetentionHours / 24) * 10) / 10);
 
-  // Extract tenant-isolated KMS key requirement
+  // Extract tenant-isolated KMS key requirement (English + pure Bangla)
   const requiresTenantIsolatedKeys =
-    /tenant[- ]isolated|tenant[- ]specific|per[- ]tenant|customer[- ]managed\s+key|tenant_kms/i.test(
+    /tenant[- ]isolated|tenant[- ]specific|per[- ]tenant|customer[- ]managed\s+key|tenant_kms|টেন্যান্ট|পৃথক\s*কী|আইসোলেটেড\s*কী|কেএমএস/i.test(
       normalized
     );
 
@@ -54,20 +75,24 @@ export function compileLegalProseToFormalPolicy(
     requiredEncryptionAlgorithms.push('TENANT-ISOLATED-KMS-ENVELOPE');
   }
 
-  // Extract logging prohibition
+  // Extract logging prohibition (English + pure Bangla)
   const forbidPlaintextLogging =
-    /prohibit|shall not log|never log|forbid|unredacted|plaintext.*log|mask|redact/i.test(
+    /prohibit|shall not log|never log|forbid|unredacted|plaintext.*log|mask|redact|লগ.*নিষিদ্ধ|লগিং.*নিষিদ্ধ|অরক্ষিত.*লগ|প্রকাশ করা যাবে না|রিড্যাক্ট/i.test(
       normalized
     ) || category === 'PII_LOGGING_BAN';
 
-  // Extract cascade erasure requirement
+  // Extract cascade erasure requirement (English + pure Bangla)
   const requireCascadeErasure =
-    /cascade|erasure|right to be forgotten|delete all linked|article 17/i.test(normalized);
+    /cascade|erasure|right to be forgotten|delete all linked|article 17|মুছে ফেলতে হবে|সম্পূর্ণরূপে মুছে/i.test(
+      normalized
+    );
 
-  // Extract AI confidence threshold ("0.85", "85%", "0.90", "90%")
+  // Extract AI confidence threshold ("0.85", "85%", "৮৫%", "৮৫ শতাংশ", "০.৮৫")
   let minAiConfidenceThreshold = 0.70;
-  const decimalMatch = lower.match(/(?:threshold|confidence|score|below|minimum|at least)[^0-9]*?(0\.\d+)/);
-  const percentMatch = lower.match(/(\d{2,3})\s*%/);
+  const decimalMatch = lower.match(
+    /(?:threshold|confidence|score|below|minimum|at least|আত্মবিশ্বাস|স্কোর|কমপক্ষে)[^0-9]*?(0\.\d+)/
+  );
+  const percentMatch = lower.match(/(\d{2,3})\s*(?:%|শতাংশ)/);
   if (decimalMatch) {
     minAiConfidenceThreshold = parseFloat(decimalMatch[1]);
   } else if (percentMatch) {
@@ -77,14 +102,19 @@ export function compileLegalProseToFormalPolicy(
     }
   }
   const requireHumanOversightGate =
-    /human[- ]in[- ]the[- ]loop|human oversight|human review|manual approval|article 14/i.test(
+    /human[- ]in[- ]the[- ]loop|human oversight|human review|manual approval|article 14|মানব তদারকি|মানুষের অনুমোদন|হিউম্যান/i.test(
       normalized
     ) || category === 'AI_HUMAN_IN_THE_LOOP';
 
   // Extract allowed data regions
   const allowedDataRegions: string[] = ['eu-central-1', 'eu-west-1'];
-  if (!/strict eu|eea only|prohibit.*us-east|non-adequate|sovereign eu/i.test(normalized) && category === 'CROSS_BORDER_TRANSFER') {
-    if (/allow.*us-east-1|standard contractual clauses/i.test(normalized)) {
+  if (
+    !/strict eu|eea only|prohibit.*us-east|non-adequate|sovereign eu|দেশের বাইরে|স্থানান্তর নিষিদ্ধ|সার্বভৌম/i.test(
+      normalized
+    ) &&
+    category === 'CROSS_BORDER_TRANSFER'
+  ) {
+    if (/allow.*us-east-1|standard contractual clauses|অনুমোদিত.*us-east-1/i.test(normalized)) {
       allowedDataRegions.push('us-east-1');
     }
   }
@@ -458,6 +488,107 @@ export function getInitialClauses(): LegalClause[] {
   ];
 }
 
+export function getBanglaInitialClauses(): LegalClause[] {
+  const rawBdBankDpa =
+    'ধারা ৪.২ (বাংলাদেশ ব্যাংক আইসিটি নিরাপত্তা নীতিমালা ৪.০ ও উপাত্ত সুরক্ষা আইন): গ্রাহকের সকল ব্যক্তিগত ও আর্থিক সংবেদনশীল তথ্য (PII/PHI) অবশ্যই টেন্যান্ট আইসোলেটেড কেএমএস কী দ্বারা এনক্রিপ্টেড থাকতে হবে এবং ৪৮ ঘণ্টার মধ্যে ডাটাবেস ও ক্যাশ মেমোরি থেকে সম্পূর্ণরূপে মুছে ফেলতে হবে।';
+  const bdDpaCompiled = compileLegalProseToFormalPolicy(
+    rawBdBankDpa,
+    'RETENTION_AND_TENANT_KMS',
+    'CLAUSE-DPA-4.2',
+    'বাংলাদেশ ব্যাংক নীতিমালা ধারা ৪.২ / GDPR Art. 17'
+  );
+
+  const rawBdLogBan =
+    'ধারা ২৬ (সাইবার নিরাপত্তা ও ডিজিটাল স্বাস্থ্য উপাত্ত গোপনীয়তা বিধিমালা): অ্যাপ্লিকেশন এন্ডপয়েন্ট বা সার্ভার লগে গ্রাহকের জাতীয় পরিচয়পত্র, এসএসএন, ইমেইল কিংবা চিকিৎসা সংক্রান্ত তথ্য অরক্ষিত অবস্থায় লগিং সম্পূর্ণ নিষিদ্ধ এবং প্রকাশ করা যাবে না; লগে লেখার পূর্বে অবশ্যই ক্রিপ্টোগ্রাফিক হ্যাশ দ্বারা রিড্যাক্ট করতে হবে।';
+  const bdLogCompiled = compileLegalProseToFormalPolicy(
+    rawBdLogBan,
+    'PII_LOGGING_BAN',
+    'CLAUSE-HIPAA-312B',
+    'সাইবার নিরাপত্তা বিধিমালা ধারা ২৬ / HIPAA §164.312(b)'
+  );
+
+  const rawBdAiAct =
+    'অনুচ্ছেদ ১৪ (উচ্চ-ঝুঁকিপূর্ণ কৃত্রিম বুদ্ধিমত্তা ও ঋণ ঝুঁকি মূল্যায়ন নীতিমালা): এআই মডেলের আত্মবিশ্বাস স্কোর কমপক্ষে ৮৫% (০.৮৫)-এর নিচে হলে কোনো স্বয়ংক্রিয় সিদ্ধান্ত কার্যকর করা যাবে না; এক্ষেত্রে বাধ্যতামূলক মানব তদারকি (হিউম্যান গেট) এবং অপরিবর্তনীয় অডিট লগ নিশ্চিত করতে হবে।';
+  const bdAiCompiled = compileLegalProseToFormalPolicy(
+    rawBdAiAct,
+    'AI_HUMAN_IN_THE_LOOP',
+    'CLAUSE-EU-AI-14',
+    'এআই তদারকি নীতিমালা অনুচ্ছেদ ১৪ / EU AI Act Art. 14'
+  );
+
+  const rawBdResidency =
+    'অধ্যায় ৫ — ধারা ৪৪ (সার্বভৌম ডাটা রেসিডেন্সি ও আন্তঃসীমান্ত স্থানান্তর নিষেধাজ্ঞা): গ্রাহকের সংবেদনশীল ব্যক্তিগত উপাত্ত অনুমোদিত সার্বভৌম অঞ্চলের বাইরে (যেমন অনুমোদনহীন তৃতীয় দেশের ক্লাউড রিজিয়নে) রেপ্লিকেশন বা দেশের বাইরে স্থানান্তর নিষিদ্ধ।';
+  const bdResidencyCompiled = compileLegalProseToFormalPolicy(
+    rawBdResidency,
+    'CROSS_BORDER_TRANSFER',
+    'CLAUSE-GDPR-44',
+    'সার্বভৌম ডাটা রেসিডেন্সি ধারা ৪৪ / GDPR Art. 44'
+  );
+
+  return [
+    {
+      id: 'CLAUSE-DPA-4.2',
+      frameworkId: 'ENTERPRISE_DPA',
+      frameworkName: 'বাংলাদেশ ব্যাংক আইসিটি নীতিমালা / DPA',
+      citation: 'বাংলাদেশ ব্যাংক ধারা ৪.২ / DPA §4.2',
+      title: 'টেন্যান্ট-আইসোলেটেড KMS এনক্রিপশন ও ৪৮ ঘণ্টা উপাত্ত অপসারণ বাধ্যবাধকতা',
+      severity: 'CRITICAL',
+      category: 'RETENTION_AND_TENANT_KMS',
+      rawLegalText: rawBdBankDpa,
+      version: 'BD-ICT-v4.0-বাংলা',
+      lastAmended: '2026-10-28',
+      sourceUrl: 'https://www.bb.org.bd/',
+      deontic: bdDpaCompiled.deontic,
+      compiled: bdDpaCompiled.compiled,
+    },
+    {
+      id: 'CLAUSE-HIPAA-312B',
+      frameworkId: 'HIPAA',
+      frameworkName: 'সাইবার নিরাপত্তা ও স্বাস্থ্য উপাত্ত বিধিমালা',
+      citation: 'সাইবার নিরাপত্তা ধারা ২৬ / HIPAA §164.312(b)',
+      title: 'অ্যাপ্লিকেশন লগে অরক্ষিত ব্যক্তিগত তথ্য (PII/PHI) সংরক্ষণ নিষেধাজ্ঞা',
+      severity: 'HIGH',
+      category: 'PII_LOGGING_BAN',
+      rawLegalText: rawBdLogBan,
+      version: 'BD-CSA-2026-বাংলা',
+      lastAmended: '2026-09-15',
+      sourceUrl: 'https://www.cirt.gov.bd/',
+      deontic: bdLogCompiled.deontic,
+      compiled: bdLogCompiled.compiled,
+    },
+    {
+      id: 'CLAUSE-EU-AI-14',
+      frameworkId: 'EU_AI_ACT',
+      frameworkName: 'উচ্চ-ঝুঁকিপূর্ণ এআই তদারকি নীতিমালা',
+      citation: 'এআই নীতিমালা অনুচ্ছেদ ১৪ / EU AI Act Art. 14',
+      title: 'উচ্চ-ঝুঁকিপূর্ণ এআই মানব তদারকি গেট (≥৮৫% আত্মবিশ্বাস) ও অডিট ট্রেইল',
+      severity: 'CRITICAL',
+      category: 'AI_HUMAN_IN_THE_LOOP',
+      rawLegalText: rawBdAiAct,
+      version: 'AI-GOV-2026-বাংলা',
+      lastAmended: '2026-08-02',
+      sourceUrl: 'https://eur-lex.europa.eu/eli/reg/2024/1689/oj',
+      deontic: bdAiCompiled.deontic,
+      compiled: bdAiCompiled.compiled,
+    },
+    {
+      id: 'CLAUSE-GDPR-44',
+      frameworkId: 'GDPR',
+      frameworkName: 'সার্বভৌম ডাটা রেসিডেন্সি বিধিমালা',
+      citation: 'ডাটা রেসিডেন্সি ধারা ৪৪ / GDPR Art. 44',
+      title: 'সার্বভৌম ডাটা রেসিডেন্সি ও অননুমোদিত আন্তঃসীমান্ত স্থানান্তর নিষেধাজ্ঞা',
+      severity: 'HIGH',
+      category: 'CROSS_BORDER_TRANSFER',
+      rawLegalText: rawBdResidency,
+      version: 'BD-DPA-2026-বাংলা',
+      lastAmended: '2026-07-19',
+      sourceUrl: 'https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679',
+      deontic: bdResidencyCompiled.deontic,
+      compiled: bdResidencyCompiled.compiled,
+    },
+  ];
+}
+
 export function getMutationPresets(): RegulatoryMutationPreset[] {
   return [
     {
@@ -518,6 +649,21 @@ export function getMutationPresets(): RegulatoryMutationPreset[] {
       mutatedLawText:
         'Section 4.2 (Ultra-Strict Ephemeral Mandate): All Personal Identifiable Information (PII) and PHI must be encrypted at rest with tenant-isolated keys (per-tenant KMS envelope) and purged within 24 hours across all storage tiers and Redis caches.',
       parameterDiffSummary: 'max_ttl_hours: 72h → 24h | requires_tenant_kms: true',
+      blastRadiusNodeIds: ['node-postgres-schema', 'node-fastapi-endpoint', 'node-redis-worker'],
+    },
+    {
+      id: 'PRESET-BANGLADESH-BANK-48H',
+      name: 'Bangladesh Bank ICT Guideline v4.0 (বাংলাদেশ ব্যাংক নীতিমালা): ৪৮ ঘণ্টা রিটেনশন ও টেন্যান্ট KMS',
+      badge: 'BANGLA / BD FINTECH',
+      frameworkId: 'ENTERPRISE_DPA',
+      clauseId: 'CLAUSE-DPA-4.2',
+      description:
+        'Compiles bilingual Bangla + English regulatory prose from Bangladesh Bank ICT Security Guideline & Cyber Security Act (৪৮ ঘণ্টা / 48 hours purge + টেন্যান্ট KMS key isolation) directly into Z3 SMT-LIB2.',
+      previousLawExcerpt:
+        'PII must be purged within 72 hours.',
+      mutatedLawText:
+        'ধারা ৪.২ (বাংলাদেশ ব্যাংক আইসিটি নিরাপত্তা নীতিমালা ও সাইবার নিরাপত্তা আইন / Bangladesh Bank ICT Guideline §4.2): গ্রাহকের সকল ব্যক্তিগত ও আর্থিক তথ্য (PII/PHI) অবশ্যই টেন্যান্ট-আইসোলেটেড KMS কী (tenant-isolated keys) দ্বারা এনক্রিপ্টেড থাকতে হবে এবং ৪৮ ঘণ্টা (48 hours)-এর মধ্যে ডাটাবেস ও ক্যাশ থেকে সম্পূর্ণরূপে মুছে ফেলতে হবে।',
+      parameterDiffSummary: 'lang: বাংলা+EN | max_ttl_hours: 48h (৪৮ ঘণ্টা) | tenant_kms: true',
       blastRadiusNodeIds: ['node-postgres-schema', 'node-fastapi-endpoint', 'node-redis-worker'],
     },
   ];

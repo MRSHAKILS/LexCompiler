@@ -134,7 +134,7 @@ def process_customer_payment(ssn: str, email: str, card_token: str):
       : 0;
 
   return (
-    <div className="p-5 space-y-6 max-w-[1600px] mx-auto">
+    <div className="p-6 space-y-6 w-full">
       {/* Executive Commercial Value Banner */}
       <div className="p-5 rounded-2xl bg-gradient-to-r from-indigo-950/80 via-[#0C1220] to-emerald-950/50 border border-indigo-500/40 flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1.5 max-w-3xl">

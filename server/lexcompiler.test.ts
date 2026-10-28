@@ -4,6 +4,7 @@ import { analyzeFullRepository } from './analyzer/astAnalyzer.js';
 import { readTargetRepoFiles, resetTargetRepoToBaseline } from './analyzer/repoBaseline.js';
 import {
   compileLegalProseToFormalPolicy,
+  getBanglaInitialClauses,
   getInitialClauses,
 } from './compiler/legalCompiler.js';
 import { getMcpServersCatalog, invokeMcpTool } from './mcp/mcpSuite.js';
@@ -26,6 +27,34 @@ describe('LexCompiler Neuro-Symbolic Law-to-AST Engine & AI-Heavy Suite', () => 
     expect(res.deontic.extractedParameters.requiresTenantIsolatedKeys).toBe(true);
     expect(res.compiled.smtLib2Snippet).toContain('statutory_max_ttl_hours 72');
     expect(res.compiled.opaRegoRule).toContain('statutory_max_hours := 72');
+  });
+
+  it('compiles pure Bangla regulatory prose (৪৮ ঘণ্টা, টেন্যান্ট কেএমএস, ৮৫%) into Z3 SMT-LIB2 and synthesizes 48h patches', async () => {
+    resetTargetRepoToBaseline();
+    const banglaClauses = getBanglaInitialClauses();
+    expect(banglaClauses.length).toBe(4);
+    expect(banglaClauses[0].deontic.extractedParameters.maxRetentionHours).toBe(48);
+    expect(banglaClauses[0].deontic.extractedParameters.requiresTenantIsolatedKeys).toBe(true);
+    expect(banglaClauses[1].deontic.extractedParameters.forbidPlaintextLogging).toBe(true);
+    expect(banglaClauses[2].deontic.extractedParameters.minAiConfidenceThreshold).toBe(0.85);
+
+    const files = readTargetRepoFiles();
+    const { sqlTables, astFindings, enrichedFiles } = analyzeFullRepository(files);
+    const verification = await verifyRepositoryAgainstClauses(
+      banglaClauses,
+      sqlTables,
+      astFindings
+    );
+    expect(verification.proofs.every((p) => p.status === 'UNSAT_VIOLATION')).toBe(true);
+
+    const pr = await synthesizeRemediationPullRequest(
+      banglaClauses,
+      enrichedFiles,
+      verification.proofs
+    );
+    expect(pr).not.toBeNull();
+    expect(pr?.postPatchZ3Status).toBe('SAT_COMPLIANT');
+    expect(pr?.title).toContain('48h');
   });
 
   it('parses polyglot SQL, Python, and TypeScript ASTs and proves UNSAT violations in Z3, then verifies SAT after remediation patch', async () => {

@@ -115,7 +115,7 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
   };
 
   return (
-    <div className="p-5 space-y-6 max-w-[1600px] mx-auto">
+    <div className="p-6 space-y-6 w-full">
       {/* Top Banner Metrics */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="p-4 rounded-xl bg-[#0D131F] border border-indigo-500/40">
