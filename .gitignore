@@ -10,3 +10,4 @@ video-build/
 INTERNAL_AUDIT.md
 repos/
 .venv-agents/
+mcp-servers.json

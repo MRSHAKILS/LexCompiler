@@ -1,3 +1,4 @@
+import { externalClient, probeExternalMcpServers } from './mcp/externalClients.js';
 import { getAttestationSigner, revocations, revoke, trustedKeys } from './enterprise/attestationSigner.js';
 import { verifyTimestamp } from './enterprise/timestamp.js';
 import { OidcProvider, oidcConfigFromEnv } from './auth/oidc.js';
@@ -283,10 +284,19 @@ app.get('/api/regulations/live-feed', async (_req, res) => {
 // 6+ MCP SERVERS CONTROL PLANE (JSON-RPC 2.0 + SSE + STDIO)
 // ============================================================================
 
-app.get('/api/mcp/servers', (_req, res) => {
+app.get('/api/mcp/servers', async (_req, res) => {
+  // External servers count as integrated only when they answer initialize + tools/list.
+  const live = await probeExternalMcpServers();
+  const withStatus = <T extends { id: string }>(entries: T[]) => [
+    ...entries.map((e) => {
+      const st = live.find((l) => l.id === e.id);
+      return { ...e, status: st ? st.status : 'NOT_CONFIGURED', ...(st ? { liveTools: st.tools, serverInfo: st.serverInfo, error: st.error } : {}) };
+    }),
+    ...live.filter((l) => !entries.some((e) => e.id === l.id)).map((l) => ({ id: l.id, name: l.serverInfo?.name || l.id, transport: l.transport, purpose: 'Configured in mcp-servers.json', status: l.status, liveTools: l.tools, serverInfo: l.serverInfo, error: l.error })),
+  ];
   res.json({
     servers: getMcpServersCatalog(),
-    integratedExternalMcpServers: [
+    integratedExternalMcpServers: withStatus([
       {
         id: 'postgres-pgvector-mcp',
         name: 'PostgreSQL + pgvector Schema & Vector Store MCP',
@@ -323,8 +333,18 @@ app.get('/api/mcp/servers', (_req, res) => {
         transport: 'streamable-http / sse',
         purpose: 'Dispatches real-time regulatory shockwave alerts and CI/CD compliance gates',
       },
-    ],
+    ]),
   });
+});
+
+/** Calls a tool on a configured external MCP server. */
+app.post('/api/mcp/external/:serverId/call', async (req, res) => {
+  try {
+    const client = await externalClient(String(req.params.serverId));
+    res.json(await client.callTool(String(req.body?.name || ''), (req.body?.arguments as Record<string, unknown>) || {}));
+  } catch (err) {
+    res.status(502).json({ error: (err as Error).message });
+  }
 });
 
 /** MCP Streamable HTTP transport: one JSON-RPC message per POST; notifications get 202. */

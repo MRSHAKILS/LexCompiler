@@ -42,6 +42,9 @@ describe('governance categories', () => {
     expect(clause('BREACH_NOTIFICATION', TEXTS.BREACH_NOTIFICATION).deontic.extractedParameters.maxBreachNotificationHours).toBe(48);
     expect(extractPurposes('Use it only for the purposes of clinical care and billing.')).toEqual(['clinical_care', 'billing']);
     expect(clause('PURPOSE_LIMITATION', TEXTS.PURPOSE_LIMITATION).compiled.opaRegoRule).toContain('"patient_intake"');
+    // A condition ("may … only with consent") is an obligation; only an explicit waiver negates it.
+    expect(clause('CONSENT_LAWFUL_BASIS', 'Personal data may be processed only with consent or another lawful basis.').deontic.extractedParameters.requireConsentCheck).toBe(true);
+    expect(clause('CONSENT_LAWFUL_BASIS', 'For anonymised statistics, consent is not required.').deontic.extractedParameters.requireConsentCheck).toBe(false);
   });
 
   it('extracts governance facts from the fixture', async () => {

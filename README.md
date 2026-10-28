@@ -241,6 +241,25 @@ cd agents && python -m lexcompiler_agents agent-contextual-graph-rag
 
 `npm run eval:rag` scores retrieval on the labelled dataset (`server/rag/eval/dataset.json`); with `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL` set it also runs the RAGAS-style judge.
 
+### External MCP Servers
+
+Copy `mcp-servers.example.json` to `mcp-servers.json` (or point `LEXCOMPILER_EXTERNAL_MCP_CONFIG` at another file) to connect external MCP servers over stdio or streamable HTTP. `/api/mcp/servers` shows each one as `ONLINE` with its live tools once it answers `initialize`, and `POST /api/mcp/external/:id/call` calls its tools.
+
+### Scanning Repositories in GitHub Actions
+
+```yaml
+jobs:
+  compliance:
+    uses: mrshakils/lexcompiler/.github/workflows/lexcompiler-scan.yml@main
+    with:
+      clauses-file: compliance/clauses.json   # [{ "rawLegalText": "...", "citation": "GDPR Art. 6" }]
+    permissions:
+      contents: read
+      security-events: write
+```
+
+The workflow uploads the findings to GitHub code scanning and fails the job when a clause is not proven compliant. Locally, the same clauses file works with `LEXCOMPILER_CLAUSES_FILE=… LEXCOMPILER_TARGET_REPO=… npm run verify:cli`.
+
 ### Configuration Reference
 
 | Variable | Default | Purpose |

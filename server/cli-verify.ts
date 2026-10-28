@@ -1,3 +1,4 @@
+import { loadClausesForCli } from './cli/clauses.js';
 import { enterScratchFixtureCopy } from './cli/scratchFixture.js';
 
 /**
@@ -16,7 +17,6 @@ async function main() {
 
   const { analyzeFullRepository } = await import('./analyzer/astAnalyzer.js');
   const { readTargetRepoFiles, resetTargetRepoToBaseline, TARGET_REPO_ROOT } = await import('./analyzer/repoBaseline.js');
-  const { getInitialClauses } = await import('./compiler/legalCompiler.js');
   const { verifyRepositoryAgainstClauses } = await import('./prover/z3Engine.js');
   const { synthesizeRemediationPullRequest } = await import('./remediation/prSynthesizer.js');
 
@@ -24,7 +24,7 @@ async function main() {
   console.log(`Repository: ${TARGET_REPO_ROOT}${realRepo ? '' : ' (scratch copy of the demo fixture)'}`);
   if (!realRepo) resetTargetRepoToBaseline();
 
-  const clauses = getInitialClauses();
+  const clauses = await loadClausesForCli();
   const { sqlTables, astFindings, enrichedFiles } = analyzeFullRepository(readTargetRepoFiles());
   console.log(`Parsed ${enrichedFiles.length} files (${sqlTables.length} SQL tables, ${astFindings.length} findings).`);
 

@@ -1,3 +1,4 @@
+import { fetchEurLexAmendments, fetchEurLexArticle } from '../regulations/eurLex.js';
 import type {
   CompiledPolicyArtifacts,
   DeonticExtraction,
@@ -312,8 +313,10 @@ export function extractDeonticBoundsFromProse(
     }
   }
 
-  const consentRe = /\bconsent\b|lawful basis|legal basis/i;
-  const requireConsentCheck = category === 'CONSENT_LAWFUL_BASIS' && !(consentRe.test(lower) && phraseIsNegated(lower, consentRe));
+  // "may be processed only with consent" is a condition, not a permission: only explicit
+  // waivers ("consent is not required", "need not obtain consent") negate the obligation.
+  const consentWaived = /(?:need not|not required to|no need to)\s+(?:\w+\s+){0,3}(?:consent|lawful basis)|(?:consent|lawful basis)\s+(?:is|are)\s+(?:not required|optional|not needed)|without (?:requiring|the need for) (?:consent|a lawful basis)/i.test(lower);
+  const requireConsentCheck = category === 'CONSENT_LAWFUL_BASIS' && !consentWaived;
   if (category === 'CONSENT_LAWFUL_BASIS' && !requireConsentCheck) reviewNotes.push('The consent requirement appears negated; no consent check was required.');
   const maxBreachNotificationHours = category === 'BREACH_NOTIFICATION' && temporal.hit ? temporal.hours : 72;
   const requireDpia = category === 'DPIA_REQUIRED' || /impact assessment|\bdpia\b/i.test(lower);
@@ -1190,8 +1193,46 @@ export function getMutationPresets(): RegulatoryMutationPreset[] {
  * Fetches live regulatory updates from the official US Federal Register API
  * plus curated EUR-Lex Official Journal statutes.
  */
-export async function fetchLiveRegulatoryFeed(): Promise<LiveRegulatoryFeedItem[]> {
-  const curatedEurLex: LiveRegulatoryFeedItem[] = [
+const TRACKED_ARTICLES: Record<string, { celex: string; article: number }> = {
+  'EURLEX-32024R1689-ART14': { celex: '32024R1689', article: 14 },
+  'EURLEX-32016R0679-ART17': { celex: '32016R0679', article: 17 },
+};
+
+/**
+ * Replaces curated excerpts with the official article text from EUR-Lex and adds the acts
+ * CELLAR lists as amending or correcting the tracked regulations. Unreachable sources leave
+ * the curated (illustrative) items in place.
+ */
+async function withOfficialEurLexText(items: LiveRegulatoryFeedItem[], fetchImpl: typeof fetch): Promise<LiveRegulatoryFeedItem[]> {
+  const official = await Promise.all(
+    items.map(async (item) => {
+      const tracked = TRACKED_ARTICLES[item.id];
+      if (!tracked) return item;
+      const art = await fetchEurLexArticle(tracked.celex, tracked.article, fetchImpl).catch(() => null);
+      return art
+        ? { ...item, title: `${item.documentNumber} — ${art.title}`, agencyOrBody: 'EUR-Lex (official text)', excerpt: art.text.slice(0, 1200), url: art.url, illustrative: false }
+        : item;
+    })
+  );
+  const amendments = await fetchEurLexAmendments(['32016R0679', '32024R1689'], fetchImpl).catch(() => []);
+  return [
+    ...official,
+    ...amendments.map((a): LiveRegulatoryFeedItem => ({
+      id: `EURLEX-${a.relation.toUpperCase()}-${a.celex}`,
+      source: 'EUR_LEX',
+      documentNumber: `CELEX:${a.celex}`,
+      title: `CELEX:${a.celex} ${a.relation} CELEX:${a.targetCelex}`,
+      publicationDate: a.date || '',
+      agencyOrBody: 'Publications Office of the EU (CELLAR SPARQL)',
+      excerpt: `Act ${a.celex} ${a.relation} ${a.targetCelex}; review the clauses compiled from ${a.targetCelex}.`,
+      url: a.url,
+      suggestedFramework: a.targetCelex === '32024R1689' ? 'EU_AI_ACT' : 'GDPR',
+    })),
+  ];
+}
+
+export async function fetchLiveRegulatoryFeed(fetchImpl: typeof fetch = fetch): Promise<LiveRegulatoryFeedItem[]> {
+  const curated: LiveRegulatoryFeedItem[] = [
     {
       id: 'EURLEX-32024R1689-ART14',
       source: 'EUR_LEX',
@@ -1220,12 +1261,13 @@ export async function fetchLiveRegulatoryFeed(): Promise<LiveRegulatoryFeedItem[
     },
   ];
 
+  const curatedEurLex = await withOfficialEurLexText(curated, fetchImpl);
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3500);
     const url =
       'https://www.federalregister.gov/api/v1/documents.json?per_page=3&order=newest&conditions%5Bterm%5D=privacy+cybersecurity+encryption';
-    const resp = await fetch(url, { signal: controller.signal });
+    const resp = await fetchImpl(url, { signal: controller.signal });
     clearTimeout(timeout);
 
     if (resp.ok) {

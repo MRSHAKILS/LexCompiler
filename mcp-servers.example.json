@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "postgres-pgvector-mcp": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://lexcompiler:password@localhost:5432/lexcompiler"]
+    },
+    "neo4j-cypher-mcp": {
+      "command": "uvx",
+      "args": ["mcp-neo4j-cypher", "--transport", "stdio"],
+      "env": { "NEO4J_URI": "bolt://localhost:7687", "NEO4J_USERNAME": "neo4j", "NEO4J_PASSWORD": "change-me" }
+    },
+    "github-git-mcp": {
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": { "Authorization": "Bearer ${GITHUB_TOKEN}" }
+    },
+    "filesystem-sandbox-mcp": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./target-repo"]
+    },
+    "duckdb-lakehouse-mcp": {
+      "command": "uvx",
+      "args": ["mcp-server-motherduck", "--db-path", "./data/ledger.duckdb"]
+    },
+    "n8n-webhook-bridge-mcp": {
+      "url": "http://localhost:5678/mcp/lexcompiler"
+    }
+  }
+}
