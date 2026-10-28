@@ -1,8 +1,18 @@
 import React, { useState } from 'react';
 import {
+  Activity,
+  BarChart3,
+  CheckCircle2,
+  Cpu,
   Database,
+  FileCode2,
+  Flame,
+  HardDrive,
+  Layers,
   Play,
+  ShieldCheck,
   Sparkles,
+  Workflow,
   Zap,
 } from 'lucide-react';
 import type { TokenOptimizationBenchmarkReport } from '../../shared/types';

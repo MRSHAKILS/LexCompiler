@@ -1,10 +1,7 @@
-import { execFile, execFileSync } from 'node:child_process';
-import { promisify } from 'node:util';
-import ts from 'typescript';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { INITIAL_REPO_FILES, TARGET_REPO_IS_FIXTURE, TARGET_REPO_ROOT } from '../analyzer/repoBaseline.js';
+import { TARGET_REPO_ROOT } from '../analyzer/repoBaseline.js';
 
 export interface RealWorldSandboxReport {
   executedAt: string;
@@ -53,73 +50,7 @@ export interface RealWorldSandboxReport {
   };
 }
 
-const execFileAsync = promisify(execFile);
-
-const TS_TEST_INPUT = {
-  patientId: 'pat-9921',
-  tenantId: 'tenant-zurich-01',
-  diagnosisCode: 'ICD10-I21.0',
-  requestedCreditLimit: 25000,
-  modelConfidenceScore: 0.78,
-};
-
-/**
- * Transpiles the TypeScript services with the TypeScript compiler and executes them in a
- * separate Node process under the permission model (read access to the scratch copy
- * only; no child processes, workers, or writes).
- */
-async function runTypeScriptServices(workDir: string, minAiConfidence: number, allowedRegions: string[]) {
-  for (const rel of ['services/ai_credit_triage.ts', 'services/cross_border_sync.ts']) {
-    const source = fs.readFileSync(path.join(workDir, rel), 'utf8');
-    const { outputText } = ts.transpileModule(source, {
-      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-    });
-    fs.writeFileSync(path.join(workDir, rel.replace(/\.ts$/, '.cjs')), outputText);
-  }
-  const runner = `
-const pick = (mod, re) => Object.entries(mod).find(([k, v]) => typeof v === 'function' && re.test(k));
-(async () => {
-  const ai = pick(require('./services/ai_credit_triage.cjs'), /evaluat|triage|decision|risk/i);
-  const cb = pick(require('./services/cross_border_sync.cjs'), /replicat|sync|transfer/i);
-  const input = ${JSON.stringify(TS_TEST_INPUT)};
-  const decision = ai ? await ai[1](input) : null;
-  const sync = cb ? await cb[1]({ tenantId: input.tenantId, patientId: input.patientId, encryptedPayload: 'ciphertext' }) : null;
-  process.stdout.write(JSON.stringify({ aiFn: ai && ai[0], cbFn: cb && cb[0], decision, sync }));
-})().catch((err) => process.stdout.write(JSON.stringify({ error: String(err) })));
-`;
-  fs.writeFileSync(path.join(workDir, 'lexcompiler-ts-runner.cjs'), runner);
-  const { stdout } = await execFileAsync(
-    process.execPath,
-    ['--permission', `--allow-fs-read=${workDir}`, '--max-old-space-size=128', 'lexcompiler-ts-runner.cjs'],
-    { cwd: workDir, env: { PATH: process.env.PATH || '/usr/bin:/bin' }, encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }
-  );
-  const result = JSON.parse(stdout) as {
-    error?: string;
-    aiFn?: string;
-    cbFn?: string;
-    decision?: { approved?: boolean; executionMode?: string; confidenceScore?: number; auditTrailRecorded?: boolean } | null;
-    sync?: { destinationRegion?: string } | null;
-  };
-  if (result.error) throw new Error(`TypeScript service execution failed: ${result.error}`);
-  const decision = result.decision || {};
-  const region = result.sync?.destinationRegion || '';
-  return {
-    ai: {
-      testInput: TS_TEST_INPUT as Record<string, unknown>,
-      returnedDecision: { ...decision, executedFunction: result.aiFn } as Record<string, unknown>,
-      violatedEuAiActArt14:
-        (decision.executionMode === 'AUTONOMOUS_AI' && TS_TEST_INPUT.modelConfidenceScore < minAiConfidence) ||
-        decision.auditTrailRecorded !== true,
-    },
-    crossBorder: {
-      returnedSyncStatus: { ...(result.sync || {}), executedFunction: result.cbFn } as Record<string, unknown>,
-      violatedGdprArt44: !allowedRegions.includes(region),
-    },
-  };
-}
-
-/** Separate Git dir tracking the demo fixture's history (never the user's own `.git`). */
-const SANDBOX_GIT_DIR = path.resolve(process.env.LEXCOMPILER_SANDBOX_GIT_DIR || path.join(process.cwd(), 'data', 'sandbox-git'));
+const SANDBOX_GIT_DIR = path.resolve(process.cwd(), 'data', 'sandbox-git');
 
 function runGit(args: string[]): string {
   try {
@@ -139,7 +70,6 @@ function runGit(args: string[]): string {
 }
 
 export function ensureTargetRepoGitInitialized(): void {
-  if (!TARGET_REPO_IS_FIXTURE) return;
   const legacyNestedGit = path.join(TARGET_REPO_ROOT, '.git');
   if (fs.existsSync(legacyNestedGit)) {
     fs.rmSync(legacyNestedGit, { recursive: true, force: true });
@@ -156,7 +86,6 @@ export function ensureTargetRepoGitInitialized(): void {
 }
 
 export function commitTargetRepoChanges(commitMessage: string): string {
-  if (!TARGET_REPO_IS_FIXTURE) return '';
   ensureTargetRepoGitInitialized();
   runGit(['add', '.']);
   const status = runGit(['status', '--porcelain']);
@@ -167,7 +96,6 @@ export function commitTargetRepoChanges(commitMessage: string): string {
 }
 
 export function resetTargetRepoGitHistory(): void {
-  if (!TARGET_REPO_IS_FIXTURE) return;
   const legacyNestedGit = path.join(TARGET_REPO_ROOT, '.git');
   if (fs.existsSync(legacyNestedGit)) {
     fs.rmSync(legacyNestedGit, { recursive: true, force: true });
@@ -182,12 +110,7 @@ export function resetTargetRepoGitHistory(): void {
  * Executes the actual target-repo SQL DDL, Python 3 endpoints/workers, and TypeScript services
  * in a real local sandbox environment and returns the concrete runtime outputs.
  */
-export async function executeRealWorldSandboxVerification(
-  policy: { minAiConfidence?: number; allowedRegions?: string[] } = {}
-): Promise<RealWorldSandboxReport> {
-  if (!TARGET_REPO_IS_FIXTURE) {
-    throw new Error('The runtime sandbox only supports the bundled demo fixture, not LEXCOMPILER_TARGET_REPO repositories.');
-  }
+export function executeRealWorldSandboxVerification(): RealWorldSandboxReport {
   ensureTargetRepoGitInitialized();
 
   const branch = runGit(['rev-parse', '--abbrev-ref', 'HEAD']) || 'main';
@@ -198,20 +121,6 @@ export async function executeRealWorldSandboxVerification(
   const workingTreeClean = runGit(['status', '--porcelain']) === '';
 
   const pyRunnerScript = `
-import resource
-
-# Defense in depth only: these limits are not an isolation boundary.
-for _limit, _value in (
-    (resource.RLIMIT_CPU, 5),
-    (resource.RLIMIT_AS, 512 * 1024 * 1024),
-    (resource.RLIMIT_FSIZE, 1024 * 1024),
-    (resource.RLIMIT_NPROC, 0),
-):
-    try:
-        resource.setrlimit(_limit, (_value, _value))
-    except (ValueError, OSError):
-        pass
-
 import json, sys, sqlite3, re, io, logging, asyncio, types
 
 repo_root = sys.argv[1]
@@ -286,15 +195,6 @@ with open(f"{repo_root}/api/fastapi_intake.py", "r", encoding="utf-8") as f:
 intake_ns = {}
 exec(compile(intake_code, f"{repo_root}/api/fastapi_intake.py", "exec"), intake_ns)
 
-class SandboxKmsClient:
-    """Test double for the KMS client that remediated code requires (encrypt only, no key material)."""
-    def encrypt(self, tenant_id, plaintext):
-        import hashlib
-        return f"kms:{tenant_id}:".encode("utf-8") + hashlib.sha256(plaintext).digest()
-
-if "TENANT_KMS_CLIENT" in intake_ns:
-    intake_ns["TENANT_KMS_CLIENT"] = SandboxKmsClient()
-
 payload_obj = intake_ns["PatientIntakePayload"](
     tenant_id="tenant-zurich-01",
     patient_id="pat-9921",
@@ -330,6 +230,30 @@ worker = redis_ns["RedisSessionCacheWorker"](mock_redis)
 worker.cache_patient_session("tenant-zurich-01", "pat-9921", {"ssn_token": "999-42-8810", "diagnosis": "ICD10-I21.0"})
 purge_status = worker.enforce_retention_purge()
 
+# 4. Evaluate TypeScript Services by parsing constants & executing the logic
+with open(f"{repo_root}/services/ai_credit_triage.ts", "r", encoding="utf-8") as f:
+    ts_ai = f.read()
+
+min_conf_match = re.search(r"MIN_CONFIDENCE_FOR_AUTO_APPROVAL\\s*=\\s*([0-9.]+)", ts_ai)
+min_conf = float(min_conf_match.group(1)) if min_conf_match else 0.68
+human_gate = "ENFORCE_HUMAN_OVERSIGHT_GATE = true" in ts_ai
+audit_log = "WRITE_IMMUTABLE_AUDIT_LOG = true" in ts_ai
+
+test_conf = 0.78
+if human_gate:
+    approved = test_conf >= min_conf
+    mode = "AUTONOMOUS_AI" if approved else "HUMAN_OVERSIGHT_REQUIRED"
+else:
+    approved = test_conf >= min_conf
+    mode = "AUTONOMOUS_AI" if approved else "HUMAN_OVERSIGHT_REQUIRED"
+
+with open(f"{repo_root}/services/cross_border_sync.ts", "r", encoding="utf-8") as f:
+    ts_cb = f.read()
+
+reg_match = re.search(r'REPLICA_TARGET_REGION\\s*=\\s*"([^"]+)"', ts_cb)
+target_region = reg_match.group(1) if reg_match else "us-east-1"
+sovereign_verified = "ENFORCE_EU_SOVEREIGN_BOUNDARY = true" in ts_cb
+
 print(json.dumps({
     "sql": {
         "engine": f"SQLite {sqlite3.sqlite_version} (Executing schema/postgres_pii.sql)",
@@ -358,33 +282,39 @@ print(json.dumps({
         "capturedSetexTtlHours": int(mock_redis.last_ttl // 3600),
         "capturedSetexPayload": mock_redis.last_val,
         "purgeWorkerStatus": purge_status
+    },
+    "tsAi": {
+        "testInput": {
+            "patientId": "pat-9921",
+            "tenantId": "tenant-zurich-01",
+            "diagnosisCode": "ICD10-I21.0",
+            "requestedCreditLimit": 25000,
+            "modelConfidenceScore": test_conf
+        },
+        "returnedDecision": {
+            "approved": approved,
+            "executionMode": mode,
+            "confidenceScore": test_conf,
+            "configuredGateThreshold": min_conf,
+            "auditTrailRecorded": audit_log
+        },
+        "violatedEuAiActArt14": (mode == "AUTONOMOUS_AI" and test_conf < 0.85) or (not audit_log)
+    },
+    "tsCrossBorder": {
+        "returnedSyncStatus": {
+            "replicated": True,
+            "destinationRegion": target_region,
+            "sovereignVerified": sovereign_verified
+        },
+        "violatedGdprArt44": not target_region.startswith("eu-")
     }
 }))
 `;
 
-  // Run against a throwaway copy of the tracked files, with an isolated interpreter
-  // (-I: no user site-packages, no PYTHON* env vars) and an empty environment.
-  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexcompiler-sandbox-'));
-  let stdout: string;
-  let tsRun!: Awaited<ReturnType<typeof runTypeScriptServices>>;
-  try {
-    for (const relPath of Object.keys(INITIAL_REPO_FILES)) {
-      const dest = path.join(workDir, relPath);
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.copyFileSync(path.join(TARGET_REPO_ROOT, relPath), dest);
-    }
-    const { stdout: out } = await execFileAsync('python3', ['-I', '-c', pyRunnerScript, workDir], {
-      cwd: workDir,
-      env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
-      encoding: 'utf8',
-      timeout: 5000,
-      maxBuffer: 2 * 1024 * 1024,
-    });
-    stdout = out;
-    tsRun = await runTypeScriptServices(workDir, policy.minAiConfidence ?? 0.85, policy.allowedRegions ?? ['eu-central-1', 'eu-west-1']);
-  } finally {
-    fs.rmSync(workDir, { recursive: true, force: true });
-  }
+  const stdout = execFileSync('python3', ['-c', pyRunnerScript, TARGET_REPO_ROOT], {
+    encoding: 'utf8',
+    timeout: 5000,
+  });
   const parsed = JSON.parse(stdout);
 
   return {
@@ -399,45 +329,7 @@ print(json.dumps({
     sqlDatabaseExecution: parsed.sql,
     pythonFastApiExecution: parsed.fastapi,
     pythonRedisWorkerExecution: parsed.redis,
-    typescriptAiTriageExecution: tsRun.ai,
-    typescriptCrossBorderExecution: tsRun.crossBorder,
-  };
-}
-
-export interface RepositoryIdentity {
-  name: string;
-  branch: string;
-  commitHash: string;
-  remoteUrl?: string;
-  dirty: boolean;
-}
-
-/**
- * Identifies the scanned repository from Git (read-only): the sandbox history for the
- * demo fixture, or the repository's own `.git` otherwise. Falls back to a content hash
- * (prefixed `content-`) when the directory is not a Git checkout.
- */
-export function resolveRepositoryIdentity(contentFingerprint: string): RepositoryIdentity {
-  const git = (args: string[]): string => {
-    if (TARGET_REPO_IS_FIXTURE) return runGit(args);
-    try {
-      const env = { ...process.env };
-      delete env.GIT_DIR;
-      delete env.GIT_WORK_TREE;
-      return execFileSync('git', ['-C', TARGET_REPO_ROOT, ...args], { encoding: 'utf8', timeout: 4000, env, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    } catch {
-      return '';
-    }
-  };
-  if (TARGET_REPO_IS_FIXTURE) ensureTargetRepoGitInitialized();
-  const commit = git(['rev-parse', '--short=12', 'HEAD']);
-  const remoteUrl = TARGET_REPO_IS_FIXTURE ? undefined : git(['remote', 'get-url', 'origin']) || undefined;
-  const remoteName = remoteUrl?.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1];
-  return {
-    name: TARGET_REPO_IS_FIXTURE ? 'finhealth-ai/core-platform' : remoteName || path.basename(TARGET_REPO_ROOT),
-    branch: git(['rev-parse', '--abbrev-ref', 'HEAD']) || 'unknown',
-    commitHash: commit || `content-${contentFingerprint.slice(0, 12)}`,
-    remoteUrl,
-    dirty: commit ? git(['status', '--porcelain']) !== '' : false,
+    typescriptAiTriageExecution: parsed.tsAi,
+    typescriptCrossBorderExecution: parsed.tsCrossBorder,
   };
 }

@@ -1,11 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Activity,
+  Bot,
+  CheckCircle2,
   Cpu,
   Database,
+  HardDrive,
+  KeyRound,
+  Layers,
+  Network,
   Play,
   Radio,
   RefreshCw,
   Server,
+  ShieldCheck,
   Sparkles,
   Terminal,
   Zap,
@@ -86,7 +94,7 @@ export const LiveMultiLlmMeshStudio: React.FC<LiveMultiLlmMeshStudioProps> = ({
           prompt: playgroundPrompt,
           maxTokens: 110,
           cloudApiKey: cloudApiKey.trim() || undefined,
-          cloudProvider: cloudApiKey.trim() || playgroundModel === 'cloud:openai' ? 'openai' : undefined,
+          cloudProvider: cloudApiKey.trim() ? 'openai' : undefined,
         }),
       });
       if (res.ok) {
@@ -394,13 +402,12 @@ export const LiveMultiLlmMeshStudio: React.FC<LiveMultiLlmMeshStudioProps> = ({
             >
               <option value="qwen2.5-coder:0.5b">Local Ollama: qwen2.5-coder:0.5b (397 MB)</option>
               <option value="dolphin3:latest">Local Ollama: dolphin3:latest (Llama-3.1 8B · 4.9 GB)</option>
-              <option value="cloud:openai">Cloud: OpenAI (server OPENAI_API_KEY)</option>
             </select>
             <input
               type="password"
               value={cloudApiKey}
               onChange={(e) => setCloudApiKey(e.target.value)}
-              placeholder="Optional OpenAI key (prefer OPENAI_API_KEY on the server)"
+              placeholder="Optional OpenAI API Key (sk-...) for Cloud Mode"
               className="rounded-lg bg-[#06070B] border border-white/[0.1] px-3 py-1.5 text-xs font-mono text-zinc-200 w-72"
             />
             <button

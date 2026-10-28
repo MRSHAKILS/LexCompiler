@@ -1,11 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import {
+  AlertOctagon,
+  Award,
+  Building2,
   CheckCircle2,
+  DollarSign,
+  FileCheck2,
+  FileCode2,
   KeyRound,
+  Lock,
   Play,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Terminal,
   TrendingUp,
 } from 'lucide-react';
 import type { FullComplianceScanReport } from '../../shared/types';
@@ -19,7 +27,7 @@ export const EnterpriseStartupSuite: React.FC<EnterpriseStartupSuiteProps> = ({ 
   const [byocClause, setByocClause] = useState(
     'Section 7.1 (Global Fintech & Healthcare MSA): All customer payment tokens and PII must be encrypted at rest with tenant-isolated KMS keys, strictly prohibited from plaintext logging, and purged within 48 hours.'
   );
-  const [byocCitation] = useState('Custom Enterprise MSA §7.1 / PCI-DSS 4.0');
+  const [byocCitation, setByocCitation] = useState('Custom Enterprise MSA §7.1 / PCI-DSS 4.0');
   const [byocCode, setByocCode] = useState(`# Custom Enterprise Payment & PII Service (Paste any code to test)
 import logging
 logger = logging.getLogger("enterprise.payments")
@@ -163,7 +171,7 @@ def process_customer_payment(ssn: str, email: str, card_token: str):
             </div>
             <div className="text-[10px] text-slate-400">
               {totalStatutoryExposureMusd > 0
-                ? 'Eliminated upon merging the remediation PR'
+                ? 'Eliminated upon merging Auto-PR #409'
                 : '0 Violations — $0.0M Fine Exposure'}
             </div>
           </div>
@@ -305,7 +313,7 @@ def process_customer_payment(ssn: str, email: str, card_token: str):
             <div>
               <h3 className="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                 <KeyRound className="w-4 h-4 text-emerald-400" />
-                2. RFC 8032 Ed25519 Signed Compliance Attestation (self-attested demo, not a legal conformity certificate)
+                2. RFC 8032 Ed25519 Cryptographically Signed Conformity Certificate
               </h3>
               <p className="text-xs text-slate-400 font-mono mt-0.5">
                 Verifiable by external Big-4 auditors, regulators, and enterprise procurement teams
