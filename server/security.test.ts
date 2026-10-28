@@ -177,7 +177,11 @@ describe('illustrative demo content', () => {
   });
 
   it('tags curated and offline feed items and never invents Federal Register abstracts', async () => {
-    const items = await fetchLiveRegulatoryFeed();
+    // Offline: every source is unreachable, so only the curated and offline items remain.
+    const offline = (async () => {
+      throw new Error('offline');
+    }) as typeof fetch;
+    const items = await fetchLiveRegulatoryFeed(offline);
     const curated = items.filter((i) => i.source === 'EUR_LEX');
     expect(curated.length).toBeGreaterThan(0);
     for (const item of curated) {

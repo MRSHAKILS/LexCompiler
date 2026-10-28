@@ -1,13 +1,15 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { containerRunArgs, containerSandboxFromEnv } from './sandbox/container.js';
 import { executeRealWorldSandboxVerification } from './sandbox/realWorldSandbox.js';
+import { resolvePython } from './util/python.js';
 
 const saved = { ...process.env };
 afterEach(() => {
-  for (const k of ['LEXCOMPILER_SANDBOX_CONTAINER', 'LEXCOMPILER_SANDBOX_IMAGE', 'LEXCOMPILER_SANDBOX_OCI_RUNTIME', 'FAKE_ENGINE_LOG']) {
+  for (const k of ['LEXCOMPILER_SANDBOX_CONTAINER', 'LEXCOMPILER_SANDBOX_IMAGE', 'LEXCOMPILER_SANDBOX_OCI_RUNTIME', 'FAKE_ENGINE_LOG', 'FAKE_ENGINE_PYTHON', 'NODE_OPTIONS']) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
@@ -26,27 +28,35 @@ describe('container sandbox', () => {
 
   it('runs both runners through the container engine with /work mapped', async () => {
     // Fake engine: records its arguments, maps /work to the mounted directory, and runs the command.
+    // It is `node` itself with the script preloaded through NODE_OPTIONS, so it also runs on
+    // Windows, which cannot execute a `#!` script; node takes the `run` subcommand as argv[1].
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-engine-'));
     const engine = path.join(dir, 'engine.mjs');
     const log = path.join(dir, 'calls.jsonl');
     fs.writeFileSync(
       engine,
-      `#!${process.execPath}
-import { spawnSync } from 'node:child_process';
+      `import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+delete process.env.NODE_OPTIONS;
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.FAKE_ENGINE_LOG, JSON.stringify(args) + '\\n');
-const mount = args[args.indexOf('-v') + 1].split(':')[0];
+const volume = args[args.indexOf('-v') + 1];
+const mount = volume.slice(0, volume.lastIndexOf(':/work'));
 const cmd = args.slice(args.indexOf(process.env.LEXCOMPILER_SANDBOX_IMAGE) + 1).map((a) => a === '/work' ? mount : a.replace('=/work', '=' + mount).replace(/^\\/work\\//, mount + '/'));
-const bin = cmd[0] === 'python' ? 'python3' : cmd[0] === 'node' ? process.execPath : cmd[0];
+const bin = cmd[0] === 'python' ? process.env.FAKE_ENGINE_PYTHON : cmd[0] === 'node' ? process.execPath : cmd[0];
 const r = spawnSync(bin, cmd.slice(1), { cwd: mount, encoding: 'utf8', maxBuffer: 4 << 20 });
 process.stdout.write(r.stdout || '');
 process.stderr.write(r.stderr || '');
 process.exit(r.status ?? 1);
 `
     );
-    fs.chmodSync(engine, 0o755);
-    Object.assign(process.env, { LEXCOMPILER_SANDBOX_CONTAINER: engine, LEXCOMPILER_SANDBOX_IMAGE: 'lexcompiler-sandbox:test', FAKE_ENGINE_LOG: log });
+    Object.assign(process.env, {
+      LEXCOMPILER_SANDBOX_CONTAINER: process.execPath,
+      LEXCOMPILER_SANDBOX_IMAGE: 'lexcompiler-sandbox:test',
+      FAKE_ENGINE_LOG: log,
+      FAKE_ENGINE_PYTHON: resolvePython()!.command,
+      NODE_OPTIONS: `--import ${pathToFileURL(engine).href}`,
+    });
     const report = await executeRealWorldSandboxVerification();
     expect(report.isolation).toMatch(/^container/);
     const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as string[]);

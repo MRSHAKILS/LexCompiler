@@ -7,6 +7,7 @@ import { readTargetRepoFiles } from './analyzer/repoBaseline.js';
 import { getInitialClauses } from './compiler/legalCompiler.js';
 import { compressWithLlmLingua, deduplicateByEmbedding, measuredCacheTelemetry, recordLlmUsage } from './optimization/neuralCompression.js';
 import { runTokenOptimizationBenchmarkAsync } from './optimization/tokenOptimizer.js';
+import { resolvePython } from './util/python.js';
 
 describe('model-based token optimisation stages', () => {
   it('dedups by embedding cosine similarity', async () => {
@@ -20,7 +21,8 @@ describe('model-based token optimisation stages', () => {
     const script = path.join(dir, 'fake.py');
     // Stand-in for the sidecar: same stdin/stdout protocol, keeps the first word of each text.
     fs.writeFileSync(script, 'import json,sys\nr=json.load(sys.stdin)\njson.dump({"texts":[t.split()[0] for t in r["texts"]]},sys.stdout)\n');
-    expect(await compressWithLlmLingua(['shall purge within 72 hours', 'must not log'], 0.5, 'python3', script)).toEqual(['shall', 'must']);
+    const python = resolvePython();
+    expect(await compressWithLlmLingua(['shall purge within 72 hours', 'must not log'], 0.5, python!.command, script)).toEqual(['shall', 'must']);
     expect(await compressWithLlmLingua(['x'], 0.5, undefined, script)).toBeNull();
     fs.rmSync(dir, { recursive: true, force: true });
   });
