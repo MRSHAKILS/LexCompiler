@@ -10,6 +10,8 @@ import {
   ensureTargetRepoFilesExist,
   readTargetRepoFiles,
   resetTargetRepoToBaseline,
+  TARGET_REPO_IS_FIXTURE,
+  TARGET_REPO_ROOT,
   TargetRepoPathError,
   writeTargetRepoFile,
 } from './analyzer/repoBaseline.js';
@@ -41,6 +43,7 @@ import {
   ensureTargetRepoGitInitialized,
   executeRealWorldSandboxVerification,
   resetTargetRepoGitHistory,
+  resolveRepositoryIdentity,
 } from './sandbox/realWorldSandbox.js';
 import {
   executeByocCustomScan,
@@ -48,6 +51,7 @@ import {
   generateSignedConformityCertificate,
   verifyEd25519CertificateSignature,
 } from './enterprise/enterpriseSuite.js';
+import { getAttestationSigningKey } from './enterprise/signingKey.js';
 import {
   computeRealNeuralEmbedding,
   ensurePersistentSqliteDb,
@@ -106,7 +110,9 @@ function persistClauses(): void {
 }
 let commitCounter = 1;
 
-async function buildFullComplianceReport(): Promise<FullComplianceScanReport> {
+async function buildFullComplianceReport(
+  options: { recordToLedger?: boolean } = {}
+): Promise<FullComplianceScanReport> {
   const rawFiles = readTargetRepoFiles();
   const { sqlTables, astFindings, enrichedFiles } = analyzeFullRepository(rawFiles);
   const { proofs, architectureGraph, totalZ3ExecutionMs, merkleAuditRoot } =
@@ -124,25 +130,29 @@ async function buildFullComplianceReport(): Promise<FullComplianceScanReport> {
     (compliantClausesCount / Math.max(1, proofs.length)) * 100
   );
 
-  const commitHash = sha256Hex(
-    enrichedFiles.map((f) => f.content).join('||') + String(commitCounter)
-  ).slice(0, 8);
+  const identity = resolveRepositoryIdentity(
+    sha256Hex(enrichedFiles.map((f) => `${f.path}\n${f.content}`).join('\n'))
+  );
+  const commitHash = `${identity.commitHash}${identity.dirty ? '-dirty' : ''}`;
   const scanId = `SCAN-${Date.now().toString().slice(-6)}`;
 
-  recordScanToPersistentSqlite({
-    scanId,
-    commitHash,
-    compliantCount: compliantClausesCount,
-    violatedCount: violatedClausesCount,
-    z3SolveMs: totalZ3ExecutionMs,
-    merkleRoot: merkleAuditRoot,
-  });
+  // Only state-changing requests append to the audit ledger; reads stay side-effect free.
+  if (options.recordToLedger) {
+    recordScanToPersistentSqlite({
+      scanId,
+      commitHash,
+      compliantCount: compliantClausesCount,
+      violatedCount: violatedClausesCount,
+      z3SolveMs: totalZ3ExecutionMs,
+      merkleRoot: merkleAuditRoot,
+    });
+  }
 
   return {
     scanId,
     timestamp: new Date().toISOString(),
-    repositoryName: 'finhealth-ai/core-platform',
-    repositoryBranch: 'main',
+    repositoryName: identity.name,
+    repositoryBranch: identity.branch,
     commitHash,
     z3EngineVersion: 'Microsoft Z3 v4.13.4 (WASM/Native SMT-LIB2)',
     activeAmendmentLabel,
@@ -530,7 +540,7 @@ app.post('/api/clauses/compile', async (req, res) => {
     activeAmendmentLabel =
       amendmentLabel || `Live Clause Mutation (${citation || clauseId || 'Custom Prose'})`;
     persistClauses();
-    const report = await buildFullComplianceReport();
+    const report = await buildFullComplianceReport({ recordToLedger: true });
     res.json(report);
   } catch (err) {
     console.error('Error compiling clause:', err);
@@ -582,7 +592,7 @@ app.post('/api/clauses/mutate-preset', async (req, res) => {
 
     activeAmendmentLabel = `${preset.name} (${preset.parameterDiffSummary})`;
     persistClauses();
-    const report = await buildFullComplianceReport();
+    const report = await buildFullComplianceReport({ recordToLedger: true });
     res.json(report);
   } catch (err) {
     console.error('Error applying preset:', err);
@@ -630,7 +640,7 @@ app.post('/api/remediation/apply-node', async (req, res) => {
     );
     commitCounter++;
 
-    const updatedReport = await buildFullComplianceReport();
+    const updatedReport = await buildFullComplianceReport({ recordToLedger: true });
     res.json(updatedReport);
   } catch (err) {
     console.error('Error applying node patch:', err);
@@ -661,7 +671,7 @@ app.post('/api/remediation/apply-pr', async (_req, res) => {
       commitCounter++;
     }
 
-    const updatedReport = await buildFullComplianceReport();
+    const updatedReport = await buildFullComplianceReport({ recordToLedger: true });
     res.json(updatedReport);
   } catch (err) {
     console.error('Error applying full PR:', err);
@@ -684,7 +694,7 @@ app.post('/api/repo/update-file', async (req, res) => {
     commitTargetRepoChanges(`chore(repo): manual edit to ${filePath}`);
     commitCounter++;
 
-    const updatedReport = await buildFullComplianceReport();
+    const updatedReport = await buildFullComplianceReport({ recordToLedger: true });
     res.json(updatedReport);
   } catch (err) {
     console.error('Error updating repo file:', err);
@@ -732,7 +742,7 @@ app.post('/api/repo/reset', async (req, res) => {
     }
 
     persistClauses();
-    const report = await buildFullComplianceReport();
+    const report = await buildFullComplianceReport({ recordToLedger: true });
     res.json(report);
   } catch (err) {
     console.error('Error resetting repo:', err);
@@ -764,7 +774,7 @@ app.post('/api/clauses/switch-locale', async (req, res) => {
         'Amended DPA §4.2 / GDPR Art. 17: 72-Hour Purge + Tenant-Isolated KMS Keys';
     }
     persistClauses();
-    const report = await buildFullComplianceReport();
+    const report = await buildFullComplianceReport({ recordToLedger: true });
     res.json(report);
   } catch (err) {
     console.error('Error switching locale:', err);
@@ -902,6 +912,11 @@ app.get('/api/enterprise/certificate', async (_req, res) => {
   }
 });
 
+app.get('/api/enterprise/public-key', (_req, res) => {
+  const key = getAttestationSigningKey();
+  res.json({ algorithm: 'Ed25519', publicKeyPem: key.publicKeyPem, fingerprintSha256: key.fingerprintSha256 });
+});
+
 app.post('/api/enterprise/verify-signature', (req, res) => {
   try {
     const { canonicalPayloadJson, signatureHex, publicKeyPem } = (req.body || {}) as {
@@ -923,7 +938,16 @@ app.post('/api/enterprise/verify-signature', (req, res) => {
 app.get('/api/enterprise/sarif', async (_req, res) => {
   try {
     const report = await buildFullComplianceReport();
-    const sarif = generateSarifReport(report.clauses, report.proofs, report.commitHash);
+    const identity = resolveRepositoryIdentity(report.merkleAuditRoot);
+    // Paths in SARIF are relative to the checkout the report is uploaded from.
+    const rel = path.relative(process.cwd(), TARGET_REPO_ROOT);
+    const uriPrefix = TARGET_REPO_IS_FIXTURE && rel && !rel.startsWith('..') ? `${rel.split(path.sep).join('/')}/` : '';
+    const sarif = generateSarifReport(
+      report.clauses,
+      report.proofs,
+      { commitHash: identity.commitHash, branch: identity.branch, remoteUrl: identity.remoteUrl },
+      uriPrefix
+    );
     res.json(sarif);
   } catch (err) {
     sendError(res, err);

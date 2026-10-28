@@ -64,6 +64,14 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **L2 — category inference:** clauses created through `POST /api/clauses/compile` without a category now have it inferred from the text.
 - **Tests:** `server/mcp.test.ts` covers version negotiation, notifications, error codes, tools, resources, and stdio ordering.
 
+### Step 4 · Attestation, repository identity, SARIF, side-effect-free reads
+- **C1 — persistent signing key** (`server/enterprise/signingKey.ts`): the key comes from `LEXCOMPILER_SIGNING_KEY_PEM`, else `LEXCOMPILER_SIGNING_KEY_PATH`, else `data/ed25519-signing-key.pem` (created with mode 0600). Certificates stay verifiable across restarts. `GET /api/enterprise/public-key` publishes the key and its fingerprint.
+- **S4 — trusted key only:** signature verification trusts only the server's key. A caller-supplied public key that differs is rejected as `UNTRUSTED KEY`.
+- **C2 — real repository identity:** `commitHash`, branch, and repository name come from Git (read-only), using the sandbox history for the fixture or the repository's own `.git` (`-dirty` when there are uncommitted changes). Without Git, a `content-<hash>` fallback is used.
+- **C3 — SARIF:** `semanticVersion` casing is fixed, `originalUriBaseIds` is declared, artifact URIs are relative to the uploading checkout, and `versionControlProvenance` is emitted only with a real remote URL.
+- **P2 — side-effect-free reads:** `GET` endpoints no longer append to the SQLite audit ledger; only state-changing requests record a scan.
+- **Tests:** `server/attestation.test.ts` covers key persistence and permissions, tamper detection, untrusted-key rejection, the Merkle tree, and SARIF shape.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -77,7 +85,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-5 | **Token-optimisation benchmark (AI4)** — LLMLingua-2, semantic dedup, KV-cache pinning | Needs a tokenizer, the LLMLingua-2 model, and provider cache telemetry | Count tokens with the target model's tokenizer, run LLMLingua-2 compression, deduplicate by real embedding cosine similarity, read cache-hit tokens from provider usage fields, and drop the ×4 baseline and fixed ratios. |
 | L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | Run `ollama serve` and pull the models; the LLM fallback, embeddings, and multi-model pipeline then use them (`available: true`). |
 | L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Use `GITHUB_TOKEN` to push the remediation branch (`branchName`) and open a real PR via the GitHub API, then store the real PR number in `prNumber` (currently 0 for local bundles). |
-| L-8 | **Hardware-backed signing (C1)** | No KMS/HSM available | Load the Ed25519 key from AWS KMS / Cloud KMS / an HSM (or at minimum a mounted key file), publish the public key, and add timestamping (RFC 3161) and revocation. |
+| L-8 | **Hardware-backed signing (C1)** | No KMS/HSM available | The key now persists in a file or an env PEM and is published (Step 4). Remaining: keep the Ed25519 key in AWS KMS / Cloud KMS / an HSM, and add RFC 3161 timestamping and revocation. |
 | L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | Run the target-app execution in an unprivileged container (or gVisor/nsjail/Firecracker) with no network, and execute the TypeScript services for real (transpile + run) instead of re-implementing them in Python. |
 | L-10 | **Real PostgreSQL execution (X2)** | No PostgreSQL server | Execute `schema/*.sql` on a disposable PostgreSQL instance instead of SQLite, and run FastAPI/Pydantic/Redis for real instead of shims and mocks. |
 | L-11 | **Tree-sitter queries (L3)** | Native Tree-sitter grammars can't be installed here | Add `tree-sitter` with the Python/TypeScript/SQL grammars and execute the generated `astPatternQuery` strings. |

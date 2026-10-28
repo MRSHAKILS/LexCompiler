@@ -380,3 +380,41 @@ print(json.dumps({
     typescriptCrossBorderExecution: parsed.tsCrossBorder,
   };
 }
+
+export interface RepositoryIdentity {
+  name: string;
+  branch: string;
+  commitHash: string;
+  remoteUrl?: string;
+  dirty: boolean;
+}
+
+/**
+ * Identifies the scanned repository from Git (read-only): the sandbox history for the
+ * demo fixture, or the repository's own `.git` otherwise. Falls back to a content hash
+ * (prefixed `content-`) when the directory is not a Git checkout.
+ */
+export function resolveRepositoryIdentity(contentFingerprint: string): RepositoryIdentity {
+  const git = (args: string[]): string => {
+    if (TARGET_REPO_IS_FIXTURE) return runGit(args);
+    try {
+      const env = { ...process.env };
+      delete env.GIT_DIR;
+      delete env.GIT_WORK_TREE;
+      return execFileSync('git', ['-C', TARGET_REPO_ROOT, ...args], { encoding: 'utf8', timeout: 4000, env, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch {
+      return '';
+    }
+  };
+  if (TARGET_REPO_IS_FIXTURE) ensureTargetRepoGitInitialized();
+  const commit = git(['rev-parse', '--short=12', 'HEAD']);
+  const remoteUrl = TARGET_REPO_IS_FIXTURE ? undefined : git(['remote', 'get-url', 'origin']) || undefined;
+  const remoteName = remoteUrl?.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1];
+  return {
+    name: TARGET_REPO_IS_FIXTURE ? 'finhealth-ai/core-platform' : remoteName || path.basename(TARGET_REPO_ROOT),
+    branch: git(['rev-parse', '--abbrev-ref', 'HEAD']) || 'unknown',
+    commitHash: commit || `content-${contentFingerprint.slice(0, 12)}`,
+    remoteUrl,
+    dirty: commit ? git(['status', '--porcelain']) !== '' : false,
+  };
+}

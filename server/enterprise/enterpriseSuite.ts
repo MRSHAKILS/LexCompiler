@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { createTwoFilesPatch } from 'diff';
-import { init as initZ3 } from 'z3-solver';
 import {
   compileLegalProseToFormalPolicyAsync,
   inferRuleCategoryFromProse,
@@ -10,6 +9,7 @@ import {
 import { analyzeFullRepository } from '../analyzer/astAnalyzer.js';
 import { verifyRepositoryAgainstClauses } from '../prover/z3Engine.js';
 import { synthesizeRemediationPullRequest } from '../remediation/prSynthesizer.js';
+import { getAttestationSigningKey } from './signingKey.js';
 import type {
   ClauseVerificationProof,
   FullComplianceScanReport,
@@ -17,20 +17,6 @@ import type {
   RuleCategory,
   TargetRepoFile,
 } from '../../shared/types.js';
-
-// Generate persistent Ed25519 asymmetric keypair for Cryptographic Conformity Attestations
-const ed25519KeyPair = crypto.generateKeyPairSync('ed25519', {
-  publicKeyEncoding: { type: 'spki', format: 'pem' },
-  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-});
-
-let z3ByocPromise: ReturnType<typeof initZ3> | null = null;
-async function getZ3Byoc() {
-  if (!z3ByocPromise) {
-    z3ByocPromise = initZ3();
-  }
-  return z3ByocPromise;
-}
 
 export interface CryptographicConformityCertificate {
   certificateId: string;
@@ -78,19 +64,15 @@ export function generateSignedConformityCertificate(
   };
 
   const canonicalPayloadJson = JSON.stringify(canonicalPayload, null, 2);
-  const signatureBuffer = crypto.sign(
-    null,
-    Buffer.from(canonicalPayloadJson, 'utf8'),
-    ed25519KeyPair.privateKey
-  );
-
-  const publicKeyFingerprintSha256 = sha256Hex(ed25519KeyPair.publicKey).slice(0, 32);
+  const key = getAttestationSigningKey();
+  const signatureBuffer = crypto.sign(null, Buffer.from(canonicalPayloadJson, 'utf8'), key.privateKey);
+  const publicKeyFingerprintSha256 = key.fingerprintSha256.slice(0, 32);
 
   return {
     certificateId: `CERT-LEX-${report.commitHash.toUpperCase()}-${Date.now().toString().slice(-4)}`,
     standard: 'LEXCOMPILER-SELF-ATTESTATION (not an EU AI Act Art. 43 conformity assessment or SOC 2 report)',
     issuedAt: new Date().toISOString(),
-    issuer: 'LexCompiler demo signer (ephemeral in-process Ed25519 key, regenerated on every server start)',
+    issuer: `LexCompiler attestation key (Ed25519, SHA-256 fingerprint ${key.fingerprintSha256.slice(0, 16)}…)`,
     repositoryName: report.repositoryName,
     commitHash: report.commitHash,
     z3SolverEngine: report.z3EngineVersion,
@@ -109,7 +91,7 @@ export function generateSignedConformityCertificate(
     })),
     canonicalPayloadJson,
     signatureAlgorithm: 'Ed25519 (RFC 8032 PureEdDSA)',
-    publicKeyPem: ed25519KeyPair.publicKey,
+    publicKeyPem: key.publicKeyPem,
     publicKeyFingerprintSha256,
     ed25519SignatureHex: signatureBuffer.toString('hex'),
     ed25519SignatureBase64: signatureBuffer.toString('base64'),
@@ -128,7 +110,18 @@ export function verifyEd25519CertificateSignature(
   reason: string;
 } {
   try {
-    const keyToUse = publicKeyPem || ed25519KeyPair.publicKey;
+    // Only this server's attestation key is trusted; a caller-supplied key could sign anything.
+    const trusted = getAttestationSigningKey().publicKeyPem;
+    if (publicKeyPem && publicKeyPem.trim() !== trusted.trim()) {
+      return {
+        verified: false,
+        algorithm: 'Ed25519 (RFC 8032)',
+        payloadSha256: sha256Hex(canonicalPayloadJson),
+        verificationTimestamp: new Date().toISOString(),
+        reason: 'UNTRUSTED KEY: the supplied public key is not this server\'s attestation key (GET /api/enterprise/public-key).',
+      };
+    }
+    const keyToUse = trusted;
     const sigBuf = Buffer.from(signatureHex, 'hex');
     const isValid = crypto.verify(
       null,
@@ -162,7 +155,9 @@ export function verifyEd25519CertificateSignature(
 export function generateSarifReport(
   clauses: LegalClause[],
   proofs: ClauseVerificationProof[],
-  commitHash: string
+  revision: { commitHash: string; branch: string; remoteUrl?: string },
+  /** Prefix that makes target-repo paths relative to the checkout SARIF is uploaded from. */
+  uriPrefix = ''
 ): Record<string, unknown> {
   const rules = clauses.map((c) => ({
     id: c.id,
@@ -195,8 +190,8 @@ export function generateSarifReport(
           {
             physicalLocation: {
               artifactLocation: {
-                uri: `target-repo/${loc.filePath}`,
-                uriBaseId: '%SRCROOT%',
+                uri: `${uriPrefix}${loc.filePath}`,
+                uriBaseId: 'SRCROOT',
               },
               region: {
                 startLine: loc.line,
@@ -220,18 +215,19 @@ export function generateSarifReport(
           driver: {
             name: 'LexCompiler Neuro-Symbolic Law-to-AST Prover',
             organization: 'JusticeSphere AI',
-            SemanticVersion: '2.4.0',
+            semanticVersion: '2.4.0',
             informationUri: 'https://justicesphere.ai/lexcompiler',
             rules,
           },
         },
-        versionControlProvenance: [
-          {
-            repositoryUri: 'https://github.com/finhealth-ai/core-platform',
-            revisionId: commitHash,
-            branch: 'main',
-          },
-        ],
+        originalUriBaseIds: { SRCROOT: { description: { text: 'Repository root' } } },
+        ...(revision.remoteUrl
+          ? {
+              versionControlProvenance: [
+                { repositoryUri: revision.remoteUrl, revisionId: revision.commitHash, branch: revision.branch },
+              ],
+            }
+          : {}),
         results,
       },
     ],
