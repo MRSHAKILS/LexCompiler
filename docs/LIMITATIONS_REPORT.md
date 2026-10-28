@@ -1,26 +1,47 @@
 # LexCompiler — Project Limitations Report
 
-**Scope:** Entire repository at commit `b91b223` (branch `claude/compassionate-hypatia-3mjhsk`)
+**Scope:** Entire repository at `main` commit `51f69ae` (PRs #18–#25 included)
+**Previous revision of this report:** commit `b91b223`
 **Date:** 2026-10-28
-**Method:** Read every server module, the shared types, the target repo, the CI/Docker config, and a sample of the React UI. Ran `npm ci`, `npm test`, both TypeScript projects (`tsc --noEmit`), `vite build`, and a throwaway probe suite (results in [Appendix A](#appendix-a--probe-results)) to check suspected behaviour against the actual code.
+**Method:** I read every server module, the shared types, the target repo, the CI/Docker config, and a sample of the React UI, and ran:
+- `npm ci`
+- `npm test`
+- `tsc --noEmit` for both TypeScript projects
+- `vite build`
+- a throwaway probe suite that checks suspected behaviour against the actual code ([Appendix A](#appendix-a--probe-results))
+
+Every finding from the previous revision was re-checked against the new code and marked **Fixed**, **Partial**, or **Open**.
 
 ---
 
 ## 1. Executive Summary
 
-LexCompiler is a working **demo** with a polished UI. Some parts are real: it calls Microsoft Z3 through `z3-solver`, parses TypeScript with the TypeScript Compiler API, parses Python with `ast`, signs with Ed25519, fetches from the Federal Register, and builds real unified diffs. But the whole pipeline only works for **one fixed, built-in sample repository** (5 known files, known identifiers) and **four hard-coded rule templates**. Much of what the README and `AGENTS.md` describe is labelled output, not implemented behaviour: the 6-agent crew, OPA Rego evaluation, "minimal unsat cores", CEGIS, pgvector, Neo4j, RAGAS scores, 384-d embeddings in the default path, and "hardware-backed" signing.
+LexCompiler is a working **demo** with a polished UI. Parts of it are real:
+- it calls Microsoft Z3 through `z3-solver`, now with tracked assertions, unsat cores read back from the solver, and models
+- it parses TypeScript with the TypeScript Compiler API and Python with `ast`
+- it signs with Ed25519, fetches from the Federal Register, and builds unified diffs
 
-Five issues matter most:
+PRs #18–#25 made real progress:
+- **Remediation:** patches are now surgical value edits that keep the rest of the file, and a repair loop re-verifies them.
+- **Prover and compiler:** both cover 6 rule categories, and the compiler handles weeks, months and years.
+- **Analyzer:** no longer keyed to specific file names.
+- **BYOC scanner:** now runs the real pipeline.
 
-1. **The pre-PR Z3 gate can't fail.** `postPatchZ3Status` is `allResolved ? 'SAT_COMPLIANT' : 'SAT_COMPLIANT'`, and every PR is marked `READY_TO_MERGE`. A probe confirmed a PR reported as `SAT_COMPLIANT` while one clause was still `UNSAT_VIOLATION` after the patch.
-2. **Unauthenticated remote code execution.** Any client can write any file (path traversal via `../`) through `POST /api/repo/update-file`. `GET /api/sandbox/verify-runtime` then `exec()`s the target Python files in-process. There is no auth, and CORS is wide open.
-3. **The legal compiler is a set of regexes over 4 templates.** It takes the *first* number it finds, ignores negation and exceptions, and can't read words like "seventy-two hours" or "one week". It can quietly produce a weaker rule than the text says, e.g. 90 days instead of 3 days.
-4. **The "AST analysis" only knows file names and constant names.** It works only on the 5 bundled files and specific identifiers like `PII_CACHE_TTL_HOURS`. Writing `24 * 30` (720 h) is read as 24 h, a false "compliant".
-5. **Many reported metrics are hard-coded constants** (RAGAS scores, agent token counts and latencies, dedup and caching ratios, LLM fallback throughput). The UI and API show them as measurements.
+Several serious limitations remain:
+
+1. **Unauthenticated remote code execution (unchanged).** Any client can write any file, path traversal included, through `POST /api/repo/update-file`. `GET /api/sandbox/verify-runtime` then `exec()`s the target Python files in-process. There is no auth, and CORS is wide open.
+2. **The PR gate still over-claims.** `postPatchZ3Status` is now honest, but every PR is still `READY_TO_MERGE`, and the summary still says "all invariants transition from UNSAT → SAT". `/api/remediation/apply-pr` applies the patch without checking the result. The UI always says "Microsoft Z3 proved 100% SAT_COMPLIANT".
+3. **The law parser can still silently weaken the law.** It is first-match regex with no negation handling. "Backups 90 days, but PII purged within 3 days" still compiles to **2160 h** (90 days). LLM fallback values are merged without range checks.
+4. **Code analysis is still name- and text-based, not data-flow.**
+   - `24 * 30` is read as 24 h.
+   - `SESSION_TTL_SECONDS = 3600` is read as **3600 hours**.
+   - `x = payload.ssn; logger.info(x)` is missed.
+   - Only the 5 bundled files are ever read.
+5. **Many reported metrics are still hard-coded constants:** RAGAS scores, agent token counts and latencies, dedup and caching ratios, and LLM fallback throughput. The UI and API present them as measurements.
 
 ---
 
-## 2. Severity Legend
+## 2. Severity & Status Legend
 
 | Level | Meaning |
 | :--- | :--- |
@@ -29,67 +50,76 @@ Five issues matter most:
 | 🟡 **Medium** | Correctness or robustness gap with limited blast radius; misleading but secondary output |
 | 🔵 **Low** | Quality, maintainability, docs, or UX issue |
 
+| Status | Meaning |
+| :--- | :--- |
+| ✅ **Fixed** | Resolved by PRs #18–#25 (kept for traceability) |
+| ◐ **Partial** | Improved, but the limitation still applies in some form |
+| ⬜ **Open** | Unchanged since `b91b223` |
+
 ---
 
 ## 3. Findings at a Glance
 
-| # | Area | Limitation | Severity |
-| :-- | :--- | :--- | :--- |
-| S1 | Security | Arbitrary file write and path traversal via `/api/repo/update-file` | 🔴 |
-| S2 | Security | Unsandboxed `exec()` of repo Python → RCE chain with S1 | 🔴 |
-| S3 | Security | No authentication or authorization on any endpoint; `cors()` allows all origins | 🔴 |
-| S4 | Security | Signature verify endpoint accepts a caller-supplied public key | 🟠 |
-| S5 | Security | User OpenAI API key sent through the backend in request bodies | 🟡 |
-| S6 | Security | Synchronous subprocesses block the event loop → easy DoS | 🟡 |
-| V1 | Verification | Post-patch Z3 gate is a tautology; PR always `READY_TO_MERGE` | 🔴 |
-| V2 | Verification | Unsat cores and counterexample witnesses are hand-built, not taken from Z3 | 🟠 |
-| V3 | Verification | Z3 only checks ground constants; no symbolic program semantics | 🟠 |
-| V4 | Verification | Displayed and hashed SMT-LIB2 differs from what actually ran | 🟠 |
-| V5 | Verification | OPA Rego is generated but never evaluated; "denials" are template strings | 🟠 |
-| V6 | Verification | Cross-border axiom hard-codes "non-EU egress forbidden" | 🟡 |
-| V7 | Verification | `unknown` solver result treated as `unsat`; defaults for missing facts are inconsistent | 🟡 |
-| V8 | Verification | One entity per construct type (`find()`); fixed 5-node graph | 🟠 |
-| L1 | Legal compiler | Regex extraction; first-match wins; no negation, exceptions, or number words | 🔴 |
-| L2 | Legal compiler | Only 4 rule categories; category supplied by the caller, not inferred | 🟠 |
-| L3 | Legal compiler | Generated SMT, Rego, and AST queries are fixed templates naming demo identifiers | 🟠 |
-| L4 | Legal compiler | Curated "statute" excerpts contain obligations that aren't in the cited law | 🔴 |
-| A1 | AST analysis | Gated on hard-coded file names and identifiers | 🟠 |
-| A2 | AST analysis | Only literal constants; expressions mis-read (`24 * 30` → 24) | 🔴 |
-| A3 | AST analysis | SQL "parser" is a line regex that depends on comment annotations | 🟠 |
-| A4 | AST analysis | No data flow or taint analysis; text matching for PII logging | 🟠 |
-| A5 | AST analysis | Only 5 known files are ever read; can't scan an arbitrary repo | 🟠 |
-| R1 | Remediation | "CEGIS" patches are whole-file template rewrites that drop user code | 🟠 |
-| R2 | Remediation | Patched "encryption" leaks the first 4 plaintext characters | 🟡 |
-| R3 | Remediation | AI-triage patch changes business semantics (auto-rejects) | 🟡 |
-| R4 | Remediation | No real Git branch or PR; `prNumber: 409` is hard-coded | 🟠 |
-| R5 | Remediation | Multiple clauses in the same category: only the first is used to patch | 🟡 |
-| B1 | BYOC scanner | Always the retention category; defaults to a violation when no TTL is found | 🟡 |
-| B2 | BYOC scanner | Regex "remediation" rewrites every log call in the file | 🟡 |
-| X1 | Sandbox | Not isolated; TypeScript never executed; logic duplicated in Python regexes | 🟠 |
-| X2 | Sandbox | SQLite stands in for PostgreSQL; FastAPI and Pydantic shimmed | 🟡 |
-| C1 | Attestation | Ed25519 key is regenerated every process start; old certs can't be verified | 🟠 |
-| C2 | Attestation | "Merkle root" is a flat hash; "commit hash" isn't a Git hash | 🟡 |
-| C3 | SARIF | Invalid property casing (`SemanticVersion`); hard-coded repo URI | 🟡 |
-| C4 | Attestation | Certificate claims conformity with EU AI Act Art. 43 / SOC 2 | 🟠 |
-| AI1 | Agents | The 6-agent "crew" is a static report; no agent framework or LLM is called | 🟠 |
-| AI2 | RAG | Default "384-d embeddings" are a 16-dim keyword bag; pgvector and Neo4j absent | 🟠 |
-| AI3 | RAG | RAGAS metrics are hard-coded constants (0.991 etc.) | 🟠 |
-| AI4 | Tokens | Token-savings benchmark inflates the baseline ×4 and uses fixed ratios | 🟡 |
-| AI5 | LLM mesh | Fallbacks fabricate token and throughput numbers when Ollama is down | 🟡 |
-| M1 | MCP | Not spec-compliant JSON-RPC/MCP; SSE closes after one event; unknown tool → success | 🟡 |
-| M2 | MCP | Stdio server ignores runtime clause state; uses the initial clauses only | 🔵 |
-| P1 | Architecture | Global in-memory mutable state; single-tenant; lost on restart | 🟠 |
-| P2 | Architecture | Every `GET /api/state` re-parses, runs Z3 twice, and writes the ledger | 🟡 |
-| P3 | Architecture | Z3 `Context` created per call and never released | 🔵 |
-| T1 | Testing | One test file, 5 happy-path tests; asserts on tautologies and constants | 🟠 |
-| T2 | Testing/CI | Client type-check fails; CI doesn't type-check the client or lint | 🟡 |
-| T3 | Testing/CI | CLIs never exit non-zero on violations → not a real gate; `verify:cli` not in CI | 🟡 |
-| T4 | Testing/CI | CLIs and tests reset and overwrite `target-repo/` on disk | 🔵 |
-| D1 | Deployment | Docker image omits Ollama, runs as root, has no volume for `data/` | 🟡 |
-| D2 | Deployment | Health check always reports `ok` / `ready` | 🔵 |
-| DOC1 | Docs | README and `AGENTS.md` describe features that don't exist | 🟠 |
-| DOC2 | Docs | README says MIT but there is no `LICENSE` file; package name differs from the project | 🔵 |
-| U1 | Frontend | Minimal accessibility, no frontend tests, very large components | 🔵 |
+| # | Area | Limitation | Severity | Status |
+| :-- | :--- | :--- | :--- | :--- |
+| S1 | Security | Arbitrary file write and path traversal via `/api/repo/update-file` | 🔴 | ⬜ Open |
+| S2 | Security | Unsandboxed `exec()` of repo Python → RCE chain with S1 | 🔴 | ⬜ Open |
+| S3 | Security | No authentication or authorization on any endpoint; `cors()` allows all origins | 🔴 | ⬜ Open |
+| S4 | Security | Signature verify endpoint accepts a caller-supplied public key | 🟠 | ⬜ Open |
+| S5 | Security | User OpenAI API key passes through an unauthenticated backend | 🟡 | ⬜ Open |
+| S6 | Security | Synchronous subprocesses block the event loop → easy DoS | 🟡 | ◐ Partial |
+| V1 | Verification | PR gate over-claims: always `READY_TO_MERGE`; apply ignores result; UI says 100 % | 🔴 | ◐ Partial |
+| V2 | Verification | Unsat cores and models from Z3, but hand-built fallbacks and non-Optimize repair values | 🟡 | ◐ Partial |
+| V3 | Verification | Z3 only checks ground constants; no symbolic program semantics | 🟠 | ⬜ Open |
+| V4 | Verification | Displayed and hashed SMT-LIB2 differs from what actually ran | 🟠 | ⬜ Open |
+| V5 | Verification | OPA Rego is generated but never evaluated; "denials" are template strings | 🟠 | ⬜ Open |
+| V6 | Verification | Cross-border axiom hard-codes "non-EU egress forbidden" | 🟡 | ⬜ Open |
+| V7 | Verification | `unknown` treated as `unsat`; defaults for missing facts are inconsistent | 🟡 | ⬜ Open |
+| V8 | Verification | One entity per construct type; fixed 5-node graph | 🟠 | ◐ Partial |
+| L1 | Legal compiler | First-match regex; no negation, exceptions, or number words | 🔴 | ◐ Partial |
+| L2 | Legal compiler | Fixed set of categories (now 6); category supplied by caller in the main API | 🟠 | ◐ Partial |
+| L3 | Legal compiler | Generated SMT, Rego, and AST queries are fixed templates naming demo identifiers | 🟠 | ⬜ Open |
+| L4 | Legal compiler | Curated "statute" excerpts contain obligations that aren't in the cited law | 🔴 | ⬜ Open |
+| L5 | Legal compiler | LLM fallback output overrides parsed values without validation | 🟡 | 🆕 New |
+| A1 | AST analysis | Detection keyed to name patterns instead of semantics | 🟡 | ◐ Partial |
+| A2 | AST analysis | Only literal constants; expressions and units misread | 🔴 | ⬜ Open (worse) |
+| A3 | AST analysis | SQL "parser" is a line regex that depends on comment annotations | 🟠 | ◐ Partial |
+| A4 | AST analysis | No data-flow or taint tracking; text matching for PII logging | 🟠 | ◐ Partial |
+| A5 | AST analysis | Only 5 known files are ever read; can't scan an arbitrary repo | 🟠 | ⬜ Open |
+| R1 | Remediation | Whole-file template rewrites that drop user code | 🟠 | ✅ Fixed |
+| R2 | Remediation | Generated "encryption" helper leaks the first 4 plaintext characters | 🟡 | ⬜ Open |
+| R3 | Remediation | AI-triage patch changed business semantics | 🟡 | ✅ Fixed |
+| R4 | Remediation | No real Git branch or PR; `prNumber: 409` is hard-coded | 🟠 | ⬜ Open |
+| R5 | Remediation | First clause per category sets the initial patch parameters | 🔵 | ◐ Partial |
+| B1 | BYOC scanner | One-file scans always fail on default Postgres/cache facts | 🟡 | ◐ Partial |
+| B2 | BYOC scanner | Regex rewrite broke every log call | 🟡 | ✅ Fixed |
+| X1 | Sandbox | Not isolated; TypeScript never executed; logic duplicated in Python regexes | 🟠 | ⬜ Open |
+| X2 | Sandbox | SQLite stands in for PostgreSQL; FastAPI and Pydantic shimmed | 🟡 | ⬜ Open |
+| C1 | Attestation | Ed25519 key regenerated every process start; old certs unverifiable | 🟠 | ⬜ Open |
+| C2 | Attestation | "Merkle root" is a flat hash; "commit hash" isn't a Git hash | 🟡 | ⬜ Open |
+| C3 | SARIF | Invalid property casing (`SemanticVersion`); hard-coded repo URI | 🟡 | ⬜ Open |
+| C4 | Attestation | Certificate claims conformity with EU AI Act Art. 43 / SOC 2 | 🟠 | ⬜ Open |
+| AI1 | Agents | The 6-agent "crew" is a static report; no agent framework is called | 🟠 | ⬜ Open |
+| AI2 | RAG | Default "384-d embeddings" are a 16-dim keyword bag; pgvector and Neo4j absent | 🟠 | ⬜ Open |
+| AI3 | RAG | RAGAS metrics are hard-coded constants (0.991 etc.) | 🟠 | ⬜ Open |
+| AI4 | Tokens | Token-savings benchmark inflates the baseline ×4 and uses fixed ratios | 🟡 | ⬜ Open |
+| AI5 | LLM mesh | Fallbacks fabricate token and throughput numbers when Ollama is down | 🟡 | ⬜ Open |
+| M1 | MCP | Not spec-compliant JSON-RPC/MCP; SSE closes after one event; unknown tool → success | 🟡 | ⬜ Open |
+| M2 | MCP | Stdio server ignores runtime clause state | 🔵 | ⬜ Open |
+| P1 | Architecture | Global in-memory mutable state; single-tenant; lost on restart | 🟠 | ⬜ Open |
+| P2 | Architecture | Reads re-parse, run Z3 repeatedly, and write the ledger | 🟡 | ⬜ Open (heavier) |
+| P3 | Architecture | Z3 `Context` created per call and never released; no solver timeout | 🔵 | ⬜ Open |
+| T1 | Testing | One test file, 5 happy-path tests; some assert on constants | 🟠 | ⬜ Open |
+| T2 | Testing/CI | Client type errors; CI doesn't type-check the client or lint | 🔵 | ◐ Partial |
+| T3 | Testing/CI | CLIs never fail on remaining violations; `verify:cli` not in CI | 🟡 | ⬜ Open |
+| T4 | Testing/CI | CLIs and tests reset and overwrite `target-repo/` on disk | 🔵 | ⬜ Open |
+| D1 | Deployment | Docker image omits Ollama, runs as root, has no volume for `data/` | 🟡 | ⬜ Open |
+| D2 | Deployment | Health check always reports `ok` / `ready` | 🔵 | ⬜ Open |
+| DOC1 | Docs | README and `AGENTS.md` describe features that don't exist | 🟠 | ⬜ Open |
+| DOC2 | Docs | README says MIT but there is no `LICENSE` file; package name differs | 🔵 | ⬜ Open |
+| U1 | Frontend | Minimal accessibility, no frontend tests, large components, hard-coded claims | 🔵 | ⬜ Open |
+
+**Tally:** 3 fixed · 12 partial · 40 open · 1 new (56 findings).
 
 ---
 
@@ -97,322 +127,410 @@ Five issues matter most:
 
 ### 4.1 Security
 
-#### S1 🔴 Arbitrary file write with path traversal
-`writeTargetRepoFile` (`server/analyzer/repoBaseline.ts:233`) strips leading `/` and then calls `path.join(TARGET_REPO_ROOT, relPath)`. It never checks that the result stays inside `target-repo/`. `POST /api/repo/update-file` (`server/index.ts:618`) passes the request's `filePath` straight in. A probe confirmed that `../server/index.ts` resolves to `/home/user/LexCompiler/server/index.ts`. Any network client can overwrite the server's own source, `package.json`, shell profiles, and so on.
+#### S1 🔴 ⬜ Arbitrary file write with path traversal
+`writeTargetRepoFile` (`server/analyzer/repoBaseline.ts:233`) strips leading `/` and then calls `path.join(TARGET_REPO_ROOT, relPath)`, with no check that the result stays inside `target-repo/`. `POST /api/repo/update-file` (`server/index.ts:618`) passes the request's `filePath` straight in. A re-probe on `51f69ae` confirmed `../server/index.ts` → `/home/user/LexCompiler/server/index.ts`. Any network client can overwrite the server's own source, `package.json`, shell profiles, and so on.
 
-#### S2 🔴 Unsandboxed execution → RCE chain
-`executeRealWorldSandboxVerification` (`server/sandbox/realWorldSandbox.ts:196,216`) runs `exec(compile(...))` on `api/fastapi_intake.py` and `workers/redis_cache_worker.py` inside a normal `python3` process. That process runs as the server user, with full filesystem and network access. Combined with S1 (or even a legitimate `update-file` to `api/fastapi_intake.py`), anyone who can reach the port gets code execution:
+#### S2 🔴 ⬜ Unsandboxed execution → RCE chain
+`executeRealWorldSandboxVerification` (`server/sandbox/realWorldSandbox.ts:196,216`) runs `exec(compile(...))` on `api/fastapi_intake.py` and `workers/redis_cache_worker.py` inside a plain `python3` process, running as the server user with full filesystem and network access. Combined with S1, or even a legitimate `update-file` call, anyone who can reach the port gets code execution:
 `POST /api/repo/update-file {filePath:"api/fastapi_intake.py", content:"import os; os.system(...)"}` → `GET /api/sandbox/verify-runtime`.
-Calling this a "sandbox" overstates it. There is no container, seccomp, user namespace, or resource limit beyond a 5 s timeout.
+There is no container, seccomp, user namespace, or resource limit beyond a 5 s timeout.
 
-#### S3 🔴 No authentication; permissive CORS
-None of the 26 endpoints check identity or authorization. `app.use(cors())` (`server/index.ts:63`) lets any web page the user visits call the local server. That includes the state-changing endpoints: file writes, repo reset, applying PRs, Git commits, and changing clauses.
+#### S3 🔴 ⬜ No authentication; permissive CORS
+None of the 26 endpoints check identity or authorization. `app.use(cors())` (`server/index.ts:63`) lets any web page the user visits call the local server, including the state-changing endpoints: file writes, repo reset, applying PRs, Git commits, and clause edits.
 
-#### S4 🟠 Signature verification accepts an attacker key
-`POST /api/enterprise/verify-signature` takes an optional `publicKeyPem` and verifies against it (`server/enterprise/enterpriseSuite.ts`, `verifyEd25519CertificateSignature`). A forger signs any payload with their own key and supplies that key, and the endpoint returns `verified: true`. There is no trust anchor, key pinning, or certificate chain.
+#### S4 🟠 ⬜ Signature verification accepts an attacker key
+`verifyEd25519CertificateSignature` (`server/enterprise/enterpriseSuite.ts:119`) verifies against an optional caller-supplied `publicKeyPem`. A forger signs any payload with their own key, supplies that key, and gets `verified: true`. There is no trust anchor, key pinning, or certificate chain.
 
-#### S5 🟡 Cloud API key passes through the backend
-The UI (`src/components/LiveMultiLlmMeshStudio.tsx:49,96`) sends a user-typed OpenAI key in the JSON body of `/api/llm/generate`. Combined with S3, the key travels through an unauthenticated server that any web page can call. Prefer sending it from the browser directly, or storing it server-side.
+#### S5 🟡 ⬜ Cloud API key passes through the backend
+The UI (`src/components/LiveMultiLlmMeshStudio.tsx`) sends a user-typed OpenAI key in the JSON body of `/api/llm/generate`. Combined with S3, the key travels through an unauthenticated server that any web page can call.
 
-#### S6 🟡 Event-loop blocking → DoS
-`execFileSync('python3', …)` is used for AST parsing (3 s timeout), the sandbox (5 s), and every SQLite ledger read and write (3 s). These calls are synchronous, so each request blocks the whole Node process. A handful of concurrent `GET /api/state` or `/api/sandbox/verify-runtime` calls stalls the server for every user.
+#### S6 🟡 ◐ Event-loop blocking → DoS
+**Improved:** Python AST results are now cached by content hash (`server/analyzer/astAnalyzer.ts:471`), so unchanged files aren't re-parsed.
+**Still open:** `execFileSync('python3', …)` still blocks the whole Node process on every cache miss (3 s timeout), in the sandbox (5 s), and on every SQLite ledger read and write (3 s). The LLM fallback in the compiler adds an awaited network call of up to 8 s to clause compilation.
 
 ### 4.2 Formal Verification (Z3 / OPA)
 
-#### V1 🔴 The pre-PR gate is a tautology
-`server/remediation/prSynthesizer.ts:393`:
-```ts
-postPatchZ3Status: allResolved ? 'SAT_COMPLIANT' : 'SAT_COMPLIANT',
-```
-`status` is always `'READY_TO_MERGE'` (line 383), `prePatchZ3Status` is always `'UNSAT_VIOLATION'`, and the executive summary always says "all invariants transition from UNSAT → SAT". The probe added a lenient 30-day clause next to the 72-hour clause. The PR reported `SAT_COMPLIANT / READY_TO_MERGE`, but re-verification showed `CLAUSE-DPA-4.2: UNSAT_VIOLATION`. The UI makes it worse: after "Apply PR" it always shows the toast "Microsoft Z3 proved 100% SAT_COMPLIANT" (`src/App.tsx:268–270`), whatever the result. This breaks the main guarantee in `AGENTS.md` §3 ("Every synthesized patch MUST pass the Pre-PR Z3 Sandbox Gate").
+#### V1 🔴 ◐ The PR gate still over-claims
+**Improved:**
+- `postPatchZ3Status` is now `allResolved ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION'` (`server/remediation/prSynthesizer.ts:631`).
+- A repair loop (up to 3 rounds, line 539) re-patches leftover violations from each proof's `repairTargets`.
+- The earlier probe (a lenient 30-day clause next to the strict 72-hour clause) now really reaches `SAT_COMPLIANT` for every clause.
 
-#### V2 🟠 Unsat cores and witnesses aren't from Z3
-Assertions are added with plain `solver.add(...)`. Nothing uses `assert_and_track` or named assumptions, and the code never calls `solver.unsatCore()` or `solver.model()`. `unsatCoreAssertions` is filled by `if` statements that repeat the comparison in TypeScript (e.g. `postgresRetentionHours > maxHours`), and some core names are string literals (`'ast_fastapi_logs_plaintext_pii_true'`). `counterexampleWitness` is just the input values. The README's "extracts minimal Unsat Core & Counterexample Witness" isn't implemented. The cores aren't minimal either: Postgres retention and KMS are always reported together.
+**Still open:**
+- `status` is always `'READY_TO_MERGE'` (line 621), even when `postPatchZ3Status` is `UNSAT_VIOLATION`.
+- `executiveSummary` always says "confirmed all N statutory invariants transition from UNSAT → SAT".
+- `unresolvedClauseIds` and `cegisIterations` exist in the type but are never set.
+- `POST /api/remediation/apply-pr` (`server/index.ts:592`) writes every patch to disk and commits without checking `postPatchZ3Status`.
+- After applying, the UI always shows "Microsoft Z3 proved 100% SAT_COMPLIANT" (`src/App.tsx:291`).
 
-#### V3 🟠 Z3 is evaluating constants
-Every code-side variable is pinned to a concrete value (`pgRet.eq(720)`) and every law-side variable to a concrete bound (`sMaxHours.eq(72)`). Each query therefore reduces to checking an inequality like `720 ≤ 72`, which the TypeScript already computes for the explanations. Nothing models program paths, data flow, or quantifiers over entities ("∀ entity ∈ PII_Store"). The first-order formulas shown to users are decoration; nothing checks them.
+The `AGENTS.md` §3 rule ("every synthesized patch MUST pass the Pre-PR Z3 Sandbox Gate") is still not enforced.
 
-#### V4 🟠 The SMT text you see isn't what ran
-Z3 runs through the programmatic API, while `smtLib2Executed` is a separately built string (`server/prover/z3Engine.ts:122–132`). The two have drifted. For example, the solver asserts `redis_worker_uses_tenant_kms`, but the text never declares or asserts it. `smtFormulaSha256`, and the per-clause "Merkle" hash built from it, hash the *display* text, not the formula that was solved. So the provenance chain doesn't attest to the actual proof.
+#### V2 🟡 ◐ Unsat cores and models
+**Improved:**
+- Assertions are tracked with `assertAndTrack` (`server/prover/z3Engine.ts:38`).
+- Cores come from `solver.unsatCore()` (line 48).
+- Models come from `solver.model()` (line 58).
 
-#### V5 🟠 OPA Rego is never evaluated
-There's no OPA binary, WASM module, or Rego library among the dependencies. `opaRegoTriggeredDenials` are hand-written template strings pushed next to the Z3 result. The generated Rego is never even syntax-checked. It also uses pre-v1 syntax (`deny[msg] {` without `contains`/`if`), which current OPA (v1.x) rejects by default.
+**Still open:**
+- When the solver returns an empty core, the code falls back to hand-written names (e.g. lines 354–368), and nothing in the proof shows which path was used.
+- `Z3RepairTarget` is documented in `shared/types.ts` as "the minimal-change value Z3 Optimize found". But no Optimize call exists: `requiredValue` is just the clause bound (e.g. `requiredValue: maxHours`).
+- `counterexampleWitness` is still the input values.
 
-#### V6 🟡 Cross-border law is hard-coded
-`solver.add(sAllowsNonEu.eq(false))` (`server/prover/z3Engine.ts:571`) ignores the clause's own `statutory_allows_non_eu_egress` parameter. A clause that permits US transfers under SCCs still gets the "no non-EU egress" axiom. Region membership is decided in TypeScript (`allowedRegions.includes`), not by the solver.
+#### V3 🟠 ⬜ Z3 is evaluating constants
+Every code-side variable is still pinned to a concrete value and every law-side variable to a concrete bound. Each query reduces to an inequality like `720 ≤ 72`. Nothing models program paths, data flow, or quantifiers over entities; the first-order formulas shown to users are decoration.
 
-#### V7 🟡 Unknown results and default facts
-- `status: z3Result === 'sat' ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION'` reports a solver `unknown` (timeout, resource limit) as a proven violation.
-- When a construct isn't found, the defaults are inconsistent. A missing Redis worker defaults to 720 h (violation), a missing AI engine to 0.68 (violation), and a missing egress to `us-east-1` (violation). A missing logger, though, defaults to `false` (compliant). If the SQL table is missing, `unencryptedPiiColumns.length ?? 0` makes `postgresEncryptedAtRest = true`.
+#### V4 🟠 ⬜ The SMT text you see isn't what ran
+Z3 runs through the programmatic API, while `smtLib2Executed` is assembled separately from the clause's template snippet. For example, the retention template still doesn't declare `redis_worker_uses_tenant_kms`, but the solver asserts it. `smtFormulaSha256`, and the per-clause "Merkle" hash built from it, hash the *display* text, so the provenance chain doesn't attest to the formula that was actually solved.
 
-#### V8 🟠 One instance per construct; fixed topology
-Facts are pulled with `astFindings.find(...)` and `sqlTables.find(t => t.tableName === 'patient_records')`. Only the *first* match of each construct type is verified, and any other table, endpoint, or worker is ignored. The architecture graph is a hard-coded list of 5 nodes and 4 edges with fixed labels, payloads, and file paths. The "blast radius" view therefore can't reflect a real codebase.
+#### V5 🟠 ⬜ OPA Rego is never evaluated
+There is no OPA binary, WASM module, or Rego library among the dependencies. `opaRegoTriggeredDenials` are hand-written template strings. The generated Rego is never syntax-checked, and it uses pre-v1 syntax (`deny[msg] {`), which OPA v1.x rejects by default.
+
+#### V6 🟡 ⬜ Cross-border law is hard-coded
+`assertAndTrackNamed(..., 'law_gdpr_ch5_sovereign_residency', sAllowsNonEu.eq(false))` (`server/prover/z3Engine.ts:1121`) ignores the clause's own `statutory_allows_non_eu_egress` value. A clause that permits US transfers under SCCs still gets the "no non-EU egress" axiom. Region membership is still decided in TypeScript.
+
+#### V7 🟡 ⬜ Unknown results and default facts
+- `status: extra.z3Result === 'sat' ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION'` (`server/prover/z3Engine.ts:123`) still reports a solver `unknown` as a proven violation. No solver timeout is set.
+- Defaults for missing constructs are still inconsistent:
+  - a missing table, cache, or AI engine defaults to a violation (720 h, 0.68, `us-east-1`)
+  - a missing logger defaults to compliant
+  - a missing SQL table makes `postgresEncryptedAtRest = true`
+
+  This is also the root cause of B1.
+
+#### V8 🟠 ◐ One instance per construct
+**Improved:** `pickPiiTable`/`pickFinding` (`server/prover/z3Engine.ts:78–96`) prefer a sensible candidate instead of requiring `patient_records`. The analyzer now emits findings for *every* table and leaking logger call.
+**Still open:**
+- The prover still verifies only the *first* match of each construct type. A second PII table or a second cache worker is analyzed but never checked.
+- The architecture graph is still a fixed set of 5 nodes and 4 edges.
 
 ### 4.3 Legal-to-Logic Compiler
 
-#### L1 🔴 Regex extraction can silently weaken the law
-`compileLegalProseToFormalPolicy` (`server/compiler/legalCompiler.ts:25`) uses regexes, not an NLP or LLM model. The probe confirmed:
+#### L1 🔴 ◐ Regex extraction can still silently weaken the law
+**Improved** (`server/compiler/legalCompiler.ts`):
+- `extractTemporalHoursFromProse` (line 71) understands minutes, days, weeks, months, and years.
+- Missing numbers are marked `DETERMINISTIC_DEFAULT` in `extractionProvenance`, and the async path asks an LLM to fill the gap.
+
+**Still open** (probe on `51f69ae`):
 
 | Input | Extracted | Problem |
 | :--- | :--- | :--- |
-| "Backups may be kept 90 days, but PII must be purged within **3 days**." | **2160 h** (90 days) | First match wins, so the result is **30× more lenient** than the law |
-| "purged within seventy-two hours" | 720 h | Number words unsupported; falls back to the default |
-| "purged within one week" / "Retain records 2 years" | 720 h | Weeks, months, and years unsupported |
+| "Backups may be kept 90 days, but PII must be purged within **3 days**." | **2160 h** (90 days) | First match wins: **30× more lenient** than the law |
+| "purged within seventy-two hours" | 720 h (`DETERMINISTIC_DEFAULT`) | Number words unsupported by the deterministic parser |
+| "purged within one week" | 720 h (`DETERMINISTIC_DEFAULT`) | "one week" not parsed (though "2 weeks" → 336 h works) |
 | "PII **need not** use tenant-isolated keys…" | `requiresTenantIsolatedKeys: true` | Negation ignored |
 | "Logging of email addresses is **permitted**." (`PII_LOGGING_BAN`) | `forbidPlaintextLogging: true` | Category forces prohibition |
 
-Other gaps:
-- Hours always win over days, regardless of which one governs.
-- Percentages are taken from any `\d{2,3}%` in the text.
-- The confidence threshold defaults to 0.70 when none is found.
-- Allowed regions are a fixed EU pair, plus `us-east-1` only if certain phrases appear.
+Hours still always win over days. The default of 720 h when nothing parses still becomes a formal axiom, and the `DETERMINISTIC_DEFAULT` flag isn't surfaced as a warning in the proof or the UI.
 
-Because every output is labelled a "formal proof", a misparse becomes a *proven-compliant* verdict against the wrong rule.
+#### L2 🟠 ◐ Fixed categories
+**Improved:** two more categories (`ENCRYPTION_AT_REST`, `RIGHT_TO_ERASURE_CASCADE`, 6 in total), and `inferRuleCategoryFromProse` (line 106) infers a category from text.
+**Still open:**
+- Inference is only used by the BYOC scanner. `POST /api/clauses/compile` still takes the category from the caller and defaults to retention.
+- Consent, purpose limitation, breach notification, DPIA, access rights, and minimisation still can't be expressed.
+- `PERMISSION` is never produced.
 
-#### L2 🟠 Four categories, chosen by the caller
-Only `RETENTION_AND_TENANT_KMS`, `PII_LOGGING_BAN`, `AI_HUMAN_IN_THE_LOOP`, and `CROSS_BORDER_TRANSFER` exist. The category isn't inferred from the text: the API caller or preset sets it, and it defaults to retention. Anything else (consent, purpose limitation, breach notification, DPIA, access rights, minimisation, and so on) can't be expressed. The deontic modality (`O`/`F`/`P`) is fixed per category. `PERMISSION` is never produced.
+#### L3 🟠 ⬜ Generated artifacts are fixed templates
+SMT-LIB2, Rego, and "Tree-sitter" queries are still string templates with demo identifiers (`patient_records`, `ingest_patient_pii`, `PII_CACHE_TTL_HOURS`, `REPLICA_TARGET_REGION`, …). Tree-sitter queries are never run.
 
-#### L3 🟠 Generated artifacts are fixed templates
-The SMT-LIB2, Rego, and "Tree-sitter" queries are string templates with demo identifiers baked in: `patient_records`, `ingest_patient_pii`, `PII_CACHE_TTL_HOURS`, `evaluateClinicalAndCreditRisk`, `REPLICA_TARGET_REGION`, `/api/v1/patients/intake`. Only the numbers change. The Tree-sitter queries are never run, and Tree-sitter isn't a dependency.
+#### L4 🔴 ⬜ Invented statutory content
+Unchanged. These texts are presented as real law, with official EUR-Lex/eCFR URLs, but contain obligations the cited instruments don't have:
+- The "EUR-Lex" EU AI Act excerpt adds "Minimum confidence gate 0.88 (88%)" (`legalCompiler.ts:1045`). Art. 14 sets no numeric threshold.
+- The "GDPR Art. 17" excerpt says PII must be "purged within 72 hours" (line 1057). GDPR sets no such period; its 72 hours is the Art. 33 breach-notification deadline.
+- A Federal Register result with no abstract gets a made-up 72-hour-purge excerpt substituted (lines 1090–1091).
+- The fallback HIPAA item "89 FR 104210" (line 1106) doesn't match a real rulemaking: volume 89 is the 2024 volume, but the item is dated 2026-09-18.
 
-#### L4 🔴 Invented statutory content
-Several texts are presented as real law, with official EUR-Lex/eCFR URLs, but contain obligations the cited instruments don't have:
-- The "EUR-Lex" EU AI Act excerpt adds "Minimum confidence gate 0.88 (88%)". Art. 14 sets no numeric confidence threshold.
-- The "GDPR Art. 17" excerpt says PII must be "purged within 72 hours". GDPR sets no such retention period. The 72 hours in GDPR is the Art. 33 breach-notification deadline.
-- The HIPAA fallback "Federal Register" item ("89 FR 104210 … 72h Cache Purge") doesn't match a real rulemaking. Volume 89 is the 2024 volume, but the item is dated 2026-09-18. When a real Federal Register result has no abstract, the code substitutes a made-up excerpt about 72-hour purging (`legalCompiler.ts:730–732`).
-- Clause `version`/`lastAmended` values (e.g., `v2026.4-AMENDED`) are invented.
+#### L5 🟡 🆕 LLM fallback output isn't validated
+`mergeLlmBounds` (`legalCompiler.ts:236`) copies every typed field from the LLM's JSON over the deterministic result:
+- `requiresTenantIsolatedKeys`, `forbidPlaintextLogging`, and `allowedDataRegions` are overwritten even where the regex parser had evidence.
+- There is no range check: e.g. `minAiConfidenceThreshold: 85` would be accepted as-is instead of 0.85.
+- The default model is a 0.5 B coder model.
 
-For a compliance product, users can't tell these demo texts apart from real regulatory text. That risks real legal decisions being made from them.
+A hallucinated value becomes a "proven" axiom. The provenance records `LLM_JSON_FALLBACK`, but nothing asks a human to confirm it.
 
 ### 4.4 Polyglot AST Analysis
 
-#### A1 🟠 File-name and identifier gating
-Python and TypeScript extraction only runs when the path contains `fastapi_intake.py`, `redis_cache_worker.py`, `ai_credit_triage.ts`, or `cross_border_sync.ts`, and it then looks up specific constant and function names. Renaming a constant or moving the logic to another file makes the construct disappear. That doesn't make the code "compliant": the prover then falls back to the defaults described in V7.
+#### A1 🟡 ◐ Detection keyed to name patterns
+**Improved:** extraction is no longer gated on file names. It scans any `.py`/`.ts` file using regex families over identifiers (`TTL_ASSIGN_NAMES`, `KMS_ASSIGN_NAMES`, `CONFIDENCE_NAMES`, … in `server/analyzer/astAnalyzer.ts:13–27`).
+**Still open:** naming decides everything.
+- A TTL constant named `KEEP_FOR` is invisible.
+- Any number assigned to a name containing `threshold` or `min_score` is read as the AI confidence gate.
+- `pickConstant` takes the first match in object order.
 
-#### A2 🔴 Only literal constants; expressions are misread
-Python `assignments` record a value only when it's an `ast.Constant`. Otherwise the code falls back to the regex `PII_CACHE_TTL_HOURS\s*=\s*(\d+)`. The probe set `PII_CACHE_TTL_HOURS = 24 * 30` (720 h). It was read as **24 h**, a false **compliant**. The same applies to:
-- environment variables (`int(os.getenv(...))`)
-- config files
-- class attributes
-- function arguments such as the TTL passed to `setex()`
-- TypeScript `as const`, template literals, and imported constants
+#### A2 🔴 ⬜ Only literal constants; expressions and units misread (worse)
+Python values are still recorded only for `ast.Constant`. Otherwise the code falls back to a regex (`astAnalyzer.ts:589–595`). Re-probe:
+- `PII_CACHE_TTL_HOURS = 24 * 30` (720 h) → read as **24 h**, a false "compliant".
+- **New:** `SESSION_TTL_SECONDS = 3600` (1 hour) → read as **3600 hours**, because the wider name match (`ttl…sec`) accepts it but no unit conversion is applied. `SourceEditAnchor.hoursPerUnit` exists in the types but is never set.
 
-The analyzer checks *declared constants*, not runtime behaviour.
+Environment variables, config files, class attributes, `setex()` TTL arguments, TypeScript `as const`, template literals, and imported constants are all still ignored.
 
-#### A3 🟠 SQL "parser" is a line regex
-`parseSqlSchemaFile` matches `CREATE TABLE` per line, ends a table at a line starting with `);`, and finds columns with `^name type`. PII, encryption, and retention mostly come from **comment annotations** (`@pii(...)`, `@encrypted(...)`, `@retention_hours(...)`). Any real schema without these annotations is mis-classified. Multi-line columns, constraints, `ALTER TABLE`, quoted identifiers, `CREATE TABLE … AS`, and real Postgres encryption (pgcrypto, TDE) aren't understood. Separately, the cascade "propagation" *overwrites* `patient_records.hasErasureCascade` with whether *any other* table has `ON DELETE CASCADE`.
+#### A3 🟠 ◐ SQL "parser" is a line regex
+**Improved:**
+- PII is now inferred from column-name patterns without annotations (`isInferredPiiColumn`, line 65).
+- Foreign keys are tracked per table via `dependentForeignKeys`.
+- The previous cascade-overwrite bug is gone.
 
-#### A4 🟠 No data flow or taint tracking
-Plaintext-logging detection is a regex over the unparsed `logger.info(...)` call. If no `logger.info` call exists, the regex runs over **the whole file** instead. Aliasing (`s = payload.ssn; logger.info(s)`), other loggers (`print`, `structlog`, `logger.exception`), and indirect formatting are missed. Mentioning `redact_pii` anywhere in the call suppresses detection even if raw PII is also logged. Only the *first* `logger.info` call is examined.
+**Still open:**
+- It is still a per-line regex (`CREATE TABLE` on one line, `);` or `)` closes it).
+- Encryption and retention still come only from `@encrypted(...)` / `@retention_hours(...)` comments or a `retention_ttl_hours INT DEFAULT n` column.
+- Multi-line columns, table constraints, `ALTER TABLE`, quoted identifiers, and real Postgres encryption (pgcrypto, TDE) aren't understood.
+- Tables without a retention column default to 720 h in their finding.
 
-#### A5 🟠 Closed-world file list
-`readTargetRepoFiles()` iterates over `INITIAL_REPO_FILES` (5 fixed paths). New files added to `target-repo/` are never scanned, and the tool can't be pointed at another repository or Git URL. The README's positioning as a repo-wide scanner ("hundreds of commits per week") doesn't hold.
+#### A4 🟠 ◐ No real taint tracking
+**Improved:** all logging sinks (`logger.*`, `logging.*`, `console.*`, `print`) and every leaking call are examined, not just the first `logger.info`.
+**Still open:** the "taint analysis" in the docstring is substring matching of PII-looking names inside the unparsed call (`astAnalyzer.ts:607–616`). Re-probe:
+- `x = payload.ssn; logger.info(f"rec {x}")` → **missed** (false negative).
+- `logger.info(f"email_count={len(rows)}")` → **flagged as a PII leak** (false positive).
+- Any `redact_pii` text in the call still suppresses detection, even if raw PII is also logged.
+
+#### A5 🟠 ⬜ Closed-world file list
+`readTargetRepoFiles()` (`server/analyzer/repoBaseline.ts`) still iterates over the 5 fixed paths in `INITIAL_REPO_FILES`. New files in `target-repo/` are never scanned, and the tool can't be pointed at another repository. Only BYOC accepts arbitrary input, one file at a time.
 
 ### 4.5 Remediation / "CEGIS" PR Synthesis
 
-#### R1 🟠 Whole-file template rewrites, not AST patches
-For each violated node, `synthesizeRemediationPullRequest` swaps the **entire file** for a hard-coded "fixed" version, with only the numbers filled in. Any other code the user added to those files is silently deleted. There's no counterexample-guided loop, no candidate generation, and no LLM involvement, so the "CEGIS" label is inaccurate. `offendingLineStart`/`End` are hard-coded (e.g., 4–14, 10–46).
+#### R1 🟠 ✅ Whole-file rewrites — **Fixed**
+Patches are now value-level edits at analyzer-provided `SourceEditAnchor`s: retention literals, flags, region strings, log arguments, column insertion points. A re-probe confirmed a custom function appended to `api/fastapi_intake.py` survives patching (+17/−5 lines). Calling the 3-round repair loop "CEGIS" is still generous: there's no candidate synthesis, only re-applying fixed rewrite rules.
 
-#### R2 🟡 The "fixed" crypto is still insecure
-`encrypt_with_tenant_kms` returns `f"enc_kms::{tenant_id}::{plaintext[:4]}***"`: no encryption, and it **leaks the first 4 characters** of SSNs. `redact_pii` uses an unsalted, truncated SHA-256, which is easy to brute-force for low-entropy values like SSNs. These are presented as "COMPLIANT" code.
+#### R2 🟡 ⬜ The "fixed" crypto is still insecure
+`TENANT_KMS_HELPER` (`server/remediation/prSynthesizer.ts:21–24`) is inserted into patched files. It returns `f"enc_kms::{tenant_id}::{plaintext[:4]}***"`: no encryption, and it **leaks the first 4 characters** of SSNs. `redact_pii` still uses an unsalted, truncated SHA-256, which is easy to brute-force for low-entropy values. Patched code is still never compiled, type-checked, or tested before being labelled "verified".
 
-#### R3 🟡 Patches change behaviour without saying so
-The AI-triage patch returns `approved: meetsStatutoryConfidence`. Low-confidence cases come back *rejected* (`approved: false`) instead of being routed to a human with the decision pending, which is itself an autonomous adverse decision. The patches are never compiled, type-checked, or run against tests before being labelled "verified".
+#### R3 🟡 ✅ AI-triage semantics — **Fixed**
+The TypeScript patch now changes only the three constants (`0.68 → 0.85`, `false → true` ×2) and leaves the decision logic intact.
 
-#### R4 🟠 No real PR
-`prNumber: 409` and the branch name are constants. Nothing calls the GitHub API, and no branch is pushed. "Apply PR" writes files into `target-repo/` and commits to a private `data/sandbox-git` repository. The "GitHub Repository & PR Automation MCP" listed in `/api/mcp/servers` is a descriptor only.
+#### R4 🟠 ⬜ No real PR
+`prNumber: 409` and the branch name are still constants. Nothing calls the GitHub API. "Apply PR" writes into `target-repo/` and commits to the private `data/sandbox-git` repository.
 
-#### R5 🟡 First clause per category wins
-Patch parameters come from `clauses.find(c => c.category === …)`. With several retention clauses (the API's `unshift` makes this easy), the patch follows the first one, not the strictest. Combined with V1, the result is false "READY_TO_MERGE" PRs (confirmed by probe).
+#### R5 🔵 ◐ First clause per category sets initial parameters
+The first-pass patch still takes `maxHours`, `minAiConf`, and `allowedRegion` from `clauses.find(...)`. The repair loop now fixes the probe case afterwards, which is why the severity is lowered. Two limits remain:
+- **Region choice:** `allowedRegion` is always `allowedDataRegions[0]`.
+- **Conflicting clauses:** clauses that contradict each other (e.g. two different regions) give up after 3 rounds, yet the PR is still marked `READY_TO_MERGE` (see V1).
 
-### 4.6 BYOC Custom Scanner (`executeByocCustomScan`)
+### 4.6 BYOC Custom Scanner (`executeByocCustomScan`, `server/enterprise/enterpriseSuite.ts:259`)
 
-#### B1 🟡 Fixed category, defaults to a violation
-The scanner always compiles as `RETENTION_AND_TENANT_KMS`. If no TTL-like constant is found, `detectedTtlHours` defaults to **720**. A two-line `def f(x): return x` was reported `UNSAT_VIOLATION: Configured TTL (720h) exceeds contractual mandate (48h)` (probe). The `language` parameter is accepted but never used. Detection is regex only; this path never invokes the real AST parsers.
+#### B1 🟡 ◐ One-file scans always fail on default facts
+**Improved:** BYOC now infers categories, compiles them with the real compiler, runs the real analyzer, prover, and synthesizer, and uses the `language` parameter.
+**Still open:** a single file has no SQL table, so the prover falls back to its defaults (720 h Postgres retention, no tenant KMS; see V7). Re-probe:
+- a two-line `def f(x): return x` with a 48 h clause → `UNSAT_VIOLATION` ("Postgres table 'pii_table' retention (720h > 48h)")
+- a cache file with `CACHE_TTL_HOURS = 24` → still `UNSAT_VIOLATION` on that phantom table
 
-#### B2 🟡 Regex rewrite breaks logging
-`/(logger|logging|console)\.(info|…|log)\(([^)]+)\)/g` replaces the arguments of **every** log call in the file with a constant string, including ones without PII. Because `[^)]+` stops at the first `)`, nested calls like `logger.info(fmt(x))` produce broken code.
+#### B2 🟡 ✅ Regex rewrite of every log call — **Fixed**
+The regex rewriter has been replaced by the shared surgical synthesizer.
 
-### 4.7 "Real-World" Runtime Sandbox
+### 4.7 "Real-World" Runtime Sandbox (unchanged)
 
-#### X1 🟠 Not isolated, and TypeScript is never executed
-Besides S2: the TypeScript services aren't executed. The Python runner regex-scans the `.ts` text and **re-implements** the decision logic itself. Both branches of `if human_gate:` are identical (`realWorldSandbox.ts:243`), so the gate flag has no effect. The 0.85 threshold and test confidence 0.78 are hard-coded, as are the test payload and SSN. The results only reflect the bundled fixture.
+#### X1 🟠 ⬜ Not isolated, and TypeScript is never executed
+Besides S2, the TypeScript services aren't executed. The Python runner regex-scans the `.ts` text and **re-implements** the logic. Both branches of `if human_gate:` are identical (`realWorldSandbox.ts:243`). The 0.85 threshold, test confidence 0.78, payload, and SSN are hard-coded. The sandbox still reads fixed paths, so it doesn't follow the analyzer's generalisation.
 
-#### X2 🟡 Different runtimes from what's claimed
-PostgreSQL DDL runs in **SQLite**, which accepts the Postgres types loosely and ignores types and constraints the way Postgres wouldn't. `fastapi` and `pydantic` are replaced by dummy shims when missing, and Redis is a mock object. "Python 3.12" is stated, but whatever `python3` is installed gets used (3.13 here).
+#### X2 🟡 ⬜ Different runtimes from what's claimed
+- **Database:** PostgreSQL DDL runs in SQLite.
+- **Shims:** `fastapi` and `pydantic` are replaced by dummy shims when missing, and Redis is a mock object.
+- **Python version:** "Python 3.12" is stated, but whatever `python3` is installed gets used (3.13 here).
 
-### 4.8 Attestation, Certificates & SARIF
+### 4.8 Attestation, Certificates & SARIF (unchanged)
 
-#### C1 🟠 Ephemeral signing key
-`crypto.generateKeyPairSync('ed25519')` runs at module load (`enterpriseSuite.ts:13`). Every restart creates a new key, so certificates issued earlier can't be verified afterwards, and nothing publishes or pins the key. The issuer string "**Hardware-Backed Root**" is false; the key lives in process memory. There's no X.509, no timestamping authority, and no revocation.
+#### C1 🟠 ⬜ Ephemeral signing key
+`crypto.generateKeyPairSync('ed25519')` runs at module load (`enterpriseSuite.ts:22`). Every restart creates a new key, so earlier certificates can't be verified. The issuer string "**Hardware-Backed Root**" (line 93) is false: the key lives in process memory. There's no X.509, timestamping, or revocation.
 
-#### C2 🟡 Hash naming is misleading
-- **"Merkle audit root"** is `sha256(hash1|hash2|…)`, a flat hash with no tree and no inclusion proofs.
-- **`commitHash`** in reports is `sha256(file contents + commitCounter)[:8]`, not the Git commit hash.
-- **`repositoryName`** is hard-coded to `finhealth-ai/core-platform`.
+#### C2 🟡 ⬜ Hash naming is misleading
+- **"Merkle audit root":** `sha256(hash1|hash2|…)`, a flat hash with no tree.
+- **`commitHash`:** `sha256(file contents + commitCounter)[:8]`, not the Git commit hash.
+- **`repositoryName`:** hard-coded to `finhealth-ai/core-platform`.
 
-#### C3 🟡 SARIF validity
-- `tool.driver.SemanticVersion` should be `semanticVersion`. SARIF property names are case-sensitive.
-- `versionControlProvenance.repositoryUri` is hard-coded to a fictitious repository.
-- `uri` is prefixed `target-repo/`. That only resolves correctly if the scanned repo is this one.
+#### C3 🟡 ⬜ SARIF validity
+- `tool.driver.SemanticVersion` (line 223) should be `semanticVersion`; SARIF property names are case-sensitive.
+- `repositoryUri` (line 230) is hard-coded to a fictitious repository.
+- `uri` is prefixed `target-repo/`, which only resolves correctly for this repo.
+- CI never uploads SARIF.
 
-CI never uploads SARIF (no `github/codeql-action/upload-sarif` step), so the "GitHub Advanced Security" integration isn't wired up.
+#### C4 🟠 ⬜ Certificate claims a conformity standard
+Certificates name the standard `EU-AI-ACT-ART43 / GDPR-ART32 / HIPAA-164.312 / SOC2-CC6.1` and the verdict `SAT_COMPLIANT_CERTIFIED`. Art. 43 conformity assessment is a defined legal procedure: internal control under Annex VI or a notified body under Annex VII, with technical documentation and a quality management system. A SOC 2 report must come from a licensed CPA firm. A self-signed demo certificate shouldn't be labelled this way.
 
-#### C4 🟠 Certificate claims a conformity standard
-Certificates name the standard `EU-AI-ACT-ART43 / GDPR-ART32 / HIPAA-164.312 / SOC2-CC6.1` and the verdict `SAT_COMPLIANT_CERTIFIED`. Art. 43 conformity assessment is a defined legal procedure: internal control under Annex VI or a notified body under Annex VII, with technical documentation and a quality management system. A SOC 2 report must be issued by a licensed CPA firm. A self-signed demo certificate built on the limitations above shouldn't be labelled this way.
+### 4.9 AI / Agents / RAG / Token Optimisation (unchanged)
 
-### 4.9 AI / Agents / RAG / Token Optimisation (Claims vs. Implementation)
+#### AI1 🟠 ⬜ The 6-agent crew isn't implemented
+`buildMultiAgentExecutionReport` (`server/agents/multiAgentOrchestrator.ts`) returns a static array. Framework names (CrewAI, DSPy, LangGraph, Pydantic-AI, Swarm, Hermes), models, token counts, latencies, and `status: 'COMPLETED'` are all literals. The only real LLM use in the codebase is Ollama/OpenAI in the RAG answer, the multi-model demo endpoint, and the new compiler fallback. `AGENTS.md` §2 describes an architecture that isn't in the code.
 
-#### AI1 🟠 The 6-agent crew isn't implemented
-`buildMultiAgentExecutionReport` (`server/agents/multiAgentOrchestrator.ts`) returns a **static array**. Framework names (CrewAI, DSPy, LangGraph, Pydantic-AI, Swarm, Hermes), models (Claude 3.7 Sonnet, DeepSeek-R1, GPT-4o, Gemini 2.5 Flash, Llama-3.3-70B), token counts (640 → 185…), latencies (18.4 ms…), and `status: 'COMPLETED'` are all literals. None of those frameworks is a dependency, and no model is called. `AGENTS.md` §2 describes an architecture that isn't in the code.
+#### AI2 🟠 ⬜ Default "384-d neural embeddings" are a keyword bag
+`computeSemanticEmbedding` (`server/rag/hybridRagEngine.ts`) counts keyword hits across 16 "domain dimensions" and reports `embeddingDimension: 384`. Real Ollama embeddings are only used to *re-score* the top-K chunks the keyword path already picked, sequentially, one HTTP call per chunk. pgvector, Neo4j, HyDE, and CRAG are display strings or fixed rules.
 
-#### AI2 🟠 Default "384-d neural embeddings" are a keyword bag
-`computeSemanticEmbedding` (`server/rag/hybridRagEngine.ts`) counts keyword hits across **16** hand-picked "domain dimensions" and reports `embeddingDimension: 384`. Real Ollama `all-minilm` embeddings are only used in `executeRealNeuralRagQuery`, and only to *re-score* the top-K chunks the keyword path already picked, so they never change recall. They're computed sequentially, one HTTP call per chunk. The README's pgvector (HNSW) and Neo4j 2-hop Cypher traversal aren't there: Cypher appears only as display strings, and the "vector store" SQLite table is only ever `COUNT(*)`-ed. HyDE is one of 4 fixed SMT strings picked by keyword. CRAG is a threshold label.
+#### AI3 🟠 ⬜ RAGAS metrics are constants
+`contextPrecision: 0.964, contextRecall: 0.982, faithfulness: 0.991, …` are literals. The test suite asserts `faithfulness > 0.95`, which only tests the constant.
 
-#### AI3 🟠 RAGAS metrics are constants
-`contextPrecision: 0.964, contextRecall: 0.982, faithfulness: 0.991, answerRelevance: 0.975, …` are literals. The test suite asserts `faithfulness > 0.95`, which tests a constant. No evaluation dataset or judge exists.
-
-#### AI4 🟡 Token-savings benchmark is inflated by design
+#### AI4 🟡 ⬜ Token-savings benchmark is inflated by design
 `runTokenOptimizationBenchmark` (`server/optimization/tokenOptimizer.ts:134–153`):
-- **Baseline inflated ×4:** the raw token count is `ceil(len/3.6) * 4` ("simulate amplification").
-- **Fixed ratios:** dedup is a fixed `× 0.78` and KV-cache is a fixed `× 0.34`; no deduplication or caching takes place.
-- **Heuristic tokens and constant latencies:** token counts use a chars/3.6 heuristic rather than a tokenizer, and `latencySavedMs` values are constants.
+- multiplies the raw token baseline by 4 ("simulate amplification")
+- applies dedup as a fixed `× 0.78` and KV caching as a fixed `× 0.34`
+- counts tokens with a chars/3.6 heuristic
+- reports constant latency savings
 
-The reported ">75 % reduction" mostly comes from these assumptions. "Codeburn" just trims lines, removes comment-only lines, and **drops Python indentation**, so its output isn't valid Python. "Caveman/LLMLingua-2" is a stop-word filter.
+"Codeburn" drops Python indentation, so its output isn't valid Python.
 
-#### AI5 🟡 LLM fallbacks fabricate telemetry
-When Ollama is unreachable, `runRealLlmInference` returns `tokensPerSecond: 65.0`, `promptTokens: 64`, `completionTokens: 42`, and text like "Verification complete." The UI shows these the same way as real inference. The default "general counsel" model is the same 0.5 B coder model, so legal reasoning quality is very limited even when Ollama is running.
+#### AI5 🟡 ⬜ LLM fallbacks fabricate telemetry
+When Ollama is unreachable, `runRealLlmInference` returns `tokensPerSecond: 65.0`, fixed token counts, and placeholder text. The UI shows these exactly like real inference.
 
-### 4.10 MCP Servers
+### 4.10 MCP Servers (unchanged)
 
-#### M1 🟡 Not protocol-compliant
-- **HTTP RPC:** `POST /api/mcp/:serverId/rpc` ignores `method`. It always does `tools/call` and supports neither `initialize` nor `tools/list`. It returns a wrapper object, not a bare JSON-RPC response, and makes up its own `id` instead of echoing the client's.
+#### M1 🟡 ⬜ Not protocol-compliant
+- **HTTP RPC:** `POST /api/mcp/:serverId/rpc` ignores `method` (always `tools/call`, no `initialize` or `tools/list`). It returns a wrapper instead of a JSON-RPC response and invents its own `id`.
 - **Unknown server or tool:** returns `isError: false` with empty output.
-- **SSE:** `GET …/sse` writes one `notifications/initialized` event and closes the stream, so it can't serve as a transport.
-- **stdio:** unknown methods get no response at all (the spec expects `-32601`), and every error is reported as `-32700` (parse error) with `id: null`.
-- **Spec version:** the result uses `structuredOutput`, which isn't a field in protocol `2025-03-26` (later versions use `structuredContent`).
-- **SDK:** the official `@modelcontextprotocol/sdk` isn't used. There's no capability negotiation, input validation against `inputSchema`, cancellation, or progress.
-- **External servers:** the 6 "integrated external MCP servers" (pgvector, Neo4j, GitHub, DuckDB, n8n…) are static descriptors.
+- **SSE:** writes one event and closes the stream.
+- **stdio:** unknown methods get no response, and every error is `-32700` with `id: null`.
+- **Spec version:** results use `structuredOutput`, which isn't a field in protocol `2025-03-26`.
+- **SDK:** the official SDK isn't used.
 
-#### M2 🔵 Stdio server state
-`invokeMcpTool` without `activeClauses` uses `getInitialClauses()`, so stdio clients never see amended clauses.
+#### M2 🔵 ⬜ Stdio server state
+The stdio server uses `getInitialClauses()`, so clients never see amended clauses.
 
 ### 4.11 Architecture, State & Scalability
 
-#### P1 🟠 Global, volatile, single-tenant state
-`activeClauses`, `activeAmendmentLabel`, and `commitCounter` are module-level variables in `server/index.ts`. Every user shares and mutates one global state, there's no locking around concurrent file writes and Git commits, and all clause edits are lost on restart. Nothing models users, tenants, projects, or multiple repositories.
+#### P1 🟠 ⬜ Global, volatile, single-tenant state
+`activeClauses`, `activeAmendmentLabel`, and `commitCounter` are module-level variables in `server/index.ts`. There's no locking around concurrent file writes and Git commits, and everything is lost on restart.
 
-#### P2 🟡 Expensive, side-effecting reads
-`GET /api/state`, `/api/enterprise/certificate`, and `/api/enterprise/sarif` each re-read files, spawn `python3` for each Python file, run Z3 for all clauses, run Z3 *again* for the post-patch check, and **write a row to the SQLite ledger**. `/api/ai-heavy/overview` and `/api/rag/query` repeat the parsing and Z3 work, without the ledger write. Each ledger write is a separate `python3` subprocess. A `GET` therefore mutates persistent state, which inflates the audit ledger on every UI refresh.
+#### P2 🟡 ⬜ Expensive, side-effecting reads (heavier)
+`GET /api/state`, `/api/enterprise/certificate`, and `/api/enterprise/sarif` each:
+- re-read the files and run Z3 for every clause
+- run the synthesizer, which now re-analyzes and re-verifies **up to 4 times** (initial plus 3 repair rounds)
+- **write a row to the SQLite ledger**
 
-#### P3 🔵 Z3 context lifecycle
-`new Context('lexcompiler_prover')` is created on every verification call and never released. In a long-running server this can grow WASM memory. There's also no solver timeout (`solver.set('timeout', …)`).
+`/api/ai-heavy/overview` and `/api/rag/query` repeat the parsing and Z3 work without the ledger write.
+
+#### P3 🔵 ⬜ Z3 context lifecycle
+`new Context('lexcompiler_prover')` is still created on every verification call, now up to 5 times per report, and never released. No solver timeout is set.
 
 ### 4.12 Testing & CI
 
-#### T1 🟠 Thin, tautological test suite
-- **Coverage:** one file (`server/lexcompiler.test.ts`) with 5 tests, all happy-path against the bundled fixture.
-- **Tautological assertions:** the tests check `postPatchZ3Status === 'SAT_COMPLIANT'` (always true, V1), `ragasMetrics.faithfulness > 0.95` (a constant, AI3), `totalReductionPercent > 75` (inflated, AI4), and `steps.length === 6` (static, AI1).
-- **Untested paths:** negative cases, parser edge cases, Bangla edge cases, HTTP endpoints, MCP stdio, and SARIF schema validation.
-- **Frontend:** no tests at all.
+#### T1 🟠 ⬜ Thin test suite
+Still one file (`server/lexcompiler.test.ts`, unchanged by PRs #18–#25) with 5 happy-path tests:
+- **No coverage for the new code:** none of the new behaviour has a test (unit parsing, category inference, unsat cores, anchors, repair loop, BYOC pipeline, LLM fallback).
+- **Constant assertions:** the RAGAS, token-reduction, and agent-count assertions still check constants (AI1, AI3, AI4).
+- **No negative cases, no endpoint tests, no frontend tests.**
 
-#### T2 🟡 Type errors and no linting
-`npx tsc -p tsconfig.json --noEmit` fails with 2 errors (`<strike>` isn't a valid JSX intrinsic in `src/components/McpAndAgentsHub.tsx:409`). `vite build` doesn't type-check, so CI passes anyway. There's no ESLint or Prettier config, and `.cursorrules`' "strict TypeScript" rule isn't enforced. The server build emits `dist-server/`, but `npm start` runs `tsx server/index.ts` from source, so the compiled output is never used.
+#### T2 🔵 ◐ Type-check & lint
+**Fixed:** the client type errors (`<strike>` → `<s>`); `tsc --noEmit` now passes for both projects.
+**Still open:** CI still doesn't run a type-check (`vite build` skips it), and there's no ESLint/Prettier config.
 
-#### T3 🟡 The "gate" doesn't gate
-`cli-verify.ts` prints verdicts and always exits `0`. `cli-realworld-demo.ts` fails only if no PR is synthesized; it never fails when violations remain after patching. `AGENTS.md` says to run `npm run verify:cli` before merge, but CI runs `verify:realworld` instead. CI never runs LexCompiler against *this* repository's PR diff either, so it can't block a non-compliant change.
+#### T3 🟡 ⬜ The "gate" doesn't gate
+`cli-verify.ts` always exits `0`. `cli-realworld-demo.ts` fails only if no PR is synthesized. `AGENTS.md` requires `verify:cli`, but CI runs `verify:realworld`, and CI never runs LexCompiler against the PR's own diff.
 
-#### T4 🔵 Destructive CLIs and tests
-`verify:cli`, `verify:realworld`, and the tests call `resetTargetRepoToBaseline()` / `resetTargetRepoGitHistory()`. These overwrite `target-repo/` and delete `data/sandbox-git`, wiping any local edits or demo state.
+#### T4 🔵 ⬜ Destructive CLIs and tests
+`verify:cli`, `verify:realworld`, and the tests reset `target-repo/` and delete `data/sandbox-git`.
 
-### 4.13 Deployment & Operations
+### 4.13 Deployment & Operations (unchanged)
 
-#### D1 🟡 Container gaps
-- **Missing service:** no Ollama service in `docker-compose.yml`, so LLM and embedding paths always fall back (AI5).
-- **No volume:** `data/` (the SQLite ledger and sandbox Git) isn't mounted, so it's lost when the container is recreated.
+#### D1 🟡 ⬜ Container gaps
+- **Missing service:** no Ollama in `docker-compose.yml`, so the LLM paths, including the new compiler fallback, always fall back.
+- **No volume:** `data/` isn't mounted, so the ledger and sandbox Git are lost when the container is recreated.
 - **Build and runtime:** the image uses `npm install` instead of `npm ci`, ships devDependencies, and runs as root (which makes S1/S2 worse).
-- **Unused tooling:** Git is installed only for the internal sandbox repo.
-- **No ops basics:** no configuration surface besides `PORT`/`OLLAMA_HOST`, no structured logging, metrics, or rate limiting.
 
-#### D2 🔵 Health check is static
-`/api/health` always returns `status: 'ok'`, `z3Solver: 'ready'`, `mcpServersOnline: 6` without checking Z3, Python, or Ollama. The Docker `HEALTHCHECK` therefore can't detect a broken dependency.
+#### D2 🔵 ⬜ Health check is static
+`/api/health` always returns `status: 'ok'` without checking Z3, Python, or Ollama.
 
-### 4.14 Documentation & Positioning
+### 4.14 Documentation & Positioning (unchanged)
 
-#### DOC1 🟠 Docs describe a different system
-The README and `AGENTS.md` claim CEGIS, minimal unsat cores, OPA evaluation, pgvector + BM25 RRF, Neo4j Graph RAG, RAGAS evaluation, LLMLingua-2, KV-cache pinning, CrewAI/DSPy/LangGraph agents, and "opens PR #409". As sections 4.2–4.10 show, most of these are labels on deterministic templates or constants. The models named in `AGENTS.md` (Claude 3.7 Sonnet, GPT-4o, Gemini 2.5 Flash) are outdated and also unused. Nothing tells users which outputs are simulated.
+#### DOC1 🟠 ⬜ Docs describe a different system
+README and `AGENTS.md` still claim the 6-agent crew, OPA evaluation, pgvector + Neo4j Graph RAG, RAGAS evaluation, LLMLingua-2, KV-cache pinning, and "opens PR #409". The new genuine features aren't documented: unsat cores, surgical patches, the repair loop, and LLM fallback provenance.
 
-#### DOC2 🔵 Housekeeping
+#### DOC2 🔵 ⬜ Housekeeping
 - **No license file:** the README says "MIT License", but there's no `LICENSE` file.
 - **Inconsistent naming:** `package.json` is named `justicesphere-complianceos`, not LexCompiler.
-- **Unstated assumptions:** the README's prerequisites don't mention that the system assumes the bundled target repo.
 
 ### 4.15 Frontend
 
-#### U1 🔵 UI maintainability and accessibility
-- **Accessibility:** only 2 `aria-*`/`role` attributes across the UI.
-- **Large components:** `App.tsx` is ~720 lines and `IdeRemediationDrawer.tsx` ~690 lines, with hand-rolled `fetch` calls and no shared data layer or request cancellation.
-- **Hard-coded UI text:** `#409` is baked into several components (`App.tsx`, `IdeRemediationDrawer.tsx`, `EnterpriseStartupSuite.tsx`, `McpAndAgentsHub.tsx`), and the merge toast always claims 100 % compliance (see V1).
-- **Bundle:** the client is a single ~367 KB JS chunk with no code splitting.
+#### U1 🔵 ⬜ UI maintainability and accessibility
+- **Accessibility:** minimal `aria-*`/`role` usage.
+- **Large components:** `App.tsx` is now ~780 lines (it grew in PR #24 with the collapsible sidebar).
+- **Hard-coded text:** `#409` is still baked into several components, and the merge toast always claims 100 % compliance (see V1).
+- **Bundle:** a single JS chunk with no code splitting.
 
 ---
 
 ## 5. Recommendations (Prioritised)
 
 **P0 — Fix before anyone else runs this**
-1. Fix V1: report `allResolved ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION'`, set `status` from it, and refuse to "apply PR" unless the post-patch check passes. Add a test where the gate must fail.
-2. Lock down the server: confine `writeTargetRepoFile` to `target-repo/` (resolve, then check the prefix) and restrict it to known files. Add authentication, restrict CORS, and bind to `127.0.0.1` by default.
-3. Run target code only inside a real sandbox (an unprivileged container or gVisor/nsjail/Firecracker with no network), or drop runtime execution.
-4. Label demo content clearly: mark invented "statute" excerpts and fallback feed items as **illustrative**, remove the "Hardware-Backed" and "CERTIFIED" wording, and show which metrics are simulated.
+1. **Lock down the server (S1–S3):**
+   - confine `writeTargetRepoFile` to `target-repo/` (resolve, then check the prefix) and to known files
+   - add authentication
+   - restrict CORS and bind to `127.0.0.1` by default
+2. **Sandbox or drop runtime execution (S2):** run target code only in a real sandbox (an unprivileged container or gVisor/nsjail with no network), or remove it.
+3. **Finish V1:**
+   - derive `status` from `postPatchZ3Status`
+   - fill in `unresolvedClauseIds`
+   - generate the summary from the actual result
+   - make `/api/remediation/apply-pr` refuse an unresolved PR
+   - show the real result in the UI toast
+4. **Label demo content (L4, C1, C4):** mark the invented "statute" excerpts and fallback feed items as **illustrative**, and remove the "Hardware-Backed" and "CERTIFIED" wording.
 
 **P1 — Make the verification honest**
-5. Get unsat cores and models from Z3 (`assert_and_track` / `solver.unsatCore()`, `solver.model()`), and hash the formula that was actually solved (or build it from one SMT-LIB2 source with `Z3.parseSMTLIB2`).
-6. Evaluate the generated Rego with OPA (WASM or the `opa eval` CLI), or stop reporting "OPA denials".
-7. Handle `unknown` explicitly, set solver timeouts, and pick one safe default for missing facts ("unknown / needs review" instead of compliant or violated).
-8. Iterate over *all* findings and tables, and build the graph from the analysis.
+5. **Units and expressions (A2):** constant-fold Python and TypeScript expressions (`24 * 30`), and convert by unit suffix (`_SECONDS`, `_DAYS`) using the existing `hoursPerUnit` field.
+6. **Missing facts (V7, B1):** handle missing constructs as "not applicable / needs review" rather than defaulting to 720 h. This fixes BYOC false violations. Treat `unknown` separately and set a solver timeout.
+7. **Law-parser bounds (L1, L5):**
+   - choose the bound attached to the regulated subject, or the strictest one, instead of the first number
+   - detect negation ("need not", "is permitted")
+   - validate LLM output ranges, and require confirmation for `LLM_JSON_FALLBACK` / `DETERMINISTIC_DEFAULT` axioms
+8. **Rego and SMT text (V4, V5):** evaluate the generated Rego with OPA, or stop reporting "OPA denials". Hash and display the formula that was actually solved.
+9. **Cover every instance (V8):** verify every finding of each construct type, not only the first.
 
 **P2 — Generalise beyond the fixture**
-9. Replace regex law extraction with a structured pipeline: an LLM or classical NLP with a schema-validated IR, number-word and unit normalisation, negation and exception handling, and human review of the extracted parameters before they become axioms.
-10. Use real parsers (Tree-sitter, or `pglast`/`libpg_query` for Postgres) and add basic constant folding and data-flow or taint analysis. Make detection rules configurable instead of keyed to file names.
-11. Scan any repository (directory walk or Git URL) and produce minimal AST-level edits that keep surrounding code. Then compile, type-check, and test the patched code.
-12. Use a persistent signing key (KMS/HSM or at least a configured key file), publish it, and drop the endpoint that verifies against a caller-supplied key.
+10. **Arbitrary repos (A5):** scan any directory or Git URL instead of `INITIAL_REPO_FILES`.
+11. **Real analysis (A3, A4):** use real parsers (Tree-sitter, `libpg_query`) and basic intra-procedural data flow for PII.
+12. **Signing key (C1, S4):** use a persistent key (KMS/HSM or a configured key file), publish it, and drop the endpoint that verifies against a caller-supplied key.
+13. **Insecure helper (R2):** remove `encrypt_with_tenant_kms`'s plaintext prefix, and compile/test patched code.
 
 **P3 — Engineering hygiene**
-13. Replace `execFileSync` with async workers or a long-lived Python process. Make `GET` endpoints free of side effects.
-14. Use the official MCP SDK for stdio and Streamable HTTP.
-15. Add negative and edge-case tests, client type-checking (`tsc --noEmit`) and ESLint in CI, SARIF upload, and non-zero exit codes on violations.
-16. Docker: `npm ci --omit=dev`, a non-root user, a `data/` volume, an optional Ollama service, and a health check that actually tests its dependencies.
-17. Bring the README and `AGENTS.md` in line with what's implemented, and add a `LICENSE` file.
+14. **Responsiveness (S6, P2):** move `execFileSync` to async workers, and make `GET` endpoints free of side effects.
+15. **MCP (M1):** use the official MCP SDK.
+16. **Tests and CI (T1–T3):**
+    - add tests for the PR #18–#25 behaviour and for negative cases
+    - add a client type-check and ESLint to CI
+    - upload SARIF
+    - exit non-zero on remaining violations
+17. **Docker (D1, D2):** `npm ci --omit=dev`, a non-root user, a `data/` volume, an optional Ollama service, and a health check that tests its dependencies.
+18. **Docs (DOC1, DOC2):** bring the README and `AGENTS.md` in line with what's implemented, and add a `LICENSE` file.
 
 ---
 
 ## Appendix A — Probe Results
 
-These came from a temporary Vitest file run against the unmodified source; the file was deleted afterwards.
+These came from a temporary Vitest file run against unmodified source at `51f69ae`; the file was deleted afterwards.
 
 ```text
-"PII must be purged within seventy-two hours."                  -> hours=720 (expected 72)
-"PII must be purged within one week."                           -> hours=720 (expected 168)
-"PII need not use tenant-isolated keys … within 72 hours."      -> tenantKms=true (negation ignored)
-"Backups may be kept 90 days, but PII must be purged within 3 days." -> hours=2160 (expected 72)
-"Retain records 2 years."                                       -> hours=720
-PII_LOGGING_BAN "Logging of email addresses is permitted."      -> forbidPlaintextLogging=true
+Legal compiler
+  "purged within seventy-two hours."                     -> 720h  (DETERMINISTIC_DEFAULT; expected 72)
+  "purged within one week."                              -> 720h  (DETERMINISTIC_DEFAULT; expected 168)
+  "purged within 2 weeks."                               -> 336h  ✓
+  "need not use tenant-isolated keys … within 72 hours"  -> tenantKms=true (negation ignored)
+  "Backups 90 days, but PII purged within 3 days."       -> 2160h (expected 72)
+  PII_LOGGING_BAN "Logging … is permitted."              -> forbidPlaintextLogging=true
 
-Gate tautology (lenient 30-day clause + strict 72h clause):
-  PR.postPatchZ3Status = SAT_COMPLIANT, PR.status = READY_TO_MERGE
-  Actual post-patch re-verification: CLAUSE-DPA-4.2 = UNSAT_VIOLATION
+Prover / remediation (lenient 30-day clause + strict 72h clause)
+  Unsat cores now come from Z3, e.g. CLAUSE-DPA-4.2:
+    [law_max_retention_72h, law_requires_tenant_kms, ast_postgres_retention_720h,
+     ast_postgres_tenant_kms_false, ast_fastapi_tenant_kms_false, ast_redis_ttl_720h]
+  PR.postPatchZ3Status = SAT_COMPLIANT; actual re-verification: all 5 clauses SAT  ✓
+  PR.status = READY_TO_MERGE (hard-coded regardless of result)
+  Custom helper appended to fastapi_intake.py survives patching  ✓ (+17/−5 lines)
+  Patched file still contains `plaintext[:4]` leak
+  AI patch changes only the three constants  ✓
 
-AST evasion: PII_CACHE_TTL_HOURS = 24 * 30   -> read as 24h (actual 720h) => false COMPLIANT
-Path traversal: '../server/index.ts'          -> /home/user/LexCompiler/server/index.ts
-BYOC on `def f(x): return x` with 48h clause -> UNSAT_VIOLATION ("Configured TTL (720h) exceeds 48h")
+AST analysis
+  PII_CACHE_TTL_HOURS = 24 * 30       -> 24h   (actual 720h)  => false COMPLIANT
+  SESSION_TTL_SECONDS = 3600          -> 3600h (actual 1h)    => false VIOLATION
+  x = payload.ssn; logger.info(x)     -> not detected (false negative)
+  logger.info(f"email_count=…")       -> flagged as PII leak (false positive)
+
+Security
+  '../server/index.ts'                -> /home/user/LexCompiler/server/index.ts
+
+BYOC
+  `def f(x): return x` + 48h clause            -> UNSAT_VIOLATION (phantom Postgres 720h)
+  `CACHE_TTL_HOURS = 24` cache file + 48h      -> UNSAT_VIOLATION (phantom Postgres 720h)
 ```
 
-## Appendix B — Build & Test Status Observed
+## Appendix B — Build & Test Status Observed (`51f69ae`)
 
 | Command | Result |
 | :--- | :--- |
 | `npm ci` | ✅ |
 | `npm test` (vitest) | ✅ 5/5 passed |
 | `tsc -p tsconfig.server.json --noEmit` | ✅ |
-| `tsc -p tsconfig.json --noEmit` (client) | ❌ 2 errors (`McpAndAgentsHub.tsx:409`, `<strike>`) |
-| `vite build` | ✅ (≈367 KB JS, no type-check) |
+| `tsc -p tsconfig.json --noEmit` (client) | ✅ (was ❌ at `b91b223`) |
+| `vite build` | ✅ |
