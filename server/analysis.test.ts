@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyzeFullRepositoryAsync, parseSqlSchemaFile } from './analyzer/astAnalyzer.js';
 import { INITIAL_REPO_FILES } from './analyzer/repoBaseline.js';
-import { runTreeSitterQueries } from './analyzer/treeSitter.js';
+import { runTreeSitterQueries, treeSitterQueriesFor } from './analyzer/treeSitter.js';
 import { compileLegalProseToFormalPolicy, getInitialClauses, mergeLlmBounds, extractDeonticBoundsFromProse } from './compiler/legalCompiler.js';
 import { executeByocCustomScan } from './enterprise/enterpriseSuite.js';
 import { verifyRepositoryAgainstClauses } from './prover/z3Engine.js';
@@ -163,5 +163,17 @@ describe('tree-sitter structural queries', () => {
     expect((await runTreeSitterQueries(logging.compiled.astPatternQuery, files)).some((m) => m.captures.method === 'info')).toBe(true);
     expect((await runTreeSitterQueries(ai.compiled.astPatternQuery, files)).map((m) => m.captures.name)).toContain('MIN_CONFIDENCE_FOR_AUTO_APPROVAL');
     expect((await runTreeSitterQueries(egress.compiled.astPatternQuery, files))[0].captures.value).toBe('"us-east-1"');
+  });
+
+  it('runs SQL DDL queries with the SQL grammar', async () => {
+    const clauses = getInitialClauses();
+    const files = fixture();
+    const sqlOnly = (m: { language: string }) => m.language === 'sql';
+    const retention = (await runTreeSitterQueries(clauses[0].compiled.astPatternQuery, files)).filter(sqlOnly);
+    expect(retention).toEqual([expect.objectContaining({ filePath: 'schema/postgres_pii.sql', captures: { name: 'retention_ttl_hours', value: '720' } })]);
+    const fks = (await runTreeSitterQueries(treeSitterQueriesFor('RIGHT_TO_ERASURE_CASCADE'), files)).filter(sqlOnly);
+    expect(fks[0].captures).toMatchObject({ column: 'patient_id', parent: 'patient_records', action: 'CASCADE' });
+    const cols = (await runTreeSitterQueries(treeSitterQueriesFor('ENCRYPTION_AT_REST'), files)).filter(sqlOnly).map((m) => m.captures.name);
+    expect(cols).toEqual(expect.arrayContaining(['full_name', 'email', 'ssn', 'diagnosis_code']));
   });
 });

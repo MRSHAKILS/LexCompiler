@@ -8,7 +8,7 @@
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite --port 5173 --host",
-    "build": "vite build && tsc -p tsconfig.server.json",
+    "build": "vite build && tsc -p tsconfig.server.json && node -e \"require('fs').cpSync('server/analyzer/grammars','dist-server/server/analyzer/grammars',{recursive:true})\"",
     "start": "node dist-server/server/index.js",
     "test": "vitest run",
     "verify:cli": "tsx server/cli-verify.ts",
@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "lint": "eslint .",
     "sarif": "tsx server/cli-sarif.ts",
-    "setup:sandbox": "tsx server/cli/setup-sandbox.ts"
+    "setup:sandbox": "tsx server/cli/setup-sandbox.ts",
+    "build:sql-grammar": "tsx server/cli/build-sql-grammar.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.8",

@@ -174,6 +174,17 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **Wiring:** `/api/rag/query`, the AI overview and the MCP RAG tool use the store-backed pipeline. `vectorDbBackend` and `graphDbBackend` report the backend that actually served the query.
 - **Tests:** `server/rag.test.ts` covers the pgvector ordering, refreshes and deletions, more than 40 results, and dimension checks. It also proves that the store-backed pipeline (pgvector plus the Cypher graph store) ranks exactly as the in-process pipeline does, and that a cross-encoder decides the final order.
 
+### Step 14 · Tree-sitter SQL grammar (L-11)
+- **Grammar:** `server/analyzer/grammars/tree-sitter-sql.wasm` is built from the C sources of `@derekstride/tree-sitter-sql@0.3.11` with clang (wasm32) and wasm-ld, as a position-independent side module.
+  - **Rebuild:** `npm run build:sql-grammar` reproduces the file byte for byte (sha256 `3a9005e3…220d`).
+  - **What the build runs:** it only uses `npm pack --ignore-scripts`, so nothing from the package is executed. The libc functions the grammar calls are imported from the Tree-sitter runtime.
+- **Queries:** SQL sections (`;; @language sql`) now run over `schema/*.sql`:
+  - retention columns and their defaults;
+  - PII and key columns per table, for encryption at rest;
+  - `REFERENCES … ON DELETE <action>` foreign keys, for erasure cascades.
+- **Build:** `npm run build` copies the grammar into `dist-server`.
+- **Test:** `server/analysis.test.ts` checks the retention default (720), the PII columns, and the `patient_id → patient_records ON DELETE CASCADE` foreign key.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -190,7 +201,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-8 | **Hardware-backed signing (C1)** | No KMS/HSM available | The key now persists in a file or an env PEM and is published (Step 4). Remaining: keep the Ed25519 key in AWS KMS / Cloud KMS / an HSM, and add RFC 3161 timestamping and revocation. |
 | L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | TypeScript now runs for real under Node's permission model, and Python under rlimits (Steps 1, 7). Remaining: run both in an unprivileged container (or gVisor/nsjail/Firecracker) with no network access. |
 | L-10 | **Real PostgreSQL execution (X2)** | — | ✅ Done (Step 12). Optional local check: run `verify:realworld` with `LEXCOMPILER_POSTGRES_URL` and `LEXCOMPILER_REDIS_URL` pointing at real servers. |
-| L-11 | **Tree-sitter queries (L3)** | The WASM grammar bundle has no SQL grammar | Python and TypeScript queries now run for real (Step 9). Remaining: add a SQL grammar (e.g. `tree-sitter-sql` built to WASM) and run DDL queries over `schema/*.sql` instead of matching embedded `CREATE TABLE` strings. |
+| L-11 | **Tree-sitter queries (L3)** | — | ✅ Done (Steps 9, 14): Python, TypeScript and SQL grammars. |
 | L-12 | **External MCP servers** (postgres-pgvector, neo4j-cypher, github, filesystem, duckdb, n8n) | The services aren't available here | Run and wire each server, then list them as integrated once they answer `initialize`. |
 | L-15 | **GitHub code-scanning upload** | Enabling code scanning is a repository setting | CI already produces `lexcompiler.sarif`. Enable code scanning, add `security-events: write`, and add `github/codeql-action/upload-sarif` for scans of real repositories (not the intentionally non-compliant fixture). |
 | L-16 | **Symbolic program semantics (V3)** | Needs a symbolic-execution or abstract-interpretation engine over Python/TypeScript | Today Z3 proves bounds over facts the analyzer extracts (constants, taint, sinks). Remaining: encode control flow and data flow (paths, branches, inter-procedural calls) as SMT, so properties are proven over program behaviour rather than extracted facts. |

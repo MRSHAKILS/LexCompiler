@@ -211,7 +211,7 @@ Each compiled clause carries a Rego v1 policy. When an `opa` binary is on `PATH`
 
 ### Tree-sitter Structural Queries
 
-`astPatternQuery` holds real Tree-sitter queries for the Python and TypeScript grammars (WASM, from `@vscode/tree-sitter-wasm`). The scan report returns their matches per clause in `structuralQueryMatches`.
+`astPatternQuery` holds real Tree-sitter queries for the Python and TypeScript grammars (WASM, from `@vscode/tree-sitter-wasm`) and the SQL grammar (`server/analyzer/grammars/tree-sitter-sql.wasm`, rebuilt with `npm run build:sql-grammar`, which needs clang and wasm-ld). The scan report returns their matches per clause in `structuralQueryMatches`.
 
 ### Opening Remediation Pull Requests on GitHub
 
