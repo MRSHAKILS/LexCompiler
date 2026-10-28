@@ -106,13 +106,13 @@ Five issues matter most:
 Calling this a "sandbox" overstates it. There is no container, seccomp, user namespace, or resource limit beyond a 5 s timeout.
 
 #### S3 🔴 No authentication; permissive CORS
-None of the ~25 endpoints check identity or authorization. `app.use(cors())` (`server/index.ts:63`) lets any web page the user visits call the local server. That includes the state-changing endpoints: file writes, repo reset, applying PRs, Git commits, and changing clauses.
+None of the 26 endpoints check identity or authorization. `app.use(cors())` (`server/index.ts:63`) lets any web page the user visits call the local server. That includes the state-changing endpoints: file writes, repo reset, applying PRs, Git commits, and changing clauses.
 
 #### S4 🟠 Signature verification accepts an attacker key
 `POST /api/enterprise/verify-signature` takes an optional `publicKeyPem` and verifies against it (`server/enterprise/enterpriseSuite.ts`, `verifyEd25519CertificateSignature`). A forger signs any payload with their own key and supplies that key, and the endpoint returns `verified: true`. There is no trust anchor, key pinning, or certificate chain.
 
 #### S5 🟡 Cloud API key passes through the backend
-The UI (`src/components/LiveMultiLlmMeshStudio.tsx:49,96`) sends a user-typed OpenAI key in the JSON body of `/api/llm/generate`. Combined with S3, the key travels to an unauthenticated server. Error paths that echo `String(err)` back to the client could leak request details.
+The UI (`src/components/LiveMultiLlmMeshStudio.tsx:49,96`) sends a user-typed OpenAI key in the JSON body of `/api/llm/generate`. Combined with S3, the key travels through an unauthenticated server that any web page can call. Prefer sending it from the browser directly, or storing it server-side.
 
 #### S6 🟡 Event-loop blocking → DoS
 `execFileSync('python3', …)` is used for AST parsing (3 s timeout), the sandbox (5 s), and every SQLite ledger read and write (3 s). These calls are synchronous, so each request blocks the whole Node process. A handful of concurrent `GET /api/state` or `/api/sandbox/verify-runtime` calls stalls the server for every user.
@@ -124,7 +124,7 @@ The UI (`src/components/LiveMultiLlmMeshStudio.tsx:49,96`) sends a user-typed Op
 ```ts
 postPatchZ3Status: allResolved ? 'SAT_COMPLIANT' : 'SAT_COMPLIANT',
 ```
-`status` is always `'READY_TO_MERGE'` (line 383), `prePatchZ3Status` is always `'UNSAT_VIOLATION'`, and the executive summary always says "all invariants transition from UNSAT → SAT". The probe added a lenient 30-day clause next to the 72-hour clause. The PR reported `SAT_COMPLIANT / READY_TO_MERGE`, but re-verification showed `CLAUSE-DPA-4.2: UNSAT_VIOLATION`. This breaks the main guarantee in `AGENTS.md` §3 ("Every synthesized patch MUST pass the Pre-PR Z3 Sandbox Gate").
+`status` is always `'READY_TO_MERGE'` (line 383), `prePatchZ3Status` is always `'UNSAT_VIOLATION'`, and the executive summary always says "all invariants transition from UNSAT → SAT". The probe added a lenient 30-day clause next to the 72-hour clause. The PR reported `SAT_COMPLIANT / READY_TO_MERGE`, but re-verification showed `CLAUSE-DPA-4.2: UNSAT_VIOLATION`. The UI makes it worse: after "Apply PR" it always shows the toast "Microsoft Z3 proved 100% SAT_COMPLIANT" (`src/App.tsx:268–270`), whatever the result. This breaks the main guarantee in `AGENTS.md` §3 ("Every synthesized patch MUST pass the Pre-PR Z3 Sandbox Gate").
 
 #### V2 🟠 Unsat cores and witnesses aren't from Z3
 Assertions are added with plain `solver.add(...)`. Nothing uses `assert_and_track` or named assumptions, and the code never calls `solver.unsatCore()` or `solver.model()`. `unsatCoreAssertions` is filled by `if` statements that repeat the comparison in TypeScript (e.g. `postgresRetentionHours > maxHours`), and some core names are string literals (`'ast_fastapi_logs_plaintext_pii_true'`). `counterexampleWitness` is just the input values. The README's "extracts minimal Unsat Core & Counterexample Witness" isn't implemented. The cores aren't minimal either: Postgres retention and KMS are always reported together.
@@ -179,7 +179,7 @@ The SMT-LIB2, Rego, and "Tree-sitter" queries are string templates with demo ide
 Several texts are presented as real law, with official EUR-Lex/eCFR URLs, but contain obligations the cited instruments don't have:
 - The "EUR-Lex" EU AI Act excerpt adds "Minimum confidence gate 0.88 (88%)". Art. 14 sets no numeric confidence threshold.
 - The "GDPR Art. 17" excerpt says PII must be "purged within 72 hours". GDPR sets no such retention period. The 72 hours in GDPR is the Art. 33 breach-notification deadline.
-- The HIPAA fallback "Federal Register" item ("89 FR 104210 … 72h Cache Purge") is fabricated. When a real Federal Register result has no abstract, the code substitutes a made-up excerpt about 72-hour purging (`legalCompiler.ts:730–732`).
+- The HIPAA fallback "Federal Register" item ("89 FR 104210 … 72h Cache Purge") doesn't match a real rulemaking. Volume 89 is the 2024 volume, but the item is dated 2026-09-18. When a real Federal Register result has no abstract, the code substitutes a made-up excerpt about 72-hour purging (`legalCompiler.ts:730–732`).
 - Clause `version`/`lastAmended` values (e.g., `v2026.4-AMENDED`) are invented.
 
 For a compliance product, users can't tell these demo texts apart from real regulatory text. That risks real legal decisions being made from them.
@@ -254,12 +254,12 @@ PostgreSQL DDL runs in **SQLite**, which accepts the Postgres types loosely and 
 #### C3 🟡 SARIF validity
 - `tool.driver.SemanticVersion` should be `semanticVersion`. SARIF property names are case-sensitive.
 - `versionControlProvenance.repositoryUri` is hard-coded to a fictitious repository.
-- `uri` is prefixed `target-repo/`, and `uriBaseId: '%SRCROOT%'` is used without `originalUriBaseIds`.
+- `uri` is prefixed `target-repo/`. That only resolves correctly if the scanned repo is this one.
 
 CI never uploads SARIF (no `github/codeql-action/upload-sarif` step), so the "GitHub Advanced Security" integration isn't wired up.
 
 #### C4 🟠 Certificate claims a conformity standard
-Certificates name the standard `EU-AI-ACT-ART43 / GDPR-ART32 / HIPAA-164.312 / SOC2-CC6.1` and the verdict `SAT_COMPLIANT_CERTIFIED`. Art. 43 conformity assessment and SOC 2 attestation need notified bodies or licensed auditors. A self-signed demo certificate built on the limitations above shouldn't be labelled this way.
+Certificates name the standard `EU-AI-ACT-ART43 / GDPR-ART32 / HIPAA-164.312 / SOC2-CC6.1` and the verdict `SAT_COMPLIANT_CERTIFIED`. Art. 43 conformity assessment is a defined legal procedure: internal control under Annex VI or a notified body under Annex VII, with technical documentation and a quality management system. A SOC 2 report must be issued by a licensed CPA firm. A self-signed demo certificate built on the limitations above shouldn't be labelled this way.
 
 ### 4.9 AI / Agents / RAG / Token Optimisation (Claims vs. Implementation)
 
@@ -303,7 +303,7 @@ When Ollama is unreachable, `runRealLlmInference` returns `tokensPerSecond: 65.0
 `activeClauses`, `activeAmendmentLabel`, and `commitCounter` are module-level variables in `server/index.ts`. Every user shares and mutates one global state, there's no locking around concurrent file writes and Git commits, and all clause edits are lost on restart. Nothing models users, tenants, projects, or multiple repositories.
 
 #### P2 🟡 Expensive, side-effecting reads
-`GET /api/state` (and `/certificate`, `/sarif`, `/ai-heavy/overview`) re-reads files, spawns `python3` for each Python file, runs Z3 for all clauses, runs Z3 *again* for the post-patch check, and **writes a row to the SQLite ledger**. Each ledger write is a separate `python3` subprocess. A `GET` therefore mutates persistent state, which inflates the audit ledger on every UI refresh.
+`GET /api/state`, `/api/enterprise/certificate`, and `/api/enterprise/sarif` each re-read files, spawn `python3` for each Python file, run Z3 for all clauses, run Z3 *again* for the post-patch check, and **write a row to the SQLite ledger**. `/api/ai-heavy/overview` and `/api/rag/query` repeat the parsing and Z3 work, without the ledger write. Each ledger write is a separate `python3` subprocess. A `GET` therefore mutates persistent state, which inflates the audit ledger on every UI refresh.
 
 #### P3 🔵 Z3 context lifecycle
 `new Context('lexcompiler_prover')` is created on every verification call and never released. In a long-running server this can grow WASM memory. There's also no solver timeout (`solver.set('timeout', …)`).
@@ -320,7 +320,7 @@ When Ollama is unreachable, `runRealLlmInference` returns `tokensPerSecond: 65.0
 `npx tsc -p tsconfig.json --noEmit` fails with 2 errors (`<strike>` isn't a valid JSX intrinsic in `src/components/McpAndAgentsHub.tsx:409`). `vite build` doesn't type-check, so CI passes anyway. There's no ESLint or Prettier config, and `.cursorrules`' "strict TypeScript" rule isn't enforced. The server build emits `dist-server/`, but `npm start` runs `tsx server/index.ts` from source, so the compiled output is never used.
 
 #### T3 🟡 The "gate" doesn't gate
-`cli-verify.ts` and `cli-realworld-demo.ts` print verdicts but exit `0` when violations exist. `AGENTS.md` says to run `npm run verify:cli` before merge, but CI runs `verify:realworld` instead. CI never runs LexCompiler against *this* repository's PR diff either, so it can't block a non-compliant change.
+`cli-verify.ts` prints verdicts and always exits `0`. `cli-realworld-demo.ts` fails only if no PR is synthesized; it never fails when violations remain after patching. `AGENTS.md` says to run `npm run verify:cli` before merge, but CI runs `verify:realworld` instead. CI never runs LexCompiler against *this* repository's PR diff either, so it can't block a non-compliant change.
 
 #### T4 🔵 Destructive CLIs and tests
 `verify:cli`, `verify:realworld`, and the tests call `resetTargetRepoToBaseline()` / `resetTargetRepoGitHistory()`. These overwrite `target-repo/` and delete `data/sandbox-git`, wiping any local edits or demo state.
@@ -352,7 +352,7 @@ The README and `AGENTS.md` claim CEGIS, minimal unsat cores, OPA evaluation, pgv
 #### U1 🔵 UI maintainability and accessibility
 - **Accessibility:** only 2 `aria-*`/`role` attributes across the UI.
 - **Large components:** `App.tsx` is ~720 lines and `IdeRemediationDrawer.tsx` ~690 lines, with hand-rolled `fetch` calls and no shared data layer or request cancellation.
-- **Duplicated constants:** many headline numbers (e.g., `0.991`, `#409`) are repeated as constants in components.
+- **Hard-coded UI text:** `#409` is baked into several components (`App.tsx`, `IdeRemediationDrawer.tsx`, `EnterpriseStartupSuite.tsx`, `McpAndAgentsHub.tsx`), and the merge toast always claims 100 % compliance (see V1).
 - **Bundle:** the client is a single ~367 KB JS chunk with no code splitting.
 
 ---
