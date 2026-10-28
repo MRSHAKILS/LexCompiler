@@ -2,11 +2,20 @@ import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { createTwoFilesPatch } from 'diff';
 import { init as initZ3 } from 'z3-solver';
-import { compileLegalProseToFormalPolicy, sha256Hex } from '../compiler/legalCompiler.js';
+import {
+  compileLegalProseToFormalPolicyAsync,
+  inferRuleCategoryFromProse,
+  sha256Hex,
+} from '../compiler/legalCompiler.js';
+import { analyzeFullRepository } from '../analyzer/astAnalyzer.js';
+import { verifyRepositoryAgainstClauses } from '../prover/z3Engine.js';
+import { synthesizeRemediationPullRequest } from '../remediation/prSynthesizer.js';
 import type {
   ClauseVerificationProof,
   FullComplianceScanReport,
   LegalClause,
+  RuleCategory,
+  TargetRepoFile,
 } from '../../shared/types.js';
 
 // Generate persistent Ed25519 asymmetric keypair for Cryptographic Conformity Attestations
@@ -234,6 +243,19 @@ export function generateSarifReport(
  * Parses arbitrary user-provided contract clauses + arbitrary Python/TS/SQL code,
  * runs Microsoft Z3 formal verification, and synthesizes an instant remediated diff.
  */
+function categoriesForByocScan(text: string): RuleCategory[] {
+  const lower = text.toLowerCase();
+  const cats = new Set<RuleCategory>();
+  cats.add(inferRuleCategoryFromProse(text, 'RETENTION_AND_TENANT_KMS'));
+  if (/log|redact|plaintext|unredacted/.test(lower)) cats.add('PII_LOGGING_BAN');
+  if (/human|confidence|oversight|article 14/.test(lower)) cats.add('AI_HUMAN_IN_THE_LOOP');
+  if (/transfer|cross-border|region|us-east|sovereign/.test(lower)) cats.add('CROSS_BORDER_TRANSFER');
+  if (/erasur|forgotten|cascade|article 17/.test(lower)) cats.add('RIGHT_TO_ERASURE_CASCADE');
+  if (/encrypt/.test(lower)) cats.add('ENCRYPTION_AT_REST');
+  if (/retention|purge|ttl|hours|tenant|kms/.test(lower)) cats.add('RETENTION_AND_TENANT_KMS');
+  return [...cats];
+}
+
 export async function executeByocCustomScan(input: {
   contractClauseText: string;
   citationLabel: string;
@@ -242,107 +264,88 @@ export async function executeByocCustomScan(input: {
   sourceCode: string;
 }) {
   const t0 = performance.now();
-  const { Context } = await getZ3Byoc();
-  const Z3 = new Context('lexcompiler_byoc');
-  const solver = new Z3.Solver();
+  const citation = input.citationLabel || 'Custom Enterprise MSA §4.2';
+  const categories = categoriesForByocScan(input.contractClauseText);
 
-  // 1. Compile custom contract clause
-  const compiled = compileLegalProseToFormalPolicy(
-    input.contractClauseText,
-    'RETENTION_AND_TENANT_KMS',
-    'CLAUSE-BYOC-CUSTOM',
-    input.citationLabel || 'Custom Enterprise MSA §4.2'
+  const clauses: LegalClause[] = [];
+  for (const category of categories) {
+    const compiled = await compileLegalProseToFormalPolicyAsync(
+      input.contractClauseText,
+      category,
+      `CLAUSE-BYOC-${category}`,
+      citation
+    );
+    clauses.push({
+      id: `CLAUSE-BYOC-${category}`,
+      frameworkId: 'ENTERPRISE_DPA',
+      frameworkName: 'Bring-Your-Own-Contract',
+      citation,
+      title: `BYOC ${category}`,
+      severity: 'HIGH',
+      category,
+      rawLegalText: input.contractClauseText,
+      version: 'v-byoc-live',
+      lastAmended: new Date().toISOString().slice(0, 10),
+      deontic: compiled.deontic,
+      compiled: compiled.compiled,
+    });
+  }
+
+  const file: TargetRepoFile = {
+    path: input.fileName,
+    language: input.language,
+    description: 'BYOC custom scan target',
+    content: input.sourceCode,
+    lastModified: new Date().toISOString(),
+  };
+  const analysis = analyzeFullRepository([file]);
+  const verification = await verifyRepositoryAgainstClauses(
+    clauses,
+    analysis.sqlTables,
+    analysis.astFindings
   );
 
-  const requiredMaxHours = compiled.deontic.extractedParameters.maxRetentionHours ?? 72;
+  const primary =
+    clauses.find((c) => c.category === 'RETENTION_AND_TENANT_KMS') || clauses[0];
+  const requiredMaxHours = primary.deontic.extractedParameters.maxRetentionHours ?? 72;
   const requiresTenantKms =
-    compiled.deontic.extractedParameters.requiresTenantIsolatedKeys ?? true;
+    primary.deontic.extractedParameters.requiresTenantIsolatedKeys ?? false;
   const forbidsPlaintextLog =
+    clauses.some((c) => c.deontic.extractedParameters.forbidPlaintextLogging) ||
     /prohibit|never log|shall not log|unredacted|redact|mask/i.test(input.contractClauseText);
 
-  // 2. Inspect custom source code AST / structural patterns
-  const code = input.sourceCode;
-  const ttlMatch =
-    code.match(/(?:TTL_HOURS|RETENTION_HOURS|retention_ttl_hours|ttl_hours)\s*(?:=|:|DEFAULT)\s*(\d+)/i) ||
-    code.match(/(\d+)\s*#\s*hours/i);
-  const detectedTtlHours = ttlMatch ? parseInt(ttlMatch[1], 10) : 720;
+  const ttlFinding = analysis.astFindings.find(
+    (f) => typeof f.metadata.retentionTtlHours === 'number'
+  );
+  const detectedTtlHours = ttlFinding?.metadata.retentionTtlHours ?? 720;
+  const detectedTenantKms = analysis.astFindings.some(
+    (f) => f.metadata.usesTenantIsolatedKms === true
+  );
+  const detectedPlaintextLog = analysis.astFindings.some(
+    (f) => f.metadata.logsPlaintextPii === true
+  );
 
-  const detectedTenantKms =
-    /tenant_kms|encrypt_with_tenant_kms|TENANT_ISOLATED_KMS\s*=\s*True|TENANT_ISOLATED_KMS\s*=\s*true|@tenant_isolated_kms/i.test(
-      code
-    ) && !/TENANT_ISOLATED_KMS\s*=\s*(?:False|false)/.test(code);
-
-  const detectedPlaintextLog =
-    /(?:logger|logging|console)\.(?:info|warn|error|debug|log)\([^)]*(?:ssn|email|card_number|password|secret|diagnosis)/i.test(
-      code
-    ) && !/redact_pii|mask_pii/.test(code);
-
-  // 3. Solve in Microsoft Z3
-  const sMaxTtl = Z3.Int.const('statutory_max_ttl_hours');
-  const sCodeTtl = Z3.Int.const('code_configured_ttl_hours');
-  const sReqKms = Z3.Bool.const('statutory_requires_tenant_kms');
-  const sCodeKms = Z3.Bool.const('code_uses_tenant_kms');
-  const sForbidLog = Z3.Bool.const('statutory_forbids_plaintext_log');
-  const sCodeLog = Z3.Bool.const('code_logs_plaintext_pii');
-
-  solver.add(sMaxTtl.eq(requiredMaxHours));
-  solver.add(sCodeTtl.eq(detectedTtlHours));
-  solver.add(sCodeTtl.le(sMaxTtl));
-
-  solver.add(sReqKms.eq(requiresTenantKms));
-  solver.add(sCodeKms.eq(detectedTenantKms));
-  solver.add(Z3.Implies(sReqKms, sCodeKms.eq(true)));
-
-  solver.add(sForbidLog.eq(forbidsPlaintextLog));
-  solver.add(sCodeLog.eq(detectedPlaintextLog));
-  solver.add(Z3.Implies(sForbidLog, sCodeLog.eq(false)));
-
-  const z3Verdict = await solver.check();
-  const solveMs = Math.max(0.5, Math.round((performance.now() - t0) * 100) / 100);
-
-  // 4. Synthesize remediated version of the user's custom code
-  let remediatedCode = code;
-  if (ttlMatch && detectedTtlHours > requiredMaxHours) {
-    remediatedCode = remediatedCode.replace(
-      ttlMatch[0],
-      ttlMatch[0].replace(String(detectedTtlHours), String(requiredMaxHours))
-    );
-  }
-  if (requiresTenantKms && !detectedTenantKms) {
-    remediatedCode = remediatedCode
-      .replace(/TENANT_ISOLATED_KMS\s*=\s*False/g, 'TENANT_ISOLATED_KMS = True')
-      .replace(/TENANT_ISOLATED_KMS\s*=\s*false/g, 'TENANT_ISOLATED_KMS = true')
-      .replace(/encrypt_shared_aes256\(/g, 'encrypt_with_tenant_kms(');
-  }
-  if (forbidsPlaintextLog && detectedPlaintextLog) {
-    remediatedCode = remediatedCode.replace(
-      /((?:logger|logging|console)\.(?:info|warn|error|debug|log)\()([^)]+)(\))/g,
-      '$1"[REDACTED_SHA256_PII_TOKEN]"$3'
-    );
+  const violated = verification.proofs.filter((p) => p.status === 'UNSAT_VIOLATION');
+  let remediatedCode = input.sourceCode;
+  if (violated.length > 0) {
+    const pr = await synthesizeRemediationPullRequest(clauses, [file], verification.proofs);
+    remediatedCode = pr?.filePatches[0]?.patchedContent || input.sourceCode;
   }
 
+  const z3Verdict = violated.length === 0 ? 'sat' : 'unsat';
+  const solveMs = Math.max(
+    0.5,
+    Math.round((performance.now() - t0) * 100) / 100
+  );
   const unifiedDiff = createTwoFilesPatch(
     `a/${input.fileName}`,
     `b/${input.fileName}`,
-    code,
+    input.sourceCode,
     remediatedCode,
     '',
     '',
     { context: 3 }
   );
-
-  const violations: string[] = [];
-  if (detectedTtlHours > requiredMaxHours) {
-    violations.push(
-      `Configured TTL (${detectedTtlHours}h) exceeds contractual mandate (${requiredMaxHours}h)`
-    );
-  }
-  if (requiresTenantKms && !detectedTenantKms) {
-    violations.push('Missing tenant-isolated KMS key encryption envelope');
-  }
-  if (forbidsPlaintextLog && detectedPlaintextLog) {
-    violations.push('Unredacted PII/sensitive token emitted to logger sink');
-  }
 
   return {
     verdict: z3Verdict === 'sat' ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION',
@@ -352,26 +355,18 @@ export async function executeByocCustomScan(input: {
       requiredMaxHours,
       requiresTenantKms,
       forbidsPlaintextLog,
-      deonticFormula: compiled.compiled.deonticFormula,
+      deonticFormula: primary.compiled.deonticFormula,
+      categories,
     },
     extractedCodeFacts: {
       detectedTtlHours,
       detectedTenantKms,
       detectedPlaintextLog,
+      astFindingCount: analysis.astFindings.length,
     },
-    violations,
+    violations: verification.proofs.flatMap((p) => p.opaRegoTriggeredDenials),
     remediatedCode,
     unifiedDiff,
-    smtLib2Executed: `; BYOC Custom Scan SMT-LIB2 (${input.citationLabel})
-(assert (= statutory_max_ttl_hours ${requiredMaxHours}))
-(assert (= code_configured_ttl_hours ${detectedTtlHours}))
-(assert (<= code_configured_ttl_hours statutory_max_ttl_hours))
-(assert (= statutory_requires_tenant_kms ${requiresTenantKms}))
-(assert (= code_uses_tenant_kms ${detectedTenantKms}))
-(assert (=> statutory_requires_tenant_kms (= code_uses_tenant_kms true)))
-(assert (= statutory_forbids_plaintext_log ${forbidsPlaintextLog}))
-(assert (= code_logs_plaintext_pii ${detectedPlaintextLog}))
-(assert (=> statutory_forbids_plaintext_log (= code_logs_plaintext_pii false)))
-(check-sat) ; -> ${z3Verdict} (${solveMs} ms)`,
+    smtLib2Executed: verification.proofs.map((p) => p.smtLib2Executed).join('\n\n'),
   };
 }
