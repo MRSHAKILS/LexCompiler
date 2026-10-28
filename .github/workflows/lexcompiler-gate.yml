@@ -6,6 +6,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   lexcompiler-formal-proof:
     name: Z3 Law-to-AST Formal Verification & Build Gate
@@ -18,15 +21,44 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Open Policy Agent (evaluates the generated Rego in tests)
+        uses: open-policy-agent/setup-opa@v2
+        with:
+          version: 1.4.2
 
       - name: Install Dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Run Automated Vitest Suite (Z3 Prover, AST, MCP, RAG, Token Optimizer)
+      - name: Type-check Client & Server
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run Automated Vitest Suite (Z3 Prover, AST, MCP, RAG, Token Optimizer, Security)
         run: npm test
 
-      - name: Execute 6-Stage Real-World Sandbox Verification
+      - name: Z3 Verification Gate (fixture detection + remediation)
+        run: npm run verify:cli
+
+      - name: Execute End-to-End Real-World Sandbox Verification
         run: npm run verify:realworld
 
       - name: Build Production Client & Server Bundles
         run: npm run build
+
+      - name: Export SARIF 2.1.0 Report
+        run: npm run sarif -- lexcompiler.sarif
+
+      - name: Upload SARIF Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lexcompiler-sarif
+          path: lexcompiler.sarif
