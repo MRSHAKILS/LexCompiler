@@ -318,6 +318,14 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - `getLiveServiceMeshTelemetry` reports the Ollama service `ONLINE` with the models and their roles.
 - **Observed:** the very first embedding after a pull fell back to lexical because loading the model took longer than the 3.5 s timeout; later calls, including after `ollama stop`, load in about 1.3 s and succeed.
 
+### Step 24 · Docker image and compose stack (L-14)
+- **Run:** `LEXCOMPILER_API_TOKEN=<random> docker compose --profile ollama up --build -d` on Docker Desktop 29.6 (Linux engine), then `ollama pull all-minilm` and `qwen2.5-coder:0.5b` inside the `ollama` service.
+- **Checked:**
+  - The container's `HEALTHCHECK` reports `healthy`, and `/api/health` returns `ok` with Z3 ready, Python 3.11.2, the ledger ready and 6 MCP servers.
+  - The image runs as `node` (uid 1000) and contains OPA 1.4.2 and the sandbox venv (FastAPI 0.115, Pydantic 2.11).
+  - API calls return 401 without the token and 200 with it.
+  - `POST /api/llm/multi-model-pipeline` gets 384-d `all-minilm` embeddings and `available: true` answers from `qwen2.5-coder:0.5b`, all through the compose `ollama` service.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -345,7 +353,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-21 | **PII classification beyond names (A1)** | Not reached in the cloud session | Classify PII from types and schemas (Pydantic field types, SQL column comments and constraints, TypeScript interfaces) and from value patterns in fixtures, in addition to identifier names; add precision/recall tests. |
 | L-22 | **Frontend accessibility and tests (U1)** | Not reached in the cloud session | Add `@testing-library/react` + jsdom tests for the dashboard, IDE drawer and agent console; fix keyboard focus, ARIA labels and colour contrast; split the largest components. |
 | L-13 | **EUR-Lex SPARQL ingestion** | EUR-Lex and CELLAR are blocked from this session (403) | Implemented and tested against recorded responses (Step 20). Remaining: run `GET /api/regulations/live-feed` with internet access and confirm the GDPR Art. 17 / AI Act Art. 14 items show `illustrative: false` with the official text. |
-| L-14 | **Docker image verification (D1)** | Docker isn't available in this session | The Dockerfile and compose file are written (Step 6). Remaining: run `LEXCOMPILER_API_TOKEN=… docker compose --profile ollama up --build`, pull the models, and confirm the health check and the non-root image. |
+| L-14 | **Docker image verification (D1)** | Docker isn't available in this session | ✅ Done (Steps 6, 24): the compose stack builds and runs, healthy and non-root, with models served by the compose Ollama. |
 
 ---
 
