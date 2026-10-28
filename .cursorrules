@@ -1,0 +1,5 @@
+# .cursorrules — LexCompiler Neuro-Symbolic Engineering Standards
+- Enforce strict TypeScript types across `shared/types.ts`, `server/`, and `src/`.
+- Never mock Z3 verification: always execute `z3-solver` (`Context`, `Solver`, `Int`, `Bool`, `Implies`) and real AST parsers (`python3 -c "import ast"`, `ts.createSourceFile`, SQL DDL parser).
+- Maintain all 6 MCP servers (`lex-statute-ingest-mcp`, `lex-deontic-compiler-mcp`, `lex-polyglot-ast-mcp`, `lex-z3-prover-mcp`, `lex-hybrid-rag-mcp`, `lex-remediation-pr-mcp`) over JSON-RPC 2.0, SSE, and stdio.
+- Apply 5-stage token optimization (`Codeburn`, `Graphify`, `LLMLingua-2/Caveman`, `Semantic Dedup`, `KV-Cache Prefix Pinning`) before LLM calls.

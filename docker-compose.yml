@@ -1,0 +1,12 @@
+services:
+  lexcompiler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: justicesphere-lexcompiler
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    restart: unless-stopped
