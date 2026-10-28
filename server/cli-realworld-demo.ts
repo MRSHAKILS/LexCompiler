@@ -45,6 +45,8 @@ async function runRealWorldScenario() {
   console.log(`  FastAPI log: ${pre.pythonFastApiExecution.capturedLoggerOutput}`);
   console.log(`  Redis SETEX TTL: ${pre.pythonRedisWorkerExecution.capturedSetexTtlHours}h`);
   console.log(`  Python: ${pre.pythonFastApiExecution.frameworks}; Redis: ${pre.pythonRedisWorkerExecution.redisBackend}`);
+  console.log(`  Isolation: ${pre.isolation}`);
+  if (process.env.LEXCOMPILER_SANDBOX_CONTAINER) check(pre.isolation.startsWith('container'), 'sandbox runs inside the requested container');
   check(/^PostgreSQL \d+/.test(pre.sqlDatabaseExecution.engine), 'schema executes on PostgreSQL');
   check(pre.sqlDatabaseExecution.retentionPurge.staleRowsBefore > 0 && pre.sqlDatabaseExecution.retentionPurge.staleRowsAfter === 0, 'PostgreSQL retention purge removes expired rows');
   check(pre.sqlDatabaseExecution.erasureCascade.every((e) => e.erasureSucceeded), 'PostgreSQL erasure cascades to dependent rows');

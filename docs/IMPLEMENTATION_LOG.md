@@ -326,6 +326,20 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - API calls return 401 without the token and 200 with it.
   - `POST /api/llm/multi-model-pipeline` gets 384-d `all-minilm` embeddings and `available: true` answers from `qwen2.5-coder:0.5b`, all through the compose `ollama` service.
 
+### Step 25 · Real PostgreSQL / Redis, container sandbox, pgvector + Neo4j + reranker (L-10, L-9, L-3)
+- **Services:** local containers `pgvector/pgvector:pg17`, `redis:7` and `neo4j:5`, bound to `127.0.0.1`, with generated local passwords. `npm run setup:sandbox` created `.venv`.
+- **L-10:** `verify:realworld` with `LEXCOMPILER_POSTGRES_URL` and `LEXCOMPILER_REDIS_URL` passes on PostgreSQL 17.11 and a real Redis server. That covers schema execution, retention purge, erasure cascade, FastAPI 0.115 + Pydantic 2.11 over HTTP, and the patched Redis key TTL within 72 h.
+- **L-9:**
+  - Built `Dockerfile.sandbox` as `lexcompiler-sandbox:1`; with `LEXCOMPILER_SANDBOX_CONTAINER=docker`, `verify:realworld` passes and the report's `isolation` reads `container (docker; no network, read-only, no capabilities)`.
+  - `verify:realworld` now prints the isolation and fails if a requested container was not used.
+  - A probe in the image with the same flags runs as uid 65534; outbound connections fail and the root filesystem is read-only.
+  - gVisor (`runsc`) is optional and not available on Docker Desktop for Windows, so it was not exercised.
+- **L-3:** `executeStoreBackedRagQuery`, with `LEXCOMPILER_PGVECTOR_URL`, `LEXCOMPILER_NEO4J_URL`/`_USER`/`_PASSWORD` and `LEXCOMPILER_RERANKER_MODEL=Xenova/bge-reranker-base` (`npm install --no-save @huggingface/transformers`), reports:
+  - `vectorDbBackend`: `pgvector on PostgreSQL server (HNSW cosine, dim=384)`;
+  - `graphDbBackend`: `Neo4j (Cypher, graph "lexcompiler")`;
+  - `evaluationMethod`: names the `Xenova/bge-reranker-base` cross-encoder.
+  Neo4j held 28 nodes and 21 edges afterwards, and PostgreSQL had `vector` 0.8.7 with 20 chunk rows. The first query takes about 37 s while the reranker model downloads.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -334,14 +348,14 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | :-- | :--- | :--- | :--- |
 | L-1 | **OPA Rego evaluation (V5)** | Running a downloaded OPA binary was not permitted in this session | ✅ Done (Steps 8, 22): `server/opa.test.ts` passes against real OPA 1.4.2 locally. |
 | L-2 | **6-agent crew (AI1)** | Needs provider API keys and local GGUF models | Implemented (Step 19). Remaining: set `LEXCOMPILER_LLM_*` / `LEXCOMPILER_AGENT_<ID>_*` (Claude, DeepSeek, GPT-4o, Gemini, Llama, Qwen) and run the pipeline. `pip install -r agents/requirements.txt`, then run `python -m lexcompiler_agents <agent-id>` for the CrewAI, DSPy and OpenAI Agents adapters (Pydantic-AI, LangGraph and Hermes are already tested). |
-| L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No Neo4j server, and Hugging Face downloads are blocked here | Implemented (Step 13). Remaining: (1) start Neo4j (`docker run -p 7687:7687 -e NEO4J_AUTH=neo4j/<password> neo4j:5`), set `LEXCOMPILER_NEO4J_URL=bolt://localhost:7687` and the password, and run a RAG query; `graphDbBackend` must read `Neo4j`. (2) Optionally point `LEXCOMPILER_PGVECTOR_URL` at a PostgreSQL server with pgvector. (3) `npm install @huggingface/transformers`, set `LEXCOMPILER_RERANKER_MODEL=Xenova/bge-reranker-base`, run a query, and confirm `evaluationMethod` names the reranker. |
+| L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No Neo4j server, and Hugging Face downloads are blocked here | ✅ Done (Steps 13, 25): pgvector on PostgreSQL, Neo4j and the BGE cross-encoder all verified in one query. |
 | L-4 | **RAGAS evaluation (AI3)** | Needs a judge LLM | Labelled set, IR metrics and judge implemented (Step 19). Remaining: set `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL` (or `LEXCOMPILER_LLM_*`) and run `npm run eval:rag`; optionally also run the Python `ragas` package on the same dataset. |
 | L-5 | **Token-optimisation benchmark (AI4)** | Hugging Face downloads are blocked here | Implemented (Step 19). Remaining: `pip install llmlingua` (downloads the xlm-roberta model) and set `LEXCOMPILER_LLMLINGUA_PYTHON`. Run Ollama with `all-minilm` for neural dedup, and run an LLM agent so cache hits are measured. |
 | L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | ✅ Done (Step 23): all three models pulled; embeddings and both LLMs run on Ollama (`available: true`). |
 | L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Implemented and tested against a mocked API (Step 7). Remaining: set `LEXCOMPILER_GITHUB_TOKEN` / `LEXCOMPILER_GITHUB_REPO`, open one real PR end to end, and optionally persist the returned PR number. |
 | L-8 | **Hardware-backed signing (C1)** | No cloud KMS account or TSA reachable here | Implemented (Step 18) and tested against fakes. Remaining: create a KMS key (GCP `EC_SIGN_ED25519` with HSM protection, or AWS `ECC_NIST_P256` SIGN_VERIFY), set `LEXCOMPILER_SIGNER` and the key id, set `LEXCOMPILER_TSA_URL` (e.g. `https://freetsa.org/tsr`), then issue and verify one certificate. |
-| L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | Implemented (Step 21) and tested with a fake engine. Remaining: run `docker build -f Dockerfile.sandbox -t lexcompiler-sandbox:1 .`, set `LEXCOMPILER_SANDBOX_CONTAINER=docker` (plus `LEXCOMPILER_SANDBOX_OCI_RUNTIME=runsc` if gVisor is installed), and run `npm run verify:realworld`; `isolation` must read `container`. |
-| L-10 | **Real PostgreSQL execution (X2)** | — | ✅ Done (Step 12). Optional local check: run `verify:realworld` with `LEXCOMPILER_POSTGRES_URL` and `LEXCOMPILER_REDIS_URL` pointing at real servers. |
+| L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | ✅ Done (Steps 21, 25): `verify:realworld` passes inside `lexcompiler-sandbox:1` with `isolation: container`; gVisor is optional and was not available on this host. |
+| L-10 | **Real PostgreSQL execution (X2)** | — | ✅ Done (Steps 12, 25): also verified against real PostgreSQL 17 and Redis servers. |
 | L-11 | **Tree-sitter queries (L3)** | — | ✅ Done (Steps 9, 14): Python, TypeScript and SQL grammars. |
 | L-12 | **External MCP servers** | The external services are not available here | Client implemented and tested (Step 20). Remaining: copy `mcp-servers.example.json` to `mcp-servers.json`, start the services (PostgreSQL, Neo4j, n8n; uvx/npx for the stdio servers; a GitHub token), and check that `/api/mcp/servers` lists each as `ONLINE`. |
 | L-15 | **GitHub code-scanning upload** | Code scanning is a repository setting | Reusable workflow added (Step 20). Remaining: enable code scanning on a real repository and call `mrshakils/lexcompiler/.github/workflows/lexcompiler-scan.yml@main` from it with a `clauses-file`. |
