@@ -46,7 +46,7 @@ export interface CryptographicConformityCertificate {
   clauseAttestations: Array<{
     clauseId: string;
     citation: string;
-    status: 'SAT_COMPLIANT' | 'UNSAT_VIOLATION';
+    status: ClauseVerificationProof['status'];
     z3SolveTimeMs: number;
     merkleProofHash: string;
   }>;

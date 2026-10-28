@@ -67,6 +67,15 @@ import type {
   RuleCategory,
 } from '../shared/types.js';
 
+/** Client errors (refused paths, non-fixture resets) are 400s; everything else is a 500. */
+function sendError(res: express.Response, err: unknown): void {
+  if (err instanceof TargetRepoPathError) {
+    res.status(400).json({ error: err.message });
+    return;
+  }
+  res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+}
+
 const securityConfig = resolveServerSecurityConfig();
 assertSafeBindConfig(securityConfig);
 
@@ -164,7 +173,7 @@ app.get('/api/state', async (_req, res) => {
     res.json(report);
   } catch (err) {
     console.error('Error building compliance report:', err);
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -173,7 +182,7 @@ app.get('/api/regulations/live-feed', async (_req, res) => {
     const items = await fetchLiveRegulatoryFeed();
     res.json({ items });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -235,7 +244,7 @@ app.post('/api/mcp/:serverId/rpc', async (req, res) => {
     const result = await invokeMcpTool(serverId, toolName, toolArgs, activeClauses);
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -289,7 +298,7 @@ app.post('/api/rag/query', async (req, res) => {
     );
     res.json(ragReport);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -345,7 +354,7 @@ app.get('/api/ai-heavy/overview', async (_req, res) => {
       promptLibrary: getPromptLibraryCatalog(),
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -378,7 +387,7 @@ app.post('/api/optimization/compress', (req, res) => {
       graphifyCompressed,
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -514,7 +523,7 @@ app.post('/api/clauses/compile', async (req, res) => {
     res.json(report);
   } catch (err) {
     console.error('Error compiling clause:', err);
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -565,7 +574,7 @@ app.post('/api/clauses/mutate-preset', async (req, res) => {
     res.json(report);
   } catch (err) {
     console.error('Error applying preset:', err);
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -613,7 +622,7 @@ app.post('/api/remediation/apply-node', async (req, res) => {
     res.json(updatedReport);
   } catch (err) {
     console.error('Error applying node patch:', err);
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -644,7 +653,7 @@ app.post('/api/remediation/apply-pr', async (_req, res) => {
     res.json(updatedReport);
   } catch (err) {
     console.error('Error applying full PR:', err);
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -666,12 +675,8 @@ app.post('/api/repo/update-file', async (req, res) => {
     const updatedReport = await buildFullComplianceReport();
     res.json(updatedReport);
   } catch (err) {
-    if (err instanceof TargetRepoPathError) {
-      res.status(400).json({ error: err.message });
-      return;
-    }
     console.error('Error updating repo file:', err);
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -718,7 +723,7 @@ app.post('/api/repo/reset', async (req, res) => {
     res.json(report);
   } catch (err) {
     console.error('Error resetting repo:', err);
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -749,7 +754,7 @@ app.post('/api/clauses/switch-locale', async (req, res) => {
     res.json(report);
   } catch (err) {
     console.error('Error switching locale:', err);
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -768,7 +773,7 @@ app.get('/api/sandbox/verify-runtime', (_req, res) => {
     res.json(runtimeReport);
   } catch (err) {
     console.error('Error executing real-world sandbox verification:', err);
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -781,7 +786,7 @@ app.get('/api/services/mesh', async (_req, res) => {
     const mesh = await getLiveServiceMeshTelemetry();
     res.json(mesh);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -801,7 +806,7 @@ app.post('/api/llm/generate', async (req, res) => {
     });
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -865,7 +870,7 @@ app.post('/api/llm/multi-model-pipeline', async (req, res) => {
       generalCounselLlm: legalLlmRes,
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -879,7 +884,7 @@ app.get('/api/enterprise/certificate', async (_req, res) => {
     const cert = generateSignedConformityCertificate(report);
     res.json(cert);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -897,7 +902,7 @@ app.post('/api/enterprise/verify-signature', (req, res) => {
     );
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -907,7 +912,7 @@ app.get('/api/enterprise/sarif', async (_req, res) => {
     const sarif = generateSarifReport(report.clauses, report.proofs, report.commitHash);
     res.json(sarif);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 
@@ -928,7 +933,7 @@ app.post('/api/enterprise/byoc-scan', async (req, res) => {
     });
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, err);
   }
 });
 

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { INITIAL_REPO_FILES, TARGET_REPO_ROOT } from '../analyzer/repoBaseline.js';
+import { INITIAL_REPO_FILES, TARGET_REPO_IS_FIXTURE, TARGET_REPO_ROOT } from '../analyzer/repoBaseline.js';
 
 export interface RealWorldSandboxReport {
   executedAt: string;
@@ -51,7 +51,8 @@ export interface RealWorldSandboxReport {
   };
 }
 
-const SANDBOX_GIT_DIR = path.resolve(process.cwd(), 'data', 'sandbox-git');
+/** Separate Git dir tracking the demo fixture's history (never the user's own `.git`). */
+const SANDBOX_GIT_DIR = path.resolve(process.env.LEXCOMPILER_SANDBOX_GIT_DIR || path.join(process.cwd(), 'data', 'sandbox-git'));
 
 function runGit(args: string[]): string {
   try {
@@ -71,6 +72,7 @@ function runGit(args: string[]): string {
 }
 
 export function ensureTargetRepoGitInitialized(): void {
+  if (!TARGET_REPO_IS_FIXTURE) return;
   const legacyNestedGit = path.join(TARGET_REPO_ROOT, '.git');
   if (fs.existsSync(legacyNestedGit)) {
     fs.rmSync(legacyNestedGit, { recursive: true, force: true });
@@ -87,6 +89,7 @@ export function ensureTargetRepoGitInitialized(): void {
 }
 
 export function commitTargetRepoChanges(commitMessage: string): string {
+  if (!TARGET_REPO_IS_FIXTURE) return '';
   ensureTargetRepoGitInitialized();
   runGit(['add', '.']);
   const status = runGit(['status', '--porcelain']);
@@ -97,6 +100,7 @@ export function commitTargetRepoChanges(commitMessage: string): string {
 }
 
 export function resetTargetRepoGitHistory(): void {
+  if (!TARGET_REPO_IS_FIXTURE) return;
   const legacyNestedGit = path.join(TARGET_REPO_ROOT, '.git');
   if (fs.existsSync(legacyNestedGit)) {
     fs.rmSync(legacyNestedGit, { recursive: true, force: true });
@@ -112,6 +116,9 @@ export function resetTargetRepoGitHistory(): void {
  * in a real local sandbox environment and returns the concrete runtime outputs.
  */
 export function executeRealWorldSandboxVerification(): RealWorldSandboxReport {
+  if (!TARGET_REPO_IS_FIXTURE) {
+    throw new Error('The runtime sandbox only supports the bundled demo fixture, not LEXCOMPILER_TARGET_REPO repositories.');
+  }
   ensureTargetRepoGitInitialized();
 
   const branch = runGit(['rev-parse', '--abbrev-ref', 'HEAD']) || 'main';
@@ -209,6 +216,15 @@ with open(f"{repo_root}/api/fastapi_intake.py", "r", encoding="utf-8") as f:
 
 intake_ns = {}
 exec(compile(intake_code, f"{repo_root}/api/fastapi_intake.py", "exec"), intake_ns)
+
+class SandboxKmsClient:
+    """Test double for the KMS client that remediated code requires (encrypt only, no key material)."""
+    def encrypt(self, tenant_id, plaintext):
+        import hashlib
+        return f"kms:{tenant_id}:".encode("utf-8") + hashlib.sha256(plaintext).digest()
+
+if "TENANT_KMS_CLIENT" in intake_ns:
+    intake_ns["TENANT_KMS_CLIENT"] = SandboxKmsClient()
 
 payload_obj = intake_ns["PatientIntakePayload"](
     tenant_id="tenant-zurich-01",

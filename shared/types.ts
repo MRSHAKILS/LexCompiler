@@ -26,6 +26,8 @@ export interface DeonticExtractionProvenance {
   llmModel?: string;
   llmLatencyMs?: number;
   llmRejectedReason?: string;
+  /** Ambiguities a human should confirm (several durations found, negation detected, …). */
+  reviewNotes?: string[];
 }
 
 export interface DeonticExtraction {
@@ -202,6 +204,10 @@ export interface ASTFindingNode {
     sovereignGuardEnabled?: boolean;
     hasCascadeDelete?: boolean;
     containsPii?: boolean;
+    /** How the retention value was obtained, e.g. "PII_CACHE_TTL_HOURS (hours)" or "setex literal (seconds)". */
+    retentionSource?: string;
+    /** True when the TTL unit was not stated in the identifier and hours were assumed. */
+    retentionUnitAssumed?: boolean;
   };
   editAnchors?: SourceEditAnchor[];
 }
@@ -293,9 +299,14 @@ export interface ClauseVerificationProof {
   frameworkId: ComplianceFrameworkId;
   category: RuleCategory;
   severity: 'CRITICAL' | 'HIGH' | 'MEDIUM';
-  status: 'SAT_COMPLIANT' | 'UNSAT_VIOLATION';
-  z3SolverStatus: 'sat' | 'unsat';
+  /** UNKNOWN_NEEDS_REVIEW: Z3 returned `unknown` (e.g. timeout); never counted as compliant. */
+  status: 'SAT_COMPLIANT' | 'UNSAT_VIOLATION' | 'UNKNOWN_NEEDS_REVIEW';
+  z3SolverStatus: 'sat' | 'unsat' | 'unknown';
   z3SolveTimeMs: number;
+  /** Number of code constructs (tables, endpoints, workers, …) the clause was checked against. */
+  applicableInstanceCount?: number;
+  /** Set when the clause's bounds came from defaults or an LLM fallback, or no construct applied. */
+  reviewReasons?: string[];
   smtLib2Executed: string;
   unsatCoreAssertions: string[];
   unsatCoreIterations?: string[][];
@@ -339,10 +350,13 @@ export interface FilePatchDiff {
   linesAdded: number;
   linesRemoved: number;
   addressedClauseIds: string[];
+  /** Result of re-parsing the patched file (Python ast, TypeScript parser, SQL tokenizer). */
+  syntaxCheck?: { passed: boolean; message?: string };
 }
 
 export interface RemediationPullRequest {
   prId: string;
+  /** Always 0: LexCompiler produces a local remediation bundle, not a GitHub pull request. */
   prNumber: number;
   title: string;
   branchName: string;
@@ -362,6 +376,8 @@ export interface RemediationPullRequest {
   postPatchVerifyTimeMs: number;
   cegisIterations?: number;
   unresolvedClauseIds?: string[];
+  /** Patched files that no longer parse; any entry blocks the PR. */
+  validationErrors?: string[];
   cryptographicAttestationHash: string;
   executiveSummary: string;
   filePatches: FilePatchDiff[];

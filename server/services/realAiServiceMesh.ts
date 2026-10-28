@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { sha256Hex } from '../util/hash.js';
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_HOST || 'http://localhost:11434';
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+const DATA_DIR = path.resolve(process.env.LEXCOMPILER_DATA_DIR || path.join(process.cwd(), 'data'));
 const SQLITE_DB_PATH = path.join(DATA_DIR, 'lexcompiler_enterprise.db');
 
 // Cache real 384-d neural embeddings in memory + SQLite so repeated queries are instant
@@ -34,6 +34,8 @@ export interface LiveServiceNodeStatus {
 }
 
 export interface RealLlmGenerationResult {
+  /** False when no model answered; all counts are then 0 and responseText explains why. */
+  available: boolean;
   model: string;
   provider: string;
   role: string;
@@ -340,17 +342,21 @@ export async function runRealLlmInference(params: {
         }),
       });
       if (resp.ok) {
-        const data = (await resp.json()) as any;
+        const data = (await resp.json()) as {
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
+          choices?: Array<{ message?: { content?: string } }>;
+        };
         const dur = Math.round((performance.now() - t0) * 10) / 10;
-        const compTok = data.usage?.completion_tokens || 60;
+        const compTok = data.usage?.completion_tokens ?? 0;
         return {
+          available: true,
           model: 'gpt-4o-mini',
           provider: 'OpenAI Cloud API',
           role: 'Cloud Frontier Synthesis',
-          promptTokens: data.usage?.prompt_tokens || 80,
+          promptTokens: data.usage?.prompt_tokens ?? 0,
           completionTokens: compTok,
           totalDurationMs: dur,
-          tokensPerSecond: Math.round((compTok / (dur / 1000)) * 10) / 10,
+          tokensPerSecond: dur > 0 ? Math.round((compTok / (dur / 1000)) * 10) / 10 : 0,
           responseText: data.choices?.[0]?.message?.content || '',
           timestamp: new Date().toISOString(),
         };
@@ -394,18 +400,22 @@ export async function runRealLlmInference(params: {
         eval_duration?: number;
         total_duration?: number;
       };
-      const evalCount = data.eval_count || 45;
-      const evalDurationSec = (data.eval_duration || 600_000_000) / 1e9;
-      const tokPerSec = Math.round((evalCount / Math.max(0.05, evalDurationSec)) * 10) / 10;
-      const totalMs = Math.round(((data.total_duration || 800_000_000) / 1e6) * 10) / 10;
+      const evalCount = data.eval_count ?? 0;
+      const evalDurationSec = (data.eval_duration ?? 0) / 1e9;
+      const tokPerSec = evalDurationSec > 0 ? Math.round((evalCount / evalDurationSec) * 10) / 10 : 0;
+      const totalMs =
+        data.total_duration != null
+          ? Math.round((data.total_duration / 1e6) * 10) / 10
+          : Math.round(performance.now() - t0);
 
       return {
+        available: true,
         model: data.model || modelToUse,
         provider: 'Ollama Local Sovereign Runtime (:11434)',
         role: modelToUse.includes('qwen')
           ? 'Polyglot AST & Code Remediation Specialist'
           : 'General Counsel Deontic Legal Reasoner',
-        promptTokens: data.prompt_eval_count || 64,
+        promptTokens: data.prompt_eval_count ?? 0,
         completionTokens: evalCount,
         totalDurationMs: totalMs,
         tokensPerSecond: tokPerSec,
@@ -413,29 +423,23 @@ export async function runRealLlmInference(params: {
         timestamp: new Date().toISOString(),
       };
     }
+    return unavailableLlmResult(modelToUse, t0, `Ollama returned HTTP ${resp.status}`);
   } catch (err) {
-    return {
-      model: modelToUse,
-      provider: 'Ollama Local Runtime',
-      role: 'Fallback Neuro-Symbolic Synthesis',
-      promptTokens: 64,
-      completionTokens: 42,
-      totalDurationMs: Math.round(performance.now() - t0),
-      tokensPerSecond: 65.0,
-      responseText: `Neuro-symbolic verification completed (${String(err)}).`,
-      timestamp: new Date().toISOString(),
-    };
+    return unavailableLlmResult(modelToUse, t0, err instanceof Error ? err.message : String(err));
   }
+}
 
+function unavailableLlmResult(model: string, t0: number, reason: string): RealLlmGenerationResult {
   return {
-    model: modelToUse,
-    provider: 'Ollama Local Runtime',
-    role: 'Fallback',
-    promptTokens: 50,
-    completionTokens: 30,
-    totalDurationMs: 120,
-    tokensPerSecond: 60,
-    responseText: 'Verification complete.',
+    available: false,
+    model,
+    provider: 'unavailable',
+    role: 'No LLM response',
+    promptTokens: 0,
+    completionTokens: 0,
+    totalDurationMs: Math.round(performance.now() - t0),
+    tokensPerSecond: 0,
+    responseText: `(LLM unavailable: ${reason})`,
     timestamp: new Date().toISOString(),
   };
 }

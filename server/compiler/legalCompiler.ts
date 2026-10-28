@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import type {
   CompiledPolicyArtifacts,
   ComplianceFrameworkId,
@@ -11,9 +10,7 @@ import type {
 } from '../../shared/types.js';
 import { runRealLlmInference } from '../services/realAiServiceMesh.js';
 
-export function sha256Hex(input: string): string {
-  return crypto.createHash('sha256').update(input, 'utf8').digest('hex');
-}
+export { sha256Hex } from '../util/hash.js';
 
 const BANGLA_DIGIT_MAP: Record<string, string> = {
   '০': '0',
@@ -64,43 +61,79 @@ const LLM_DEONTIC_SCHEMA: Record<string, unknown> = {
   },
 };
 
+const NUMBER_WORDS: Record<string, number> = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
+  eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70,
+  eighty: 80, ninety: 90, hundred: 100, a: 1, an: 1,
+};
+
+const UNIT_WORDS =
+  'hours?|hrs?|h|minutes?|mins?|days?|weeks?|wks?|months?|mos?|years?|yrs?|percent|ঘণ্টা|ঘন্টা|দিন';
+
+/** Rewrites spelled-out counts before a unit ("seventy-two hours", "one week") as digits. */
+export function normalizeNumberWords(lower: string): string {
+  const word = Object.keys(NUMBER_WORDS).join('|');
+  const re = new RegExp(`\\b((?:${word})(?:[\\s-]+(?:and[\\s-]+)?(?:${word}))*)\\s+(?=(?:${UNIT_WORDS})\\b)`, 'g');
+  return lower.replace(re, (match, phrase: string) => {
+    let total = 0;
+    let current = 0;
+    for (const w of phrase.split(/[\s-]+/).filter((t) => t && t !== 'and')) {
+      const n = NUMBER_WORDS[w];
+      if (n === undefined) return match;
+      if (n === 100) current = (current || 1) * 100;
+      else current += n;
+    }
+    total += current;
+    return `${total} `;
+  });
+}
+
+const TEMPORAL_UNITS: Array<{ re: RegExp; toHours: (n: number) => number; label: string }> = [
+  { re: /(\d+(?:\.\d+)?)\s*(?:hours|hour|hrs|hr|h)\b/g, toHours: (n) => n, label: 'hours' },
+  { re: /(\d+(?:\.\d+)?)\s*(?:ঘণ্টা|ঘন্টা)/g, toHours: (n) => n, label: 'hours_bn' },
+  { re: /(\d+(?:\.\d+)?)\s*(?:minutes|minute|mins|min)\b/g, toHours: (n) => n / 60, label: 'minutes' },
+  { re: /(\d+(?:\.\d+)?)\s*(?:days|day)\b/g, toHours: (n) => n * 24, label: 'days' },
+  { re: /(\d+(?:\.\d+)?)\s*(?:দিন)/g, toHours: (n) => n * 24, label: 'days_bn' },
+  { re: /(\d+(?:\.\d+)?)\s*(?:weeks|week|wks|wk)\b/g, toHours: (n) => n * 24 * 7, label: 'weeks' },
+  { re: /(\d+(?:\.\d+)?)\s*(?:months|month|mos|mo)\b/g, toHours: (n) => n * 24 * 30, label: 'months' },
+  { re: /(\d+(?:\.\d+)?)\s*(?:years|year|yrs|yr)\b/g, toHours: (n) => n * 24 * 365, label: 'years' },
+];
+
 /**
- * Parses minutes, hours, days, weeks, months, and years (English + Bangla) into hours.
- * Hours/Bangla ঘণ্টা win over coarser units when both are present (legacy 72 hours vs 30 days).
+ * Finds every duration (minutes … years, English + Bangla, digits or number words) and
+ * returns the strictest (shortest) one: for a purge/retention obligation the tightest
+ * bound in the clause is the one code must satisfy. When several distinct durations
+ * appear, a review note records which one was chosen.
  */
 export function extractTemporalHoursFromProse(lower: string): {
   hours: number;
   hit: boolean;
   evidence: string[];
+  reviewNotes: string[];
 } {
-  const evidence: string[] = [];
-  const tryMatch = (
-    re: RegExp,
-    toHours: (n: number) => number,
-    label: string
-  ): number | null => {
-    const m = lower.match(re);
-    if (!m) return null;
-    const n = parseFloat(m[1]);
-    if (!Number.isFinite(n) || n < 0) return null;
-    evidence.push(`${label}:${m[0].trim()}`);
-    return toHours(n);
-  };
-
-  const hours =
-    tryMatch(/(\d+(?:\.\d+)?)\s*(?:hours|hour|hrs|hr|h)\b/, (n) => n, 'hours') ??
-    tryMatch(/(\d+(?:\.\d+)?)\s*(?:ঘণ্টা|ঘন্টা)/, (n) => n, 'hours_bn') ??
-    tryMatch(/(\d+(?:\.\d+)?)\s*(?:minutes|minute|mins|min)\b/, (n) => n / 60, 'minutes') ??
-    tryMatch(/(\d+(?:\.\d+)?)\s*(?:days|day)\b/, (n) => n * 24, 'days') ??
-    tryMatch(/(\d+(?:\.\d+)?)\s*(?:দিন)/, (n) => n * 24, 'days_bn') ??
-    tryMatch(/(\d+(?:\.\d+)?)\s*(?:weeks|week|wks|wk)\b/, (n) => n * 24 * 7, 'weeks') ??
-    tryMatch(/(\d+(?:\.\d+)?)\s*(?:months|month|mos|mo)\b/, (n) => n * 24 * 30, 'months') ??
-    tryMatch(/(\d+(?:\.\d+)?)\s*(?:years|year|yrs|yr)\b/, (n) => n * 24 * 365, 'years');
-
-  if (hours != null) {
-    return { hours, hit: true, evidence };
+  const text = normalizeNumberWords(lower);
+  const found: Array<{ hours: number; text: string; label: string }> = [];
+  for (const unit of TEMPORAL_UNITS) {
+    for (const m of text.matchAll(unit.re)) {
+      const n = parseFloat(m[1]);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      found.push({ hours: Math.round(unit.toHours(n) * 1000) / 1000, text: m[0].trim(), label: unit.label });
+    }
   }
-  return { hours: 720, hit: false, evidence };
+  if (found.length === 0) {
+    return { hours: 720, hit: false, evidence: [], reviewNotes: [] };
+  }
+  found.sort((a, b) => a.hours - b.hours);
+  const chosen = found[0];
+  const distinct = [...new Set(found.map((f) => f.hours))];
+  const reviewNotes =
+    distinct.length > 1
+      ? [
+          `Several durations appear in the clause (${found.map((f) => f.text).join(', ')}); the strictest (${chosen.text} = ${chosen.hours}h) was used.`,
+        ]
+      : [];
+  return { hours: chosen.hours, hit: true, evidence: [`${chosen.label}:${chosen.text}`], reviewNotes };
 }
 
 export function inferRuleCategoryFromProse(
@@ -138,54 +171,86 @@ export function inferRuleCategoryFromProse(
   return fallback;
 }
 
+/** "need not", "not required", "optional", "may (be)" directly governing a phrase. */
+const NEGATED_BEFORE = /(need not|needn't|not required to|is not required|are not required|shall not be required|not obliged to|optional(?:ly)?|may)\s+(?:\w+\s+){0,4}$/;
+const NEGATED_AFTER = /^\s*(?:is|are)\s+(?:not required|optional|not mandatory)/;
+
+function phraseIsNegated(lower: string, re: RegExp): boolean {
+  const m = lower.match(re);
+  if (!m || m.index == null) return false;
+  const before = lower.slice(Math.max(0, m.index - 60), m.index);
+  const after = lower.slice(m.index + m[0].length, m.index + m[0].length + 40);
+  return NEGATED_BEFORE.test(before) || NEGATED_AFTER.test(after);
+}
+
+const TENANT_KMS_RE =
+  /tenant[- ]isolated|tenant[- ]specific|per[- ]tenant|customer[- ]managed\s+key|tenant_kms|টেন্যান্ট|পৃথক\s*কী|আইসোলেটেড\s*কী|কেএমএস/i;
+const LOG_BAN_RE =
+  /prohibit|shall not log|never log|forbid|unredacted|plaintext.*log|mask|redact|লগ.*নিষিদ্ধ|লগিং.*নিষিদ্ধ|অরক্ষিত.*লগ|প্রকাশ করা যাবে না|রিড্যাক্ট/i;
+const LOG_PERMITTED_RE = /(logging|log|logged)[^.;]{0,60}\b(is|are)\s+(permitted|allowed)|\bmay\s+(be\s+)?log/i;
+
 export function extractDeonticBoundsFromProse(
   rawText: string,
   category: RuleCategory
 ): ExtractedDeonticBounds {
   const { normalized, lower } = normalizeLegalProse(rawText);
   const temporal = extractTemporalHoursFromProse(lower);
+  const reviewNotes = [...temporal.reviewNotes];
   const maxRetentionHours = temporal.hours;
   const maxRetentionDays = Math.max(1, Math.round((maxRetentionHours / 24) * 10) / 10);
 
-  const requiresTenantIsolatedKeys =
-    /tenant[- ]isolated|tenant[- ]specific|per[- ]tenant|customer[- ]managed\s+key|tenant_kms|টেন্যান্ট|পৃথক\s*কী|আইসোলেটেড\s*কী|কেএমএস/i.test(
-      normalized
-    );
+  const tenantMentioned = TENANT_KMS_RE.test(normalized);
+  const tenantNegated = tenantMentioned && phraseIsNegated(lower, new RegExp(TENANT_KMS_RE.source, 'i'));
+  if (tenantNegated) {
+    reviewNotes.push('The tenant-isolated key requirement appears negated ("need not", "optional", …); it was not required.');
+  }
+  const requiresTenantIsolatedKeys = tenantMentioned && !tenantNegated;
 
   const requiredEncryptionAlgorithms: string[] = ['AES-256-GCM'];
   if (requiresTenantIsolatedKeys) {
     requiredEncryptionAlgorithms.push('TENANT-ISOLATED-KMS-ENVELOPE');
   }
 
+  const loggingPermitted = LOG_PERMITTED_RE.test(lower) && !/prohibit|shall not|never|forbid/i.test(lower);
+  if (loggingPermitted) {
+    reviewNotes.push('The clause permits logging; no plaintext-logging prohibition was compiled.');
+  }
   const forbidPlaintextLogging =
-    /prohibit|shall not log|never log|forbid|unredacted|plaintext.*log|mask|redact|লগ.*নিষিদ্ধ|লগিং.*নিষিদ্ধ|অরক্ষিত.*লগ|প্রকাশ করা যাবে না|রিড্যাক্ট/i.test(
-      normalized
-    ) || category === 'PII_LOGGING_BAN';
+    !loggingPermitted && (LOG_BAN_RE.test(normalized) || category === 'PII_LOGGING_BAN');
 
   const requireCascadeErasure =
     /cascade|erasure|right to be forgotten|delete all linked|article 17|মুছে ফেলতে হবে|সম্পূর্ণরূপে মুছে/i.test(
       normalized
     ) || category === 'RIGHT_TO_ERASURE_CASCADE';
 
+  const encryptionRe = /encrypt(?:ed|ion)? at rest|encrypted at rest|aes-256|@encrypted/i;
+  const encryptionNegated = encryptionRe.test(normalized) && phraseIsNegated(lower, encryptionRe);
   const requireEncryptionAtRest =
-    /encrypt(?:ed|ion)? at rest|encrypted at rest|aes-256|@encrypted/i.test(normalized) ||
-    category === 'ENCRYPTION_AT_REST' ||
-    category === 'RETENTION_AND_TENANT_KMS';
+    !encryptionNegated &&
+    (encryptionRe.test(normalized) || category === 'ENCRYPTION_AT_REST' || category === 'RETENTION_AND_TENANT_KMS');
 
+  // Confidence: every decimal after a confidence keyword and every percentage; the
+  // strictest (highest) gate wins.
+  const thresholds: Array<{ value: number; text: string }> = [];
+  for (const m of lower.matchAll(
+    /(?:threshold|confidence|score|below|minimum|at least|আত্মবিশ্বাস|স্কোর|কমপক্ষে)[^0-9]{0,40}?(0\.\d+)/g
+  )) {
+    thresholds.push({ value: parseFloat(m[1]), text: m[1] });
+  }
+  for (const m of normalizeNumberWords(lower).matchAll(/(\d{1,3}(?:\.\d+)?)\s*(?:%|শতাংশ|percent)/g)) {
+    const pct = parseFloat(m[1]);
+    if (pct > 0 && pct <= 100) thresholds.push({ value: pct / 100, text: m[0] });
+  }
   let minAiConfidenceThreshold = 0.7;
-  let confidenceHit = false;
-  const decimalMatch = lower.match(
-    /(?:threshold|confidence|score|below|minimum|at least|আত্মবিশ্বাস|স্কোর|কমপক্ষে)[^0-9]*?(0\.\d+)/
-  );
-  const percentMatch = lower.match(/(\d{2,3})\s*(?:%|শতাংশ)/);
-  if (decimalMatch) {
-    minAiConfidenceThreshold = parseFloat(decimalMatch[1]);
-    confidenceHit = true;
-  } else if (percentMatch) {
-    const pct = parseInt(percentMatch[1], 10);
-    if (pct > 0 && pct <= 100) {
-      minAiConfidenceThreshold = pct / 100;
-      confidenceHit = true;
+  const confidenceHit = thresholds.length > 0;
+  if (confidenceHit) {
+    thresholds.sort((a, b) => b.value - a.value);
+    minAiConfidenceThreshold = thresholds[0].value;
+    const distinct = [...new Set(thresholds.map((t) => t.value))];
+    if (distinct.length > 1) {
+      reviewNotes.push(
+        `Several confidence values appear (${distinct.join(', ')}); the strictest (${minAiConfidenceThreshold}) was used.`
+      );
     }
   }
 
@@ -229,49 +294,69 @@ export function extractDeonticBoundsFromProse(
     provenance: {
       method: needsNumeric && missingNumeric ? 'DETERMINISTIC_DEFAULT' : 'DETERMINISTIC_PARSER',
       evidence: [...temporal.evidence, ...(confidenceHit ? [`confidence:${minAiConfidenceThreshold}`] : [])],
+      ...(reviewNotes.length > 0 ? { reviewNotes } : {}),
     },
   };
 }
 
-function mergeLlmBounds(
+/**
+ * Validates LLM output and uses it only to fill the numeric bound the deterministic
+ * parser could not find. Out-of-range or malformed values are rejected; booleans and
+ * regions always come from the deterministic parser.
+ */
+export function mergeLlmBounds(
   base: ExtractedDeonticBounds,
   parsed: Record<string, unknown>,
   model: string,
   latencyMs: number
 ): ExtractedDeonticBounds {
   const next = { ...base };
-  if (typeof parsed.maxRetentionHours === 'number' && parsed.maxRetentionHours > 0) {
-    next.maxRetentionHours = parsed.maxRetentionHours;
-    next.maxRetentionDays = Math.max(1, Math.round((parsed.maxRetentionHours / 24) * 10) / 10);
-    next.temporalHit = true;
+  const accepted: string[] = [];
+  const rejected: string[] = [];
+
+  if (!base.temporalHit && parsed.maxRetentionHours !== undefined) {
+    const h = Number(parsed.maxRetentionHours);
+    if (Number.isFinite(h) && h > 0 && h <= 24 * 365 * 100) {
+      next.maxRetentionHours = Math.round(h * 1000) / 1000;
+      next.maxRetentionDays = Math.max(1, Math.round((h / 24) * 10) / 10);
+      next.temporalHit = true;
+      accepted.push(`maxRetentionHours=${next.maxRetentionHours}`);
+    } else {
+      rejected.push(`maxRetentionHours=${String(parsed.maxRetentionHours)}`);
+    }
   }
-  if (typeof parsed.requiresTenantIsolatedKeys === 'boolean') {
-    next.requiresTenantIsolatedKeys = parsed.requiresTenantIsolatedKeys;
+  if (!base.confidenceHit && parsed.minAiConfidenceThreshold !== undefined) {
+    let c = Number(parsed.minAiConfidenceThreshold);
+    if (Number.isFinite(c) && c > 1 && c <= 100) c = c / 100;
+    if (Number.isFinite(c) && c > 0 && c <= 1) {
+      next.minAiConfidenceThreshold = c;
+      next.confidenceHit = true;
+      accepted.push(`minAiConfidenceThreshold=${c}`);
+    } else {
+      rejected.push(`minAiConfidenceThreshold=${String(parsed.minAiConfidenceThreshold)}`);
+    }
   }
-  if (typeof parsed.forbidPlaintextLogging === 'boolean') {
-    next.forbidPlaintextLogging = parsed.forbidPlaintextLogging;
-  }
-  if (typeof parsed.requireCascadeErasure === 'boolean') {
-    next.requireCascadeErasure = parsed.requireCascadeErasure;
-  }
-  if (typeof parsed.minAiConfidenceThreshold === 'number') {
-    next.minAiConfidenceThreshold = parsed.minAiConfidenceThreshold;
-    next.confidenceHit = true;
-  }
-  if (typeof parsed.requireHumanOversightGate === 'boolean') {
-    next.requireHumanOversightGate = parsed.requireHumanOversightGate;
-  }
-  if (Array.isArray(parsed.allowedDataRegions)) {
-    next.allowedDataRegions = parsed.allowedDataRegions.filter((r) => typeof r === 'string');
-  }
-  if (typeof parsed.requireEncryptionAtRest === 'boolean') {
-    next.requireEncryptionAtRest = parsed.requireEncryptionAtRest;
+  if (accepted.length === 0) {
+    return {
+      ...base,
+      provenance: {
+        ...base.provenance,
+        llmModel: model,
+        llmLatencyMs: latencyMs,
+        llmRejectedReason: rejected.length > 0 ? `out_of_range:${rejected.join(';')}` : 'no_usable_fields',
+      },
+    };
   }
   next.provenance = {
     method: 'LLM_JSON_FALLBACK',
-    evidence: [...base.provenance.evidence, 'llm_json_schema'],
+    evidence: [...base.provenance.evidence, ...accepted.map((a) => `llm:${a}`)],
     llmModel: model,
     llmLatencyMs: latencyMs,
+    ...(rejected.length > 0 ? { llmRejectedReason: `out_of_range:${rejected.join(';')}` } : {}),
+    reviewNotes: [
+      ...(base.provenance.reviewNotes || []),
+      `An LLM supplied ${accepted.join(', ')}; confirm against the clause text.`,
+    ],
   };
   return next;
 }
@@ -290,7 +375,7 @@ export async function extractDeonticBoundsWithLlmFallback(
 
   try {
     const llm = await runRealLlmInference({
-      prompt: `Extract deontic compliance bounds as JSON from this legal clause.\nCategory: ${category}\nClause:\n${rawText}\n\nReturn only JSON with maxRetentionHours (hours, converting minutes/days/weeks/months/years), requiresTenantIsolatedKeys, forbidPlaintextLogging, requireCascadeErasure, minAiConfidenceThreshold (0-1), requireHumanOversightGate, allowedDataRegions, requireEncryptionAtRest.`,
+      prompt: `Extract deontic compliance bounds as JSON from this legal clause.\nCategory: ${category}\nClause:\n${rawText}\n\nReturn only JSON with maxRetentionHours (hours, converting minutes/days/weeks/months/years) and minAiConfidenceThreshold (0-1).`,
       systemPrompt:
         'You are LexCompiler deontic extractor. Output a single JSON object matching the schema. Convert any time unit to hours.',
       jsonSchema: LLM_DEONTIC_SCHEMA,
@@ -298,6 +383,12 @@ export async function extractDeonticBoundsWithLlmFallback(
       temperature: 0,
       timeoutMs: 8000,
     });
+    if (!llm.available) {
+      return {
+        ...deterministic,
+        provenance: { ...deterministic.provenance, llmRejectedReason: 'llm_unavailable' },
+      };
+    }
     const jsonMatch = llm.responseText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       return {
