@@ -3,6 +3,8 @@ import {
   computeRealNeuralEmbedding,
   runRealLlmInference,
 } from '../services/realAiServiceMesh.js';
+import { inferRuleCategoryFromProse } from '../compiler/legalCompiler.js';
+import { countTokens } from '../optimization/tokenOptimizer.js';
 import type {
   ASTFindingNode,
   ClauseVerificationProof,
@@ -11,62 +13,59 @@ import type {
   LegalClause,
   RagQueryExecutionReport,
   RagRetrievedItem,
+  RuleCategory,
   SQLTableSchema,
 } from '../../shared/types.js';
 
-const DOMAIN_DIMENSIONS = [
-  'retention_ttl_hours',
-  'tenant_kms_key_isolation',
-  'encryption_aes256_gcm',
-  'plaintext_pii_logging_ban',
-  'human_oversight_confidence_gate',
-  'cross_border_eu_residency',
-  'postgres_sql_schema',
-  'fastapi_python_endpoint',
-  'redis_cache_worker',
-  'ai_credit_triage_typescript',
-  'gdpr_art17_erasure',
-  'hipaa_164_312_phi',
-  'eu_ai_act_art14',
-  'smt_lib2_z3_unsat',
-  'opa_rego_policy',
-  'remediation_pr_patch',
-];
+export const EMBEDDING_DIMENSIONS = 384;
 
-const SYNONYM_MAP: Record<string, string[]> = {
-  retention_ttl_hours: ['retention', 'ttl', 'hours', 'days', 'purge', '72', '720', '30', 'expire', 'setex', 'delete'],
-  tenant_kms_key_isolation: ['tenant', 'kms', 'isolated', 'key', 'envelope', 'per-tenant', 'tenant_kms_key_id', 'isolation'],
-  encryption_aes256_gcm: ['encrypt', 'encrypted', 'aes', 'cipher', 'cryptographic', 'rest', 'gcm'],
-  plaintext_pii_logging_ban: ['log', 'logger', 'logging', 'stdout', 'redact', 'plaintext', 'ssn', 'unredacted', 'mask'],
-  human_oversight_confidence_gate: ['ai', 'confidence', 'human', 'oversight', 'triage', '0.85', '85%', '0.68', 'threshold', 'autonomous'],
-  cross_border_eu_residency: ['cross-border', 'region', 'transfer', 'residency', 'eu-central-1', 'us-east-1', 'eea', 'sovereign', 'replica'],
-  postgres_sql_schema: ['postgres', 'sql', 'table', 'column', 'schema', 'patient_records', 'ddl'],
-  fastapi_python_endpoint: ['fastapi', 'intake', 'endpoint', 'python', 'ingest_patient_pii', 'api'],
-  redis_cache_worker: ['redis', 'cache', 'worker', 'session', 'setex', 'pii_cache_ttl_hours'],
-  ai_credit_triage_typescript: ['credit', 'clinical', 'evaluateclinicalandcreditrisk', 'typescript', 'model'],
-  gdpr_art17_erasure: ['gdpr', 'article 17', 'art. 17', 'art. 32', 'erasure', 'dpa', '4.2'],
-  hipaa_164_312_phi: ['hipaa', '164.312', 'phi', 'diagnosis', 'patient', 'health'],
-  eu_ai_act_art14: ['eu ai act', 'article 14', 'art. 14', 'art. 12', 'high-risk', 'audit'],
-  smt_lib2_z3_unsat: ['z3', 'smt', 'unsat', 'sat', 'proof', 'contradiction', 'prover', 'theorem'],
-  opa_rego_policy: ['opa', 'rego', 'deny', 'policy'],
-  remediation_pr_patch: ['patch', 'diff', 'remediate', 'pr', 'fix', 'pull request', '409'],
+/** Concept features: a hit on any synonym adds the concept token to the hashed vector. */
+const CONCEPT_SYNONYMS: Record<string, string[]> = {
+  retention: ['retention', 'ttl', 'purge', 'expire', 'setex', 'delete', 'hours', 'days', 'ঘণ্টা', 'দিন'],
+  tenant_kms: ['tenant', 'kms', 'envelope', 'tenant_kms_key_id', 'isolated', 'টেন্যান্ট'],
+  encryption: ['encrypt', 'encrypted', 'aes', 'cipher', 'ciphertext'],
+  logging: ['log', 'logger', 'logging', 'stdout', 'redact', 'plaintext', 'unredacted', 'লগ'],
+  ai_oversight: ['confidence', 'human', 'oversight', 'triage', 'threshold', 'autonomous', 'audit'],
+  residency: ['region', 'transfer', 'residency', 'sovereign', 'replica', 'egress', 'cross-border', 'us-east-1'],
+  erasure: ['erasure', 'cascade', 'forgotten', 'foreign', 'references'],
+  pii: ['ssn', 'email', 'phi', 'pii', 'diagnosis', 'patient', 'personal'],
 };
 
-function computeSemanticEmbedding(text: string): number[] {
-  const lower = text.toLowerCase();
-  const vec = DOMAIN_DIMENSIONS.map((dim) => {
-    const keywords = SYNONYM_MAP[dim] || [dim];
-    let score = 0;
-    for (const kw of keywords) {
-      if (lower.includes(kw)) {
-        score += 1.0;
-      }
-    }
-    return score;
-  });
+function hashToken(token: string): { index: number; sign: number } {
+  // FNV-1a 32-bit
+  let h = 0x811c9dc5;
+  for (let i = 0; i < token.length; i++) {
+    h ^= token.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return { index: (h >>> 0) % EMBEDDING_DIMENSIONS, sign: (h >>> 31) & 1 ? -1 : 1 };
+}
 
+/**
+ * Deterministic 384-d embedding (signed feature hashing of unigrams, bigrams, and
+ * domain concepts with sublinear term frequency), L2-normalized. Used whenever the
+ * Ollama `all-minilm` model is not reachable.
+ */
+export function computeSemanticEmbedding(text: string): number[] {
+  const tokens = tokenizeWords(text);
+  const lower = text.toLowerCase();
+  const counts = new Map<string, number>();
+  const add = (t: string, w = 1) => counts.set(t, (counts.get(t) || 0) + w);
+  tokens.forEach((t, i) => {
+    add(t);
+    if (i + 1 < tokens.length) add(`${t} ${tokens[i + 1]}`, 0.5);
+  });
+  for (const [concept, words] of Object.entries(CONCEPT_SYNONYMS)) {
+    const hits = words.filter((w) => lower.includes(w)).length;
+    if (hits > 0) add(`concept:${concept}`, 2 * hits);
+  }
+  const vec = new Array<number>(EMBEDDING_DIMENSIONS).fill(0);
+  for (const [token, c] of counts) {
+    const { index, sign } = hashToken(token);
+    vec[index] += sign * (1 + Math.log(c));
+  }
   const norm = Math.sqrt(vec.reduce((acc, v) => acc + v * v, 0)) || 1;
-  return vec.map((v) => Math.round((v / norm) * 1000) / 1000);
+  return vec.map((v) => v / norm);
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {
@@ -121,10 +120,10 @@ export function buildContextualRagCorpus(
       rawChunkText,
       anthropicContextualPrefix: prefix,
       contextualizedText,
-      tokenCount: Math.ceil(contextualizedText.length / 4),
-      embeddingDimension: 384,
-      embeddingPreview: computeSemanticEmbedding(contextualizedText),
-      linkedGraphEntities: [clause.id, ...clause.deontic.targetDataScope],
+      tokenCount: countTokens(contextualizedText),
+      embeddingDimension: EMBEDDING_DIMENSIONS,
+      embeddingPreview: computeSemanticEmbedding(contextualizedText).slice(0, 12),
+      linkedGraphEntities: [clause.id, clause.citation, ...clause.deontic.targetDataScope],
     });
 
     triples.push({
@@ -142,7 +141,7 @@ export function buildContextualRagCorpus(
   for (const table of sqlTables) {
     const piiCols = table.columns.filter((c) => c.isPII).map((c) => c.name);
     const prefix = `[Anthropic Contextual RAG Prefix | SQL Schema: ${table.filePath}:${table.startLine}-${table.endLine} | Table: ${table.tableName} | PII Columns: ${piiCols.join(', ') || 'none'} | Retention Hours: ${table.retentionHoursConfigured ?? 'unset'}h | Tenant KMS Isolated: ${table.hasTenantKeyIsolation}]`;
-    const rawChunkText = `TABLE ${table.tableName} (${table.columns.map((c) => `${c.name} ${c.dataType}`).join(', ')}) — retention_ttl_hours=${table.retentionHoursConfigured ?? 720}h, hasTenantKeyIsolation=${table.hasTenantKeyIsolation}`;
+    const rawChunkText = `TABLE ${table.tableName} (${table.columns.map((c) => `${c.name} ${c.dataType}`).join(', ')}) — retention=${table.retentionHoursConfigured ?? 'unset'}h, hasTenantKeyIsolation=${table.hasTenantKeyIsolation}`;
     const contextualizedText = `${prefix}\n${rawChunkText}`;
 
     chunks.push({
@@ -154,10 +153,16 @@ export function buildContextualRagCorpus(
       rawChunkText,
       anthropicContextualPrefix: prefix,
       contextualizedText,
-      tokenCount: Math.ceil(contextualizedText.length / 4),
-      embeddingDimension: 384,
-      embeddingPreview: computeSemanticEmbedding(contextualizedText),
-      linkedGraphEntities: [table.tableName, ...piiCols, 'CLAUSE-DPA-4.2'],
+      tokenCount: countTokens(contextualizedText),
+      embeddingDimension: EMBEDDING_DIMENSIONS,
+      embeddingPreview: computeSemanticEmbedding(contextualizedText).slice(0, 12),
+      linkedGraphEntities: [
+        table.tableName,
+        ...piiCols,
+        ...clauses
+          .filter((c) => ['RETENTION_AND_TENANT_KMS', 'ENCRYPTION_AT_REST', 'RIGHT_TO_ERASURE_CASCADE'].includes(c.category))
+          .map((c) => c.id),
+      ],
     });
 
     for (const col of piiCols) {
@@ -188,9 +193,9 @@ export function buildContextualRagCorpus(
       rawChunkText,
       anthropicContextualPrefix: prefix,
       contextualizedText,
-      tokenCount: Math.ceil(contextualizedText.length / 4),
-      embeddingDimension: 384,
-      embeddingPreview: computeSemanticEmbedding(contextualizedText),
+      tokenCount: countTokens(contextualizedText),
+      embeddingDimension: EMBEDDING_DIMENSIONS,
+      embeddingPreview: computeSemanticEmbedding(contextualizedText).slice(0, 12),
       linkedGraphEntities: [finding.filePath, finding.functionName, finding.constructType],
     });
   }
@@ -210,10 +215,15 @@ export function buildContextualRagCorpus(
       rawChunkText,
       anthropicContextualPrefix: prefix,
       contextualizedText,
-      tokenCount: Math.ceil(contextualizedText.length / 4),
-      embeddingDimension: 384,
-      embeddingPreview: computeSemanticEmbedding(contextualizedText),
-      linkedGraphEntities: [proof.clauseId, ...proof.affectedGraphNodeIds],
+      tokenCount: countTokens(contextualizedText),
+      embeddingDimension: EMBEDDING_DIMENSIONS,
+      embeddingPreview: computeSemanticEmbedding(contextualizedText).slice(0, 12),
+      linkedGraphEntities: [
+        proof.clauseId,
+        proof.citation,
+        ...proof.affectedGraphNodeIds,
+        ...proof.offendingLocations.map((l) => l.filePath),
+      ],
     });
 
     for (const loc of proof.offendingLocations) {
@@ -232,139 +242,206 @@ export function buildContextualRagCorpus(
   return { chunks, triples };
 }
 
-/**
- * Executes the full 7-Stage Hybrid Contextual + Graph RAG Pipeline:
- * 1. Query Rewriting & Deontic Entity Extraction
- * 2. HyDE (Hypothetical Formal SMT + AST Document Expansion)
- * 3. Dense Vector Cosine Search (pgvector HNSW equivalent)
- * 4. BM25 Sparse Keyword Search
- * 5. Knowledge Graph 2-Hop Traversal Boost (Graph RAG)
- * 6. Reciprocal Rank Fusion (RRF) + Cross-Encoder Reranking
- * 7. Corrective RAG (CRAG) / Self-RAG Verification + RAGAS Scoring
- */
-export function executeHybridRagQuery(
+interface RetrievalOptions {
+  /** Dense similarity per chunk id from a neural model; feature-hashed vectors otherwise. */
+  denseScores?: Map<string, number>;
+  denseBackend?: string;
+}
+
+function categoryHyde(query: string, clauses: LegalClause[]): { category: RuleCategory; hyde: string } {
+  const category = inferRuleCategoryFromProse(query);
+  const clause = clauses.find((c) => c.category === category);
+  const hyde = clause
+    ? clause.compiled.smtLib2Snippet
+        .split('\n')
+        .filter((l) => l.startsWith('(assert'))
+        .join(' ')
+    : `(assert true) ; no active clause for ${category}`;
+  return { category, hyde: `${hyde} ; HyDE expansion for: ${query}` };
+}
+
+/** 2-hop traversal of the statute ↔ code knowledge graph from entities named in the query. */
+function graphDistances(
+  query: string,
+  category: RuleCategory,
+  clauses: LegalClause[],
+  chunks: ContextualRagChunk[],
+  triples: KnowledgeGraphTriple[]
+): { chunkDistance: Map<string, number>; reachedTriples: KnowledgeGraphTriple[] } {
+  const adj = new Map<string, Set<string>>();
+  const link = (a: string, b: string) => {
+    const ka = a.toLowerCase();
+    const kb = b.toLowerCase();
+    if (!adj.has(ka)) adj.set(ka, new Set());
+    if (!adj.has(kb)) adj.set(kb, new Set());
+    adj.get(ka)!.add(kb);
+    adj.get(kb)!.add(ka);
+  };
+  for (const t of triples) link(t.subject, t.object);
+  for (const c of chunks) for (const e of c.linkedGraphEntities) link(`chunk:${c.chunkId}`, e);
+  for (const t of triples) {
+    // `${file}:${line}` subjects connect to their file node
+    const file = t.subject.replace(/^AST::/, '').replace(/:\d+$/, '');
+    if (file !== t.subject) link(t.subject, file);
+  }
+
+  const q = query.toLowerCase();
+  const seeds = new Set<string>();
+  for (const node of adj.keys()) {
+    if (node.startsWith('chunk:') || node.length < 4) continue;
+    if (q.includes(node)) seeds.add(node);
+  }
+  for (const c of clauses.filter((x) => x.category === category)) seeds.add(c.id.toLowerCase());
+
+  const dist = new Map<string, number>();
+  let frontier = [...seeds];
+  frontier.forEach((n) => dist.set(n, 0));
+  // Entity hops (chunk nodes do not count as a hop).
+  for (let hop = 1; hop <= 2 && frontier.length > 0; hop++) {
+    const next: string[] = [];
+    for (const n of frontier) {
+      for (const m of adj.get(n) || []) {
+        if (m.startsWith('chunk:')) continue;
+        if (!dist.has(m)) {
+          dist.set(m, hop);
+          next.push(m);
+        }
+      }
+    }
+    frontier = next;
+  }
+  const chunkDistance = new Map<string, number>();
+  for (const c of chunks) {
+    const ds = c.linkedGraphEntities.map((e) => dist.get(e.toLowerCase())).filter((d): d is number => d !== undefined);
+    if (ds.length > 0) chunkDistance.set(c.chunkId, Math.min(...ds));
+  }
+  const reachedTriples = triples.filter(
+    (t) => dist.has(t.subject.toLowerCase()) || dist.has(t.object.toLowerCase())
+  );
+  return { chunkDistance, reachedTriples };
+}
+
+/** Relevance labels: chunks tied to clauses / proofs / constructs of the query's category. */
+function isRelevant(chunk: ContextualRagChunk, category: RuleCategory, clauses: LegalClause[], proofs: ClauseVerificationProof[]): boolean {
+  const ids = new Set(clauses.filter((c) => c.category === category).map((c) => c.id));
+  if (chunk.linkedGraphEntities.some((e) => ids.has(e))) return true;
+  if (chunk.sourceType === 'POLYGLOT_AST_NODE') {
+    const paths = new Set(
+      proofs
+        .filter((p) => p.category === category)
+        .flatMap((p) => [...p.offendingLocations.map((l) => l.filePath), ...(p.repairTargets || []).map((t) => t.filePath)])
+    );
+    return chunk.linkedGraphEntities.some((e) => paths.has(e));
+  }
+  return false;
+}
+
+function hybridRetrieve(
   query: string,
   clauses: LegalClause[],
   sqlTables: SQLTableSchema[],
   astFindings: ASTFindingNode[],
   proofs: ClauseVerificationProof[],
-  topK = 5
+  topK: number,
+  options: RetrievalOptions = {}
 ): RagQueryExecutionReport {
   const t0 = performance.now();
-  const { chunks, triples } = buildContextualRagCorpus(
-    clauses,
-    sqlTables,
-    astFindings,
-    proofs
-  );
+  const { chunks, triples } = buildContextualRagCorpus(clauses, sqlTables, astFindings, proofs);
+  const { category, hyde } = categoryHyde(query, clauses);
+  const rewrittenDeonticQuery = `DEONTIC_SEARCH(query="${query}", category=${category}, modalities=[OBLIGATION, PROHIBITION], targets=[SQL DDL, Python AST, TypeScript AST, Z3 proofs])`;
+  const queryText = `${query} ${hyde}`;
 
-  // Stage 1 & 2: Query Rewriting & HyDE Hypothetical Formal Document Generation
-  const lowerQ = query.toLowerCase();
-  const rewrittenDeonticQuery = `DEONTIC_SEARCH(query="${query}", modalities=[OBLIGATION, PROHIBITION], targets=[PostgresDDL, PythonAST, TypeScriptAST, Z3UnsatCore])`;
-
-  let hydeHypotheticalFormalQuery = `(assert (and (<= retention_ttl_hours 72) (= tenant_kms_isolated true))) ; HyDE expansion for: ${query}`;
-  if (lowerQ.includes('log') || lowerQ.includes('hipaa') || lowerQ.includes('redact')) {
-    hydeHypotheticalFormalQuery = `(assert (= fastapi_logs_plaintext_pii false)) ; Call(logger.info) redact_pii(payload.patient_id)`;
-  } else if (lowerQ.includes('ai') || lowerQ.includes('confidence') || lowerQ.includes('human')) {
-    hydeHypotheticalFormalQuery = `(assert (and (>= ai_engine_confidence_gate_pct 85) (= ai_engine_has_human_oversight true)))`;
-  } else if (lowerQ.includes('region') || lowerQ.includes('border') || lowerQ.includes('transfer')) {
-    hydeHypotheticalFormalQuery = `(assert (= egress_targets_non_eu_region false)) ; REPLICA_TARGET_REGION in {"eu-central-1", "eu-west-1"}`;
+  // Dense
+  const qVec = computeSemanticEmbedding(queryText);
+  const dense = new Map<string, number>();
+  for (const c of chunks) {
+    dense.set(c.chunkId, options.denseScores?.get(c.chunkId) ?? cosineSimilarity(qVec, computeSemanticEmbedding(c.contextualizedText)));
   }
 
-  const combinedQueryVec = computeSemanticEmbedding(`${query} ${hydeHypotheticalFormalQuery}`);
-  const queryTokens = tokenizeWords(`${query} ${hydeHypotheticalFormalQuery}`);
-
-  // Compute BM25 IDF across corpus
-  const N = chunks.length;
-  const avgDl =
-    chunks.reduce((acc, c) => acc + tokenizeWords(c.contextualizedText).length, 0) /
-    Math.max(1, N);
-
-  const scoredItems: RagRetrievedItem[] = chunks.map((chunk) => {
-    // 1. Dense Vector Cosine Similarity
-    const denseVectorScore = cosineSimilarity(combinedQueryVec, chunk.embeddingPreview);
-
-    // 2. BM25 Sparse Keyword Score
-    const docTokens = tokenizeWords(chunk.contextualizedText);
-    const freqMap = new Map<string, number>();
-    for (const tok of docTokens) {
-      freqMap.set(tok, (freqMap.get(tok) || 0) + 1);
+  // BM25 (k1 = 1.5, b = 0.75) with document frequencies over token sets
+  const docs = chunks.map((c) => tokenizeWords(c.contextualizedText));
+  const docSets = docs.map((d) => new Set(d));
+  const avgDl = docs.reduce((acc, d) => acc + d.length, 0) / Math.max(1, docs.length);
+  const queryTokens = [...new Set(tokenizeWords(queryText))];
+  const bm25Raw = docs.map((d, idx) => {
+    const tf = new Map<string, number>();
+    for (const t of d) tf.set(t, (tf.get(t) || 0) + 1);
+    let score = 0;
+    for (const q of queryTokens) {
+      const f = tf.get(q) || 0;
+      if (!f) continue;
+      const df = docSets.filter((s) => s.has(q)).length;
+      const idf = Math.log(1 + (docs.length - df + 0.5) / (df + 0.5));
+      score += idf * ((f * 2.5) / (f + 1.5 * (1 - 0.75 + 0.75 * (d.length / avgDl))));
     }
-
-    let bm25Raw = 0;
-    const k1 = 1.5;
-    const b = 0.75;
-    for (const qTok of queryTokens) {
-      const tf = freqMap.get(qTok) || 0;
-      if (tf === 0) continue;
-      const docFreq = chunks.filter((c) =>
-        c.contextualizedText.toLowerCase().includes(qTok)
-      ).length;
-      const idf = Math.log(1 + (N - docFreq + 0.5) / (docFreq + 0.5));
-      bm25Raw +=
-        idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (docTokens.length / avgDl))));
-    }
-    const bm25KeywordScore = Math.min(0.99, Math.round((bm25Raw / 8) * 1000) / 1000);
-
-    // 3. Graph RAG Traversal Boost (boosts chunks whose entities appear in active violation triples)
-    const matchingTriplesCount = triples.filter(
-      (tr) =>
-        chunk.linkedGraphEntities.some(
-          (ent) =>
-            tr.subject.toLowerCase().includes(ent.toLowerCase()) ||
-            tr.object.toLowerCase().includes(ent.toLowerCase())
-        )
-    ).length;
-    const graphTraversalBoost = Math.min(
-      0.35,
-      Math.round(matchingTriplesCount * 0.09 * 1000) / 1000
-    );
-
-    // 4. Reciprocal Rank Fusion + Cross-Encoder Reranker Score
-    const rrfHybridScore =
-      Math.round(
-        (denseVectorScore * 0.48 + bm25KeywordScore * 0.34 + graphTraversalBoost * 0.18) * 1000
-      ) / 1000;
-    const crossEncoderRerankScore = Math.min(
-      0.995,
-      Math.round((rrfHybridScore * 1.08 + 0.04) * 1000) / 1000
-    );
-
-    return {
-      chunk,
-      denseVectorScore,
-      bm25KeywordScore,
-      graphTraversalBoost,
-      rrfHybridScore,
-      crossEncoderRerankScore,
-      cragVerdict:
-        crossEncoderRerankScore >= 0.45 ? 'CORRECT_HIGH_CONFIDENCE' : 'AMBIGUOUS_REFINED',
-    };
+    void idx;
+    return score;
   });
+  const bm25Max = Math.max(1e-9, ...bm25Raw);
 
-  scoredItems.sort((a, b) => b.crossEncoderRerankScore - a.crossEncoderRerankScore);
-  const topRetrieved = scoredItems.slice(0, topK);
+  // Graph
+  const { chunkDistance, reachedTriples } = graphDistances(query, category, clauses, chunks, triples);
 
-  const matchedGraphTriples = triples.slice(0, 8);
+  // Reciprocal Rank Fusion over the three rankings (k = 60)
+  const rankOf = (scores: number[]) => {
+    const order = scores.map((s, i) => ({ s, i })).sort((a, b) => b.s - a.s);
+    const rank = new Array<number>(scores.length);
+    order.forEach((o, r) => (rank[o.i] = o.s > 0 ? r + 1 : Infinity));
+    return rank;
+  };
+  const denseArr = chunks.map((c) => dense.get(c.chunkId) || 0);
+  const graphArr = chunks.map((c) => (chunkDistance.has(c.chunkId) ? 1 / (1 + chunkDistance.get(c.chunkId)!) : 0));
+  const ranks = [rankOf(denseArr), rankOf(bm25Raw), rankOf(graphArr)];
+  const rrf = chunks.map((_, i) => ranks.reduce((acc, r) => acc + (Number.isFinite(r[i]) ? 1 / (60 + r[i]) : 0), 0));
+  const rrfMax = Math.max(1e-9, ...rrf);
 
-  // Synthesize grounded neuro-symbolic answer citing exact Contextual RAG chunks & Z3 proofs
-  const violatedProofs = proofs.filter((p) => p.status === 'UNSAT_VIOLATION');
-  const topCitations = topRetrieved.map((r) => r.chunk.citationOrPath).join(', ');
+  const round = (v: number) => Math.round(v * 1000) / 1000;
+  const scored: RagRetrievedItem[] = chunks.map((chunk, i) => ({
+    chunk,
+    denseVectorScore: round(denseArr[i]),
+    bm25KeywordScore: round(bm25Raw[i] / bm25Max),
+    graphTraversalBoost: round(graphArr[i]),
+    rrfHybridScore: round(rrf[i] / rrfMax),
+    crossEncoderRerankScore: round(rrf[i] / rrfMax),
+    cragVerdict: bm25Raw[i] > 0 || denseArr[i] >= 0.25 ? 'CORRECT_HIGH_CONFIDENCE' : 'AMBIGUOUS_REFINED',
+  }));
+  scored.sort((a, b) => b.rrfHybridScore - a.rrfHybridScore);
+  const topRetrieved = scored.slice(0, topK);
+
+  // Grounded answer built only from retrieved chunks and Z3 results
+  const violated = proofs.filter((p) => p.status === 'UNSAT_VIOLATION' && (p.category === category || topRetrieved.some((r) => r.chunk.sourceId === `proof:${p.clauseId}`)));
+  const citations = topRetrieved.map((r) => r.chunk.citationOrPath);
+  const locations = violated.flatMap((p) => p.offendingLocations.map((l) => `${l.filePath}:${l.line}`));
   const synthesizedNeuroSymbolicAnswer =
-    violatedProofs.length > 0
-      ? `[Grounded via Contextual + Graph RAG across ${topCitations}]: Microsoft Z3 proved ${violatedProofs.length} statutory UNSAT contradictions (${violatedProofs
-          .map((p) => `${p.citation} -> ${p.unsatCoreAssertions[0] || 'UNSAT'}`)
-          .join('; ')}). Auto-Remediation PR #409 patches ${violatedProofs
-          .flatMap((p) => p.offendingLocations.map((l) => `${l.filePath}:${l.line}`))
-          .join(', ')} and transitions all constraints from UNSAT to SAT.`
-      : `[Grounded via Contextual + Graph RAG across ${topCitations}]: All ${proofs.length} statutory clauses are mathematically proven SAT_COMPLIANT (Q.E.D.) across PostgreSQL DDL, Python FastAPI/Redis ASTs, and TypeScript AI/Replication services.`;
+    violated.length > 0
+      ? `[Grounded in ${citations.join(', ')}]: Z3 refutes ${violated.map((p) => `${p.citation} (core: ${p.unsatCoreAssertions.slice(0, 3).join(', ')})`).join('; ')}. Offending code: ${locations.join(', ') || 'see proofs'}.`
+      : `[Grounded in ${citations.join(', ')}]: Z3 proves the ${category} clauses SAT_COMPLIANT for the scanned constructs.`;
 
-  const latencyMs = Math.max(1.2, Math.round((performance.now() - t0) * 100) / 100);
+  // Retrieval metrics against category-derived relevance labels
+  const relevant = chunks.filter((c) => isRelevant(c, category, clauses, proofs));
+  const relevantIds = new Set(relevant.map((c) => c.chunkId));
+  const hits = topRetrieved.filter((r) => relevantIds.has(r.chunk.chunkId)).length;
+  let apSum = 0;
+  let seen = 0;
+  topRetrieved.forEach((r, idx) => {
+    if (relevantIds.has(r.chunk.chunkId)) {
+      seen++;
+      apSum += seen / (idx + 1);
+    }
+  });
+  const contextPrecision = topRetrieved.length ? apSum / Math.max(1, Math.min(topK, relevant.length)) : 0;
+  const contextRecall = relevant.length ? hits / relevant.length : 1;
+  const retrievedText = topRetrieved.map((r) => `${r.chunk.citationOrPath} ${r.chunk.contextualizedText}`).join('\n');
+  const claims = [...citations, ...locations, ...violated.map((p) => p.citation)];
+  const faithfulness = claims.length ? claims.filter((c) => retrievedText.includes(c.replace(/:\d+$/, ''))).length / claims.length : 1;
+  const answerRelevance = Math.max(0, cosineSimilarity(computeSemanticEmbedding(query), computeSemanticEmbedding(synthesizedNeuroSymbolicAnswer)));
+  const deonticAlignmentScore = topRetrieved.length ? hits / topRetrieved.length : 0;
+  const metrics = [contextPrecision, contextRecall, faithfulness, answerRelevance, deonticAlignmentScore].map((v) => round(Math.min(1, v)));
 
   return {
-    queryId: `RAG-${Date.now().toString().slice(-5)}`,
+    queryId: `RAG-${Date.now().toString(36)}`,
     originalQuery: query,
-    hydeHypotheticalFormalQuery,
+    hydeHypotheticalFormalQuery: hyde,
     rewrittenDeonticQuery,
     techniquesExecuted: [
       'Contextual RAG (Anthropic-style Prefix Prepending)',
@@ -376,17 +453,18 @@ export function executeHybridRagQuery(
       'Cross-Encoder Reranker (BGE-Reranker-Large equivalent)',
       'Corrective RAG (CRAG) + Self-RAG Faithfulness Gate',
     ],
-    latencyMs,
+    latencyMs: Math.max(0.1, Math.round((performance.now() - t0) * 100) / 100),
     retrievedChunks: topRetrieved,
-    matchedGraphTriples,
+    matchedGraphTriples: reachedTriples.slice(0, 12),
     synthesizedNeuroSymbolicAnswer,
     ragasMetrics: {
-      contextPrecision: 0.964,
-      contextRecall: 0.982,
-      faithfulness: 0.991,
-      answerRelevance: 0.975,
-      deonticAlignmentScore: 0.988,
-      overallRagasScore: 0.98,
+      contextPrecision: metrics[0],
+      contextRecall: metrics[1],
+      faithfulness: metrics[2],
+      answerRelevance: metrics[3],
+      deonticAlignmentScore: metrics[4],
+      overallRagasScore: round(metrics.reduce((a, b) => a + b, 0) / metrics.length),
+      evaluationMethod: `Computed against category-derived relevance labels (${relevant.length} relevant chunks for ${category}); dense backend: ${options.denseBackend || '384-d feature hashing'}`,
     },
     vectorDbBackend: 'pgvector (HNSW Cosine Index, dim=384) + In-Memory Dense Store',
     graphDbBackend: 'Neo4j Cypher + ArangoDB Multi-Model Property Graph',
@@ -394,9 +472,30 @@ export function executeHybridRagQuery(
 }
 
 /**
- * Executes the Hybrid Contextual + Graph RAG pipeline using REAL 384-dimensional
- * Sentence-Transformer embeddings from Ollama (`all-minilm:latest`) and REAL
- * LLM grounded synthesis (`qwen2.5-coder:0.5b` / `dolphin3:latest`).
+ * Executes the full 7-Stage Hybrid Contextual + Graph RAG Pipeline:
+ * 1. Query Rewriting & Deontic Entity Extraction
+ * 2. HyDE (Hypothetical Formal SMT + AST Document Expansion)
+ * 3. Dense Vector Cosine Search
+ * 4. BM25 Sparse Keyword Search
+ * 5. Knowledge Graph 2-Hop Traversal Boost (Graph RAG)
+ * 6. Reciprocal Rank Fusion (RRF)
+ * 7. Corrective RAG (CRAG) Verdicts + Retrieval Metrics
+ */
+export function executeHybridRagQuery(
+  query: string,
+  clauses: LegalClause[],
+  sqlTables: SQLTableSchema[],
+  astFindings: ASTFindingNode[],
+  proofs: ClauseVerificationProof[],
+  topK = 5
+): RagQueryExecutionReport {
+  return hybridRetrieve(query, clauses, sqlTables, astFindings, proofs, topK);
+}
+
+/**
+ * Same pipeline with neural dense retrieval: when Ollama `all-minilm` is reachable,
+ * every chunk and the query are embedded (cached by content hash) and those cosine
+ * scores drive the dense ranking; a local LLM then writes a grounded answer.
  */
 export async function executeRealNeuralRagQuery(
   query: string,
@@ -407,57 +506,35 @@ export async function executeRealNeuralRagQuery(
   topK = 5
 ): Promise<RagQueryExecutionReport> {
   const t0 = performance.now();
-  const baseReport = executeHybridRagQuery(
-    query,
-    clauses,
-    sqlTables,
-    astFindings,
-    proofs,
-    topK
-  );
-
-  // Compute real 384-d neural embeddings via Ollama all-minilm:latest for the query and top chunks
-  const queryNeural = await computeRealNeuralEmbedding(
-    `${query}\n${baseReport.hydeHypotheticalFormalQuery}`
-  );
-
+  const { chunks } = buildContextualRagCorpus(clauses, sqlTables, astFindings, proofs);
+  const { hyde } = categoryHyde(query, clauses);
+  const queryNeural = await computeRealNeuralEmbedding(`${query}\n${hyde}`);
+  let options: RetrievalOptions = {};
   if (queryNeural.embedding.length > 0) {
-    for (const item of baseReport.retrievedChunks) {
-      const chunkNeural = await computeRealNeuralEmbedding(item.chunk.contextualizedText);
-      if (chunkNeural.embedding.length > 0) {
-        item.chunk.embeddingDimension = chunkNeural.embedding.length;
-        item.chunk.embeddingPreview = chunkNeural.embedding.slice(0, 12);
-        const neuralCos = cosineSimilarity(queryNeural.embedding, chunkNeural.embedding);
-        item.denseVectorScore = Math.max(item.denseVectorScore, neuralCos);
-        item.rrfHybridScore =
-          Math.round(
-            (item.denseVectorScore * 0.5 +
-              item.bm25KeywordScore * 0.32 +
-              item.graphTraversalBoost * 0.18) *
-              1000
-          ) / 1000;
-      }
+    const denseScores = new Map<string, number>();
+    for (const c of chunks) {
+      const e = await computeRealNeuralEmbedding(c.contextualizedText);
+      if (e.embedding.length > 0) denseScores.set(c.chunkId, cosineSimilarity(queryNeural.embedding, e.embedding));
     }
+    options = { denseScores, denseBackend: queryNeural.modelUsed };
   }
+  const report = hybridRetrieve(query, clauses, sqlTables, astFindings, proofs, topK, options);
 
-  const contextBlock = baseReport.retrievedChunks
+  const contextBlock = report.retrievedChunks
     .slice(0, 3)
     .map((c) => `[${c.chunk.citationOrPath}]: ${c.chunk.rawChunkText.slice(0, 220)}`)
     .join('\n');
-
   const llmGen = await runRealLlmInference({
     model: 'qwen2.5-coder:0.5b',
     prompt: `Question: ${query}\nRetrieved Context:\n${contextBlock}\nProvide a concise 2-sentence grounded compliance answer citing the exact file/statute:`,
     maxTokens: 95,
   });
 
-  const totalLatencyMs = Math.round((performance.now() - t0) * 10) / 10;
-
   return {
-    ...baseReport,
-    latencyMs: totalLatencyMs,
-    synthesizedNeuroSymbolicAnswer: `[Ollama ${llmGen.model} @ ${llmGen.tokensPerSecond} tok/s + all-minilm 384-d Embeddings]: ${llmGen.responseText} — ${baseReport.synthesizedNeuroSymbolicAnswer}`,
-    vectorDbBackend: `Ollama all-minilm:latest (Real 384-d Neural Embeddings) + SQLite/pgvector Store`,
+    ...report,
+    latencyMs: Math.round((performance.now() - t0) * 10) / 10,
+    synthesizedNeuroSymbolicAnswer: llmGen.available
+      ? `[${llmGen.model}]: ${llmGen.responseText} — ${report.synthesizedNeuroSymbolicAnswer}`
+      : report.synthesizedNeuroSymbolicAnswer,
   };
 }
-

@@ -1,10 +1,12 @@
 import { performance } from 'node:perf_hooks';
-import { analyzeFullRepository } from '../analyzer/astAnalyzer.js';
+import { analyzeFullRepositoryAsync } from '../analyzer/astAnalyzer.js';
+import { runTreeSitterQueries } from '../analyzer/treeSitter.js';
 import { readTargetRepoFiles } from '../analyzer/repoBaseline.js';
 import {
   compileLegalProseToFormalPolicy,
   fetchLiveRegulatoryFeed,
   getInitialClauses,
+  inferRuleCategoryFromProse,
   sha256Hex,
 } from '../compiler/legalCompiler.js';
 import { verifyRepositoryAgainstClauses } from '../prover/z3Engine.js';
@@ -227,6 +229,238 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
   ];
 }
 
+/** MCP protocol revisions this server speaks, newest first. */
+export const MCP_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26'];
+
+/** JSON-RPC error with an MCP/JSON-RPC error code. */
+export class McpError extends Error {
+  constructor(
+    public code: number,
+    message: string,
+    public data?: unknown
+  ) {
+    super(message);
+  }
+}
+
+type JsonRpcId = string | number | null;
+
+export interface JsonRpcResponse {
+  jsonrpc: '2.0';
+  id: JsonRpcId;
+  result?: unknown;
+  error?: { code: number; message: string; data?: unknown };
+}
+
+function validateArguments(schema: Record<string, unknown>, args: Record<string, unknown>): void {
+  const properties = (schema.properties || {}) as Record<string, { type?: string; enum?: unknown[] }>;
+  for (const key of (schema.required as string[] | undefined) || []) {
+    if (args[key] === undefined) throw new McpError(-32602, `Missing required argument "${key}"`);
+  }
+  for (const [key, value] of Object.entries(args)) {
+    const spec = properties[key];
+    if (!spec || value === undefined) continue;
+    const actual = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
+    const expected = spec.type === 'integer' ? 'number' : spec.type;
+    if (expected && actual !== expected) {
+      throw new McpError(-32602, `Argument "${key}" must be ${spec.type}, got ${actual}`);
+    }
+    if (spec.enum && !spec.enum.includes(value)) {
+      throw new McpError(-32602, `Argument "${key}" must be one of ${spec.enum.join(', ')}`);
+    }
+  }
+}
+
+/** Runs one tool; throws McpError(-32602) for unknown servers, tools, or invalid arguments. */
+export async function executeMcpTool(
+  serverId: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  clauses: LegalClause[]
+): Promise<Record<string, unknown>> {
+  const server = getMcpServersCatalog().find((s) => s.id === serverId);
+  if (!server) throw new McpError(-32602, `Unknown MCP server "${serverId}"`);
+  const tool = server.tools.find((t) => t.name === toolName);
+  if (!tool) throw new McpError(-32602, `Unknown tool "${toolName}" on ${serverId}`);
+  validateArguments(tool.inputSchema, args);
+
+  const repo = () => analyzeFullRepositoryAsync(readTargetRepoFiles());
+  switch (toolName) {
+    case 'fetch_live_regulatory_feed': {
+      const feed = await fetchLiveRegulatoryFeed();
+      const jurisdiction = String(args.jurisdiction || 'ALL');
+      const items = feed.filter(
+        (i) => jurisdiction === 'ALL' || (jurisdiction === 'EU' ? i.source === 'EUR_LEX' : i.source === 'FEDERAL_REGISTER')
+      );
+      return { totalStatutesFetched: items.length, items };
+    }
+    case 'parse_dpa_contract_clause': {
+      const text = String(args.clauseText);
+      const category = inferRuleCategoryFromProse(text);
+      const compiled = compileLegalProseToFormalPolicy(text, category, 'CLAUSE-MCP-INGEST', String(args.framework || 'Custom DPA'));
+      return { inferredCategory: category, extractedDeontic: compiled.deontic, statuteSha256: sha256Hex(text) };
+    }
+    case 'compile_prose_to_smt_and_rego': {
+      const text = String(args.rawLegalText);
+      const category = (args.category as RuleCategory) || inferRuleCategoryFromProse(text);
+      return { ...compileLegalProseToFormalPolicy(text, category, 'CLAUSE-MCP-COMPILE', String(args.citation || 'Custom clause')) };
+    }
+    case 'scan_polyglot_repository_ast': {
+      const { sqlTables, astFindings, enrichedFiles } = await repo();
+      const structuralQueryMatches: Record<string, unknown> = {};
+      for (const clause of clauses) {
+        structuralQueryMatches[clause.id] = await runTreeSitterQueries(clause.compiled.astPatternQuery, enrichedFiles);
+      }
+      return {
+        structuralQueryMatches,
+        filesScanned: enrichedFiles.length,
+        totalAstNodes: enrichedFiles.reduce((acc, f) => acc + (f.astNodeCount || 0), 0),
+        sqlTables,
+        astFindings,
+      };
+    }
+    case 'prove_repository_compliance_z3': {
+      const { sqlTables, astFindings } = await repo();
+      const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
+      return {
+        totalSolveTimeMs: verification.totalZ3ExecutionMs,
+        merkleAuditRoot: verification.merkleAuditRoot,
+        verdicts: verification.proofs.map((p) => ({
+          clauseId: p.clauseId,
+          citation: p.citation,
+          status: p.status,
+          unsatCore: p.unsatCoreAssertions,
+          offendingLocations: p.offendingLocations.map((l) => ({ filePath: l.filePath, line: l.line, explanation: l.explanation })),
+          reviewReasons: p.reviewReasons || [],
+          solveTimeMs: p.z3SolveTimeMs,
+        })),
+      };
+    }
+    case 'hybrid_contextual_graph_rag_query': {
+      const { sqlTables, astFindings } = await repo();
+      const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
+      const topK = typeof args.topK === 'number' ? args.topK : 4;
+      return { ...executeHybridRagQuery(String(args.query), clauses, sqlTables, astFindings, verification.proofs, topK) };
+    }
+    case 'synthesize_and_verify_remediation_pr': {
+      const { sqlTables, astFindings, enrichedFiles } = await repo();
+      const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
+      const pr = await synthesizeRemediationPullRequest(clauses, enrichedFiles, verification.proofs);
+      return pr ? { ...pr } : { status: 'ALL_COMPLIANT_NO_PR_NEEDED', merkleAuditRoot: verification.merkleAuditRoot };
+    }
+    default:
+      throw new McpError(-32602, `Tool "${toolName}" has no implementation`);
+  }
+}
+
+function resourcesFor(serverId: string) {
+  return [
+    { uri: `lex://${serverId}/clauses/active`, name: 'Active legal clauses', mimeType: 'application/json' },
+    { uri: `lex://${serverId}/repository/files`, name: 'Scanned repository files', mimeType: 'application/json' },
+    { uri: `lex://${serverId}/proofs/latest`, name: 'Latest Z3 verdicts', mimeType: 'application/json' },
+  ];
+}
+
+async function readResource(serverId: string, uri: string, clauses: LegalClause[]): Promise<unknown> {
+  if (uri === `lex://${serverId}/clauses/active`) return clauses;
+  if (uri === `lex://${serverId}/repository/files`) {
+    return readTargetRepoFiles().map((f) => ({ path: f.path, language: f.language, bytes: f.content.length }));
+  }
+  if (uri === `lex://${serverId}/proofs/latest`) {
+    const { sqlTables, astFindings } = await analyzeFullRepositoryAsync(readTargetRepoFiles());
+    const v = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
+    return v.proofs.map((p) => ({ clauseId: p.clauseId, status: p.status, unsatCore: p.unsatCoreAssertions }));
+  }
+  throw new McpError(-32002, `Resource not found: ${uri}`);
+}
+
+/**
+ * Handles one MCP JSON-RPC 2.0 message (Streamable HTTP POST body or stdio line).
+ * Returns the response, or null for notifications.
+ */
+export async function handleMcpMessage(
+  serverId: string,
+  message: unknown,
+  clauses: LegalClause[]
+): Promise<JsonRpcResponse | null> {
+  const msg = message as { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: Record<string, unknown> };
+  const hasId = msg && typeof msg === 'object' && 'id' in msg && (typeof msg.id === 'string' || typeof msg.id === 'number');
+  const id: JsonRpcId = hasId ? (msg.id as string | number) : null;
+  if (!msg || typeof msg !== 'object' || msg.jsonrpc !== '2.0' || typeof msg.method !== 'string') {
+    return { jsonrpc: '2.0', id, error: { code: -32600, message: 'Invalid Request' } };
+  }
+  if (!hasId) return null; // notifications (initialized, cancelled, …) get no response
+
+  const server = getMcpServersCatalog().find((s) => s.id === serverId);
+  if (!server) return { jsonrpc: '2.0', id, error: { code: -32602, message: `Unknown MCP server "${serverId}"` } };
+  const params = msg.params || {};
+
+  try {
+    switch (msg.method) {
+      case 'initialize': {
+        const requested = String(params.protocolVersion || '');
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            protocolVersion: MCP_PROTOCOL_VERSIONS.includes(requested) ? requested : MCP_PROTOCOL_VERSIONS[0],
+            capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
+            serverInfo: { name: server.name, version: server.version },
+            instructions: server.description,
+          },
+        };
+      }
+      case 'ping':
+        return { jsonrpc: '2.0', id, result: {} };
+      case 'tools/list':
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: { tools: server.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) },
+        };
+      case 'tools/call': {
+        if (typeof params.name !== 'string') throw new McpError(-32602, 'params.name must be a string');
+        const args = (params.arguments as Record<string, unknown> | undefined) || {};
+        try {
+          const output = await executeMcpTool(serverId, params.name, args, clauses);
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: { content: [{ type: 'text', text: JSON.stringify(output, null, 2) }], structuredContent: output, isError: false },
+          };
+        } catch (err) {
+          if (err instanceof McpError) throw err;
+          // Tool execution failures are reported in-band so the model can see them.
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: { content: [{ type: 'text', text: err instanceof Error ? err.message : String(err) }], isError: true },
+          };
+        }
+      }
+      case 'resources/list':
+        return { jsonrpc: '2.0', id, result: { resources: resourcesFor(serverId) } };
+      case 'resources/read': {
+        const uri = String(params.uri || '');
+        const data = await readResource(serverId, uri, clauses);
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(data, null, 2) }] },
+        };
+      }
+      default:
+        throw new McpError(-32601, `Method not found: ${msg.method}`);
+    }
+  } catch (err) {
+    if (err instanceof McpError) {
+      return { jsonrpc: '2.0', id, error: { code: err.code, message: err.message, ...(err.data ? { data: err.data } : {}) } };
+    }
+    return { jsonrpc: '2.0', id, error: { code: -32603, message: err instanceof Error ? err.message : String(err) } };
+  }
+}
+
+/** Runs a tools/call through the JSON-RPC handler and returns a request/response trace for the UI. */
 export async function invokeMcpTool(
   serverId: string,
   toolName: string,
@@ -234,137 +468,17 @@ export async function invokeMcpTool(
   activeClauses?: LegalClause[]
 ): Promise<McpToolInvocationResult> {
   const t0 = performance.now();
-  const clauses = activeClauses || getInitialClauses();
-  const rpcId = `rpc-${Date.now().toString().slice(-6)}`;
-
-  let structuredOutput: unknown = {};
-
-  if (serverId === 'lex-statute-ingest-mcp') {
-    if (toolName === 'fetch_live_regulatory_feed') {
-      const feed = await fetchLiveRegulatoryFeed();
-      structuredOutput = {
-        totalStatutesFetched: feed.length,
-        sources: ['EUR_LEX_SPARQL_REST', 'US_FEDERAL_REGISTER_API'],
-        items: feed,
-      };
-    } else {
-      const text = String(
-        args.clauseText ||
-          'PII must be encrypted at rest with tenant-isolated keys and purged within 72 hours.'
-      );
-      const compiled = compileLegalProseToFormalPolicy(
-        text,
-        'RETENTION_AND_TENANT_KMS',
-        'CLAUSE-MCP-INGEST',
-        'GDPR Art. 17 / DPA §4.2'
-      );
-      structuredOutput = {
-        extractedDeontic: compiled.deontic,
-        statuteSha256: sha256Hex(text),
-      };
-    }
-  } else if (serverId === 'lex-deontic-compiler-mcp') {
-    const rawText = String(
-      args.rawLegalText ||
-        'All PII must be encrypted at rest with tenant-isolated keys and purged within 72 hours.'
-    );
-    const category = (args.category as RuleCategory) || 'RETENTION_AND_TENANT_KMS';
-    const citation = String(args.citation || 'GDPR Art. 17 & 32 / DPA §4.2');
-    const compiled = compileLegalProseToFormalPolicy(
-      rawText,
-      category,
-      'CLAUSE-MCP-COMPILE',
-      citation
-    );
-    structuredOutput = compiled;
-  } else if (serverId === 'lex-polyglot-ast-mcp') {
-    const rawFiles = readTargetRepoFiles();
-    const { sqlTables, astFindings, enrichedFiles } = analyzeFullRepository(rawFiles);
-    structuredOutput = {
-      filesScanned: enrichedFiles.length,
-      totalAstNodes: enrichedFiles.reduce((acc, f) => acc + (f.astNodeCount || 0), 0),
-      sqlTables,
-      astFindings,
-    };
-  } else if (serverId === 'lex-z3-prover-mcp') {
-    const rawFiles = readTargetRepoFiles();
-    const { sqlTables, astFindings } = analyzeFullRepository(rawFiles);
-    const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
-    structuredOutput = {
-      z3Engine: 'Microsoft Z3 v4.13.4',
-      totalSolveTimeMs: verification.totalZ3ExecutionMs,
-      merkleAuditRoot: verification.merkleAuditRoot,
-      verdicts: verification.proofs.map((p) => ({
-        clauseId: p.clauseId,
-        citation: p.citation,
-        status: p.status,
-        unsatCore: p.unsatCoreAssertions,
-        solveTimeMs: p.z3SolveTimeMs,
-      })),
-    };
-  } else if (serverId === 'lex-hybrid-rag-mcp') {
-    const rawFiles = readTargetRepoFiles();
-    const { sqlTables, astFindings } = analyzeFullRepository(rawFiles);
-    const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
-    const query = String(
-      args.query ||
-        'Which SQL tables and Python endpoints violate the 72-hour retention and tenant-isolated KMS requirement?'
-    );
-    const topK = typeof args.topK === 'number' ? args.topK : 4;
-    structuredOutput = executeHybridRagQuery(
-      query,
-      clauses,
-      sqlTables,
-      astFindings,
-      verification.proofs,
-      topK
-    );
-  } else if (serverId === 'lex-remediation-pr-mcp') {
-    const rawFiles = readTargetRepoFiles();
-    const { sqlTables, astFindings, enrichedFiles } = analyzeFullRepository(rawFiles);
-    const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
-    const pr = await synthesizeRemediationPullRequest(
-      clauses,
-      enrichedFiles,
-      verification.proofs
-    );
-    structuredOutput = pr || {
-      status: 'ALL_COMPLIANT_NO_PR_NEEDED',
-      merkleAuditRoot: verification.merkleAuditRoot,
-    };
-  }
-
-  const latencyMs = Math.max(0.8, Math.round((performance.now() - t0) * 100) / 100);
-
+  const rpcId = `rpc-${Date.now().toString(36)}`;
+  const request = { jsonrpc: '2.0' as const, id: rpcId, method: 'tools/call' as const, params: { name: toolName, arguments: args } };
+  const response = await handleMcpMessage(serverId, request, activeClauses || getInitialClauses());
   return {
-    invocationId: `MCP-CALL-${Date.now().toString().slice(-5)}`,
+    invocationId: `MCP-CALL-${rpcId}`,
     serverId,
     toolName,
     transportUsed: 'streamable-http',
-    latencyMs,
-    jsonRpcRequest: {
-      jsonrpc: '2.0',
-      id: rpcId,
-      method: 'tools/call',
-      params: {
-        name: toolName,
-        arguments: args,
-      },
-    },
-    jsonRpcResponse: {
-      jsonrpc: '2.0',
-      id: rpcId,
-      result: {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(structuredOutput, null, 2),
-          },
-        ],
-        structuredOutput,
-        isError: false,
-      },
-    },
+    latencyMs: Math.round((performance.now() - t0) * 100) / 100,
+    jsonRpcRequest: request,
+    jsonRpcResponse: response as McpToolInvocationResult['jsonRpcResponse'],
     timestamp: new Date().toISOString(),
   };
 }
