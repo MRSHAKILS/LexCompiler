@@ -406,7 +406,7 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
                   </pre>
                   <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
                     <span>
-                      Tokens: <strike>{step.inputTokensRaw}</strike> →{' '}
+                      Tokens: <s>{step.inputTokensRaw}</s> →{' '}
                       <strong className="text-emerald-300">{step.inputTokensOptimized}</strong>
                     </span>
                     <span>Latency: {step.latencyMs} ms</span>
