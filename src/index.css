@@ -7,7 +7,15 @@
     --font-serif: 'Newsreader', 'Noto Sans Bengali', Georgia, serif;
   }
 
-  body {
+  html {
+    font-size: 17px;
+  }
+
+  body, #root {
+    width: 100%;
+    min-height: 100vh;
+    margin: 0;
+    padding: 0;
     font-family: var(--font-sans);
     background-color: #050609;
     background-image: radial-gradient(
