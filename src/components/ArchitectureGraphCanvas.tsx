@@ -6,6 +6,7 @@ import {
   Database,
   FileCode2,
   Globe2,
+  KeyRound,
   Layers,
   Server,
   ShieldAlert,
@@ -31,13 +32,13 @@ interface ArchitectureGraphCanvasProps {
   onQuickApplyNodePatch: (nodeId: string, e: React.MouseEvent) => void;
 }
 
-// Coordinates (in percentage of canvas width/height) for clean topological layout
+// Balanced 3-column coordinates spanning 2% -> 98% of the canvas width (zero empty right space)
 const NODE_POSITIONS: Record<string, { x: number; y: number; cx: number; cy: number }> = {
-  'node-fastapi-endpoint': { x: 4, y: 34, cx: 18, cy: 48 },
-  'node-postgres-schema': { x: 40, y: 6, cx: 54, cy: 20 },
-  'node-redis-worker': { x: 40, y: 39, cx: 54, cy: 53 },
-  'node-ai-engine': { x: 40, y: 71, cx: 54, cy: 85 },
-  'node-cross-border': { x: 73, y: 22, cx: 86, cy: 36 },
+  'node-fastapi-endpoint': { x: 2, y: 28, cx: 16.5, cy: 44 },
+  'node-postgres-schema': { x: 35.5, y: 6, cx: 50, cy: 20 },
+  'node-redis-worker': { x: 35.5, y: 39, cx: 50, cy: 53 },
+  'node-ai-engine': { x: 35.5, y: 71, cx: 50, cy: 85 },
+  'node-cross-border': { x: 69, y: 12, cx: 83.5, cy: 28 },
 };
 
 export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = ({
@@ -52,6 +53,7 @@ export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = (
   onQuickApplyNodePatch,
 }) => {
   const activeProof = proofs.find((p) => p.clauseId === activeClauseId);
+  const violatedCount = proofs.filter((p) => p.status === 'UNSAT_VIOLATION').length;
 
   const getNodeIcon = (role: ArchitectureGraphNode['nodeRole'], isViolation: boolean) => {
     const colorClass = isViolation ? 'text-rose-400' : 'text-emerald-400';
@@ -95,7 +97,7 @@ export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = (
   };
 
   return (
-    <div className="relative w-full h-[395px] bg-[#070A10] border-b border-slate-800/80 overflow-hidden select-none">
+    <div className="relative w-full h-[405px] bg-[#070A10] border-b border-slate-800/80 overflow-hidden select-none">
       {/* Subtle architectural grid background */}
       <div
         className="absolute inset-0 opacity-25 pointer-events-none"
@@ -109,12 +111,9 @@ export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = (
       {/* Top Overlay Bar: Graph Legend & Blast-Radius Telemetry */}
       <div className="relative z-20 flex items-center justify-between px-4 py-2 bg-[#0B0F19]/90 backdrop-blur border-b border-slate-800/70">
         <div className="flex items-center gap-2.5">
-          <span className="inline-flex items-center gap-1.5 text-xs font-semibold tracking-wider uppercase text-slate-300">
-            <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-            Live Polyglot AST & Data-Flow Blast-Radius Graph
-          </span>
-          <span className="text-[11px] font-mono text-slate-400 hidden sm:inline">
-            (Click any Crimson node to inspect offending AST line & auto-remediation diff)
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold tracking-wider uppercase text-slate-200">
+            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+            Live Polyglot AST &amp; Data-Flow Blast-Radius Graph
           </span>
         </div>
 
@@ -194,19 +193,17 @@ export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = (
 
           return (
             <g key={edge.id}>
-              {/* Glow under-stroke */}
               <path
                 d={pathD}
                 fill="none"
-                stroke={isEdgeViolated ? 'rgba(244, 63, 94, 0.22)' : 'rgba(16, 185, 129, 0.16)'}
-                strokeWidth={isHighlightedByActiveClause ? 1.4 : 0.8}
+                stroke={isEdgeViolated ? 'rgba(244, 63, 94, 0.24)' : 'rgba(16, 185, 129, 0.18)'}
+                strokeWidth={isHighlightedByActiveClause ? 1.5 : 0.9}
               />
-              {/* Animated foreground flow */}
               <path
                 d={pathD}
                 fill="none"
                 stroke={isEdgeViolated ? '#F43F5E' : '#10B981'}
-                strokeWidth={isHighlightedByActiveClause ? 0.65 : 0.45}
+                strokeWidth={isHighlightedByActiveClause ? 0.7 : 0.5}
                 className="animate-edge-flow"
                 markerEnd={isEdgeViolated ? 'url(#arrow-crimson)' : 'url(#arrow-emerald)'}
               />
@@ -216,14 +213,14 @@ export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = (
       </svg>
 
       {/* Layer Column Headers */}
-      <div className="absolute top-10 left-4 text-[10px] font-mono uppercase tracking-widest text-slate-500 pointer-events-none">
+      <div className="absolute top-10 left-[2%] text-[10px] font-mono uppercase tracking-widest text-slate-400 pointer-events-none">
         Layer 1 · API Ingress
       </div>
-      <div className="absolute top-10 left-[40%] text-[10px] font-mono uppercase tracking-widest text-slate-500 pointer-events-none">
-        Layer 2 · Storage, Cache & AI Runtime
+      <div className="absolute top-10 left-[35.5%] text-[10px] font-mono uppercase tracking-widest text-slate-400 pointer-events-none">
+        Layer 2 · Storage, Cache &amp; AI Runtime
       </div>
-      <div className="absolute top-10 left-[73%] text-[10px] font-mono uppercase tracking-widest text-slate-500 pointer-events-none">
-        Layer 3 · External Replication
+      <div className="absolute top-10 left-[69%] text-[10px] font-mono uppercase tracking-widest text-slate-400 pointer-events-none">
+        Layer 3 · Egress &amp; Z3 Attestation
       </div>
 
       {/* Interactive Architecture Nodes */}
@@ -239,13 +236,13 @@ export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = (
             key={node.id}
             onClick={() => onSelectNode(node.id)}
             style={{ left: `${pos.x}%`, top: `${pos.y + 6}%` }}
-            className={`absolute z-10 w-[25%] min-w-[220px] max-w-[340px] rounded-lg p-2.5 cursor-pointer transition-all duration-200 border backdrop-blur-md ${
+            className={`absolute z-10 w-[29%] rounded-xl p-2.5 cursor-pointer transition-all duration-200 border backdrop-blur-md ${
               isViolation
                 ? isSelected
-                  ? 'bg-rose-950/85 border-rose-400 shadow-[0_0_25px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/60 scale-[1.02]'
+                  ? 'bg-rose-950/85 border-rose-400 shadow-[0_0_25px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/60 scale-[1.01]'
                   : 'bg-rose-950/60 border-rose-500/70 hover:border-rose-400 shadow-[0_0_16px_rgba(244,63,94,0.25)]'
                 : isSelected
-                ? 'bg-emerald-950/70 border-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.3)] ring-2 ring-emerald-400/50 scale-[1.02]'
+                ? 'bg-emerald-950/70 border-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.3)] ring-2 ring-emerald-400/50 scale-[1.01]'
                 : 'bg-[#0F1624]/90 border-emerald-500/40 hover:border-emerald-400/80'
             }`}
           >
@@ -314,9 +311,9 @@ export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = (
                 <>
                   <span className="text-rose-300 truncate flex items-center gap-1">
                     <ShieldAlert className="w-3 h-3 shrink-0 text-rose-400" />
-                    {node.violatedClauseIds.length} clause violation
+                    {node.violatedClauseIds.length} violation
                     {node.violatedClauseIds.length > 1 ? 's' : ''}
-                    {isAffectedByActiveClause ? ' (Active Clause)' : ''}
+                    {isAffectedByActiveClause ? ' (Active)' : ''}
                   </span>
                   <button
                     type="button"
@@ -337,6 +334,34 @@ export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = (
           </div>
         );
       })}
+
+      {/* Layer 3 Bottom Card: Live Z3 Formal Verification & Ed25519 Attestation Summary */}
+      <div
+        style={{ left: '69%', top: '56%' }}
+        className="absolute z-10 w-[29%] rounded-xl p-3 bg-[#0B101C]/95 border border-amber-400/40 backdrop-blur-md space-y-1.5"
+      >
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-amber-300 flex items-center gap-1.5">
+            <KeyRound className="w-3.5 h-3.5" />
+            Z3 &amp; Ed25519 Gate
+          </span>
+          <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono bg-amber-500/15 text-amber-200 border border-amber-500/30">
+            RFC 8032 + SARIF
+          </span>
+        </div>
+        <div className="text-[10.5px] font-mono text-slate-300 space-y-0.5">
+          <div>• Logic: QF_LIA &amp; QF_UF SMT-LIB2</div>
+          <div>
+            • Status:{' '}
+            <strong className={violatedCount > 0 ? 'text-rose-300' : 'text-emerald-300'}>
+              {violatedCount > 0
+                ? `${violatedCount} UNSAT Contradictions`
+                : '100% SAT Certified'}
+            </strong>
+          </div>
+          <div>• Bilingual: English + বাংলা (BD Bank §4.2)</div>
+        </div>
+      </div>
     </div>
   );
 };

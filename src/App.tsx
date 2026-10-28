@@ -47,11 +47,14 @@ type ActiveWorkspaceTab =
   | 'LIVE_DOCS_AND_RUBRIC';
 
 export function App() {
-  const [workspaceTab, setWorkspaceTab] = useState<ActiveWorkspaceTab>(() =>
-    window.location.pathname.startsWith('/docs')
+  const [workspaceTab, setWorkspaceTab] = useState<ActiveWorkspaceTab>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get('tab') as ActiveWorkspaceTab | null;
+    if (tabParam) return tabParam;
+    return window.location.pathname.startsWith('/docs')
       ? 'LIVE_DOCS_AND_RUBRIC'
-      : 'LAW_TO_AST_STUDIO'
-  );
+      : 'LAW_TO_AST_STUDIO';
+  });
   const [report, setReport] = useState<FullComplianceScanReport | null>(null);
   const [liveFeedItems, setLiveFeedItems] = useState<LiveRegulatoryFeedItem[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerDescriptor[]>([]);
@@ -111,6 +114,14 @@ export function App() {
       if (stateRes.ok) {
         const data = (await stateRes.json()) as FullComplianceScanReport;
         setReport(data);
+        if (
+          data.clauses[0] &&
+          /[অ-হ]/.test(data.clauses[0].rawLegalText)
+        ) {
+          setActiveLocale('bn');
+        } else {
+          setActiveLocale('en');
+        }
       }
       if (feedRes.ok) {
         const feedData = (await feedRes.json()) as { items: LiveRegulatoryFeedItem[] };
