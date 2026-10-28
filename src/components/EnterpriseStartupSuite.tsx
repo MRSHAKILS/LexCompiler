@@ -163,7 +163,7 @@ def process_customer_payment(ssn: str, email: str, card_token: str):
             </div>
             <div className="text-[10px] text-slate-400">
               {totalStatutoryExposureMusd > 0
-                ? 'Eliminated upon merging Auto-PR #409'
+                ? 'Eliminated upon merging the remediation PR'
                 : '0 Violations — $0.0M Fine Exposure'}
             </div>
           </div>

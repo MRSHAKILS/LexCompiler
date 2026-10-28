@@ -109,6 +109,18 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - **SARIF:** exported via `npm run sarif` and uploaded as a build artifact.
   - **Lint cleanup:** 55 unused imports/variables were removed.
 
+### Step 7 · Real TypeScript execution, GitHub pull requests, UI
+- **X1 — real TypeScript execution:**
+  - **What runs:** the runtime sandbox now transpiles the TypeScript services with the TypeScript compiler and executes them in a separate Node process under the permission model (`--permission`, read access to the scratch copy only, no child processes). The Python regex re-implementation is gone.
+  - **Policy:** violations are judged against the active clauses' confidence gate and allowed regions.
+  - **Checks:** `verify:realworld` asserts the AI and replication behaviour before and after remediation.
+- **R4 — GitHub pull requests** (`server/remediation/githubPr.ts`):
+  - **Flow:** with `LEXCOMPILER_GITHUB_TOKEN` + `LEXCOMPILER_GITHUB_REPO` (optional `LEXCOMPILER_GITHUB_BASE`, `LEXCOMPILER_GITHUB_PATH_PREFIX`), `POST /api/remediation/open-github-pr` creates the remediation branch, commits each patched file through the REST API, and opens a pull request with the Z3 summary.
+  - **Gate:** it refuses anything not `READY_TO_MERGE`.
+  - **UI:** an "Open GitHub PR" button appears when the integration is configured.
+  - **Tests:** `server/githubPr.test.ts` covers the call sequence against a mocked GitHub.
+- **UI:** local bundles show their bundle id (`PR-LEX-…`) instead of a fabricated PR number, and static "PR #409" labels were removed.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -121,9 +133,9 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-4 | **RAGAS evaluation (AI3)** | Needs an evaluation dataset and a judge LLM | Metrics are now computed against category-derived labels (Step 5). Remaining: a hand-labelled question set and RAGAS with a judge LLM. |
 | L-5 | **Token-optimisation benchmark (AI4)** — LLMLingua-2, semantic dedup, KV-cache pinning | Needs the LLMLingua-2 model and provider cache telemetry | Real tokenizer and measured stages are done (Step 5). Remaining: run LLMLingua-2 compression, dedup by neural embedding cosine similarity, and read cache-hit tokens from provider usage fields. |
 | L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | Run `ollama serve` and pull the models; the LLM fallback, embeddings, and multi-model pipeline then use them (`available: true`). |
-| L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Use `GITHUB_TOKEN` to push the remediation branch (`branchName`) and open a real PR via the GitHub API, then store the real PR number in `prNumber` (currently 0 for local bundles). |
+| L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Implemented and tested against a mocked API (Step 7). Remaining: set `LEXCOMPILER_GITHUB_TOKEN` / `LEXCOMPILER_GITHUB_REPO`, open one real PR end to end, and optionally persist the returned PR number. |
 | L-8 | **Hardware-backed signing (C1)** | No KMS/HSM available | The key now persists in a file or an env PEM and is published (Step 4). Remaining: keep the Ed25519 key in AWS KMS / Cloud KMS / an HSM, and add RFC 3161 timestamping and revocation. |
-| L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | Run the target-app execution in an unprivileged container (or gVisor/nsjail/Firecracker) with no network, and execute the TypeScript services for real (transpile + run) instead of re-implementing them in Python. |
+| L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | TypeScript now runs for real under Node's permission model, and Python under rlimits (Steps 1, 7). Remaining: run both in an unprivileged container (or gVisor/nsjail/Firecracker) with no network access. |
 | L-10 | **Real PostgreSQL execution (X2)** | No PostgreSQL server | Execute `schema/*.sql` on a disposable PostgreSQL instance instead of SQLite, and run FastAPI/Pydantic/Redis for real instead of shims and mocks. |
 | L-11 | **Tree-sitter queries (L3)** | Native Tree-sitter grammars can't be installed here | Add `tree-sitter` with the Python/TypeScript/SQL grammars and execute the generated `astPatternQuery` strings. |
 | L-12 | **External MCP servers** (postgres-pgvector, neo4j-cypher, github, filesystem, duckdb, n8n) | The services aren't available here | Run and wire each server, then list them as integrated once they answer `initialize`. |

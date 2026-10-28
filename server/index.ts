@@ -39,6 +39,7 @@ import {
   executeHybridRagQuery,
   executeRealNeuralRagQuery,
 } from './rag/hybridRagEngine.js';
+import { GitHubPrError, githubPrOptionsFromEnv, openGitHubPullRequest } from './remediation/githubPr.js';
 import { synthesizeRemediationPullRequest } from './remediation/prSynthesizer.js';
 import {
   commitTargetRepoChanges,
@@ -731,6 +732,36 @@ app.post('/api/remediation/apply-pr', async (_req, res) => {
   }
 });
 
+/** Whether GitHub pull-request creation is configured (no secrets are returned). */
+app.get('/api/remediation/github', (_req, res) => {
+  const options = githubPrOptionsFromEnv();
+  res.json({ enabled: Boolean(options), repository: options?.repository || null });
+});
+
+/** Opens the current remediation as a GitHub pull request (requires LEXCOMPILER_GITHUB_TOKEN + LEXCOMPILER_GITHUB_REPO). */
+app.post('/api/remediation/open-github-pr', async (_req, res) => {
+  try {
+    const options = githubPrOptionsFromEnv();
+    if (!options) {
+      res.status(400).json({ error: 'GitHub PR creation is not configured: set LEXCOMPILER_GITHUB_TOKEN and LEXCOMPILER_GITHUB_REPO.' });
+      return;
+    }
+    const pr = (await buildFullComplianceReport()).remediationPR;
+    if (!pr) {
+      res.status(409).json({ error: 'Every clause is already SAT_COMPLIANT; there is nothing to open.' });
+      return;
+    }
+    const opened = await openGitHubPullRequest(pr, options);
+    res.json({ ...opened, prId: pr.prId });
+  } catch (err) {
+    if (err instanceof GitHubPrError) {
+      res.status(err.status === 409 ? 409 : 502).json({ error: err.message });
+      return;
+    }
+    sendError(res, err);
+  }
+});
+
 /**
  * Update a file in target-repo directly from the Live IDE Editor and re-verify
  */
@@ -845,7 +876,12 @@ app.get('/api/sandbox/verify-runtime', async (_req, res) => {
     return;
   }
   try {
-    const runtimeReport = await executeRealWorldSandboxVerification();
+    const aiClause = activeClauses.find((c) => c.category === 'AI_HUMAN_IN_THE_LOOP');
+    const egressClause = activeClauses.find((c) => c.category === 'CROSS_BORDER_TRANSFER');
+    const runtimeReport = await executeRealWorldSandboxVerification({
+      minAiConfidence: aiClause?.deontic.extractedParameters.minAiConfidenceThreshold,
+      allowedRegions: egressClause?.deontic.extractedParameters.allowedDataRegions,
+    });
     res.json(runtimeReport);
   } catch (err) {
     console.error('Error executing real-world sandbox verification:', err);

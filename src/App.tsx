@@ -650,7 +650,7 @@ export function App() {
                 className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 disabled:bg-white/[0.04] disabled:text-zinc-600 text-black shadow-[0_0_20px_rgba(16,185,129,0.28)] border border-emerald-400/50 disabled:border-white/[0.05] transition-all cursor-pointer"
               >
                 <GitPullRequest className="w-3.5 h-3.5" />
-                3. Auto-Remediate &amp; Prove SAT (PR #409)
+                3. Auto-Remediate &amp; Prove SAT
               </button>
             </div>
 

@@ -45,6 +45,10 @@ async function runRealWorldScenario() {
   console.log(`  FastAPI log: ${pre.pythonFastApiExecution.capturedLoggerOutput}`);
   console.log(`  Redis SETEX TTL: ${pre.pythonRedisWorkerExecution.capturedSetexTtlHours}h`);
   check(pre.pythonFastApiExecution.leakedPlaintextSsnInLogs, 'baseline app leaks plaintext PII to logs (expected)');
+  console.log(`  TS AI decision: ${JSON.stringify(pre.typescriptAiTriageExecution.returnedDecision)}`);
+  console.log(`  TS replication: ${JSON.stringify(pre.typescriptCrossBorderExecution.returnedSyncStatus)}`);
+  check(pre.typescriptAiTriageExecution.violatedEuAiActArt14, 'baseline AI service auto-decides below the gate (expected)');
+  check(pre.typescriptCrossBorderExecution.violatedGdprArt44, 'baseline replication targets a non-EU region (expected)');
 
   console.log('\n--- [2] AST extraction & Z3 proof (pre-patch) ---');
   const preAst = analyzeFullRepository(readTargetRepoFiles());
@@ -114,6 +118,9 @@ async function runRealWorldScenario() {
   check(!post.pythonFastApiExecution.leakedPlaintextSsnInLogs, 'patched app no longer logs plaintext PII');
   check(post.pythonRedisWorkerExecution.capturedSetexTtlHours <= 72, 'patched cache TTL is within 72h');
   check(post.sqlDatabaseExecution.hasTenantKmsKeyColumn, 'patched schema has tenant_kms_key_id');
+  console.log(`  TS AI decision: ${JSON.stringify(post.typescriptAiTriageExecution.returnedDecision)}`);
+  check(!post.typescriptAiTriageExecution.violatedEuAiActArt14, 'patched AI service routes low-confidence cases to a human');
+  check(!post.typescriptCrossBorderExecution.violatedGdprArt44, 'patched replication stays in an allowed region');
   const postAst = analyzeFullRepository(readTargetRepoFiles());
   const postZ3 = await verifyRepositoryAgainstClauses(clauses, postAst.sqlTables, postAst.astFindings);
   for (const proof of postZ3.proofs) {

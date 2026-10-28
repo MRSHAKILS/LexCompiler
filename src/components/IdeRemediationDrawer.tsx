@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { prLabel } from '../prLabel';
 import {
   AlertOctagon,
   Check,
@@ -51,6 +52,22 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
   const [runtimeDisabledReason, setRuntimeDisabledReason] = useState<string | null>(null);
   const [isRunningSandbox, setIsRunningSandbox] = useState(false);
   const prBlocked = remediationPR?.postPatchZ3Status !== 'SAT_COMPLIANT';
+  const [githubEnabled, setGithubEnabled] = useState(false);
+  const [githubMessage, setGithubMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch('/api/remediation/github')
+      .then((r) => (r.ok ? r.json() : { enabled: false }))
+      .then((d: { enabled?: boolean }) => setGithubEnabled(Boolean(d.enabled)))
+      .catch(() => setGithubEnabled(false));
+  }, []);
+
+  const openGithubPr = async () => {
+    setGithubMessage('Opening pull request…');
+    const res = await fetch('/api/remediation/open-github-pr', { method: 'POST' });
+    const data = (await res.json().catch(() => ({}))) as { url?: string; number?: number; error?: string };
+    setGithubMessage(res.ok ? `Opened PR #${data.number}: ${data.url}` : data.error || 'GitHub PR creation failed.');
+  };
 
   const fetchRuntimeSandbox = async () => {
     setIsRunningSandbox(true);
@@ -154,8 +171,25 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
               className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-mono font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-all cursor-pointer disabled:opacity-50"
             >
               <GitPullRequest className="w-3.5 h-3.5" />
-              Merge Full PR #{remediationPR.prNumber} ({remediationPR.filePatches.length} files)
+              Merge {prLabel(remediationPR)} ({remediationPR.filePatches.length} files)
             </button>
+          )}
+
+          {remediationPR && githubEnabled && (
+            <button
+              type="button"
+              disabled={isApplyingPatch || prBlocked}
+              onClick={openGithubPr}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-mono font-semibold bg-slate-700 hover:bg-slate-600 text-white transition-all cursor-pointer disabled:opacity-50"
+            >
+              <GitPullRequest className="w-3.5 h-3.5" />
+              Open GitHub PR
+            </button>
+          )}
+          {githubMessage && (
+            <span role="status" className="text-[11px] font-mono text-slate-300 max-w-xs truncate" title={githubMessage}>
+              {githubMessage}
+            </span>
           )}
         </div>
       </div>
@@ -228,7 +262,7 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
             }`}
           >
             <GitPullRequest className="w-3.5 h-3.5" />
-            Auto-PR #{remediationPR?.prNumber || 409} Bundle
+            {remediationPR ? prLabel(remediationPR) : 'Remediation'} Bundle
           </button>
         </div>
 
@@ -628,7 +662,7 @@ export const IdeRemediationDrawer: React.FC<IdeRemediationDrawerProps> = ({
                   <div>
                     <div className="flex items-center gap-2">
                       <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
-                        AUTO-GENERATED PR #{remediationPR.prNumber}
+                        AUTO-GENERATED {prLabel(remediationPR)}
                       </span>
                       <span className="text-xs font-mono text-slate-400">
                         {remediationPR.branchName} → {remediationPR.baseBranch}

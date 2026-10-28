@@ -41,7 +41,7 @@ const INTEGRATED_EXTERNAL_MCPS = [
     name: 'GitHub Repository & Pull Request Automation MCP',
     transport: 'streamable-http',
     endpoints: 8,
-    description: 'Creates remediation branches, commits AST-verified patches, and opens PR #409.',
+    description: 'Creates remediation branches, commits AST-verified patches, and opens the remediation PR.',
   },
   {
     id: 'filesystem-sandbox-mcp',
