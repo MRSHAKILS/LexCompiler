@@ -244,6 +244,8 @@ Projects (`/api/projects`) each have their own repository (inside `LEXCOMPILER_P
 | `LEXCOMPILER_PGVECTOR_URL` | unset (PGlite in `data/pgvector`) | PostgreSQL + pgvector server for RAG chunk vectors |
 | `LEXCOMPILER_NEO4J_URL`, `LEXCOMPILER_NEO4J_USER`, `LEXCOMPILER_NEO4J_PASSWORD`, `LEXCOMPILER_NEO4J_DATABASE` | unset (in-memory graph) | Neo4j for the Graph RAG traversal (Cypher) |
 | `LEXCOMPILER_RERANKER_MODEL`, `LEXCOMPILER_RERANKER_LOCAL_DIR`, `LEXCOMPILER_RERANKER_DTYPE` | unset | BGE cross-encoder reranker through transformers.js (`npm install @huggingface/transformers`) |
+| `LEXCOMPILER_SIGNER` | `local` | Attestation signer: `local` (Ed25519 key file), `gcp-kms` (`LEXCOMPILER_GCP_KMS_KEY_VERSION`, Cloud HSM supported), or `aws-kms` (`LEXCOMPILER_AWS_KMS_KEY_ID`) |
+| `LEXCOMPILER_TSA_URL` | unset | RFC 3161 Time-Stamp Authority used to timestamp attestation signatures |
 | `LEXCOMPILER_OPA_BIN` | `opa` on `PATH` | OPA binary |
 | `LEXCOMPILER_PYTHON` | first of `python3`, `python`, `py -3` that is Python >= 3.10 | Python interpreter for AST parsing and the runtime sandbox |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
@@ -311,6 +313,8 @@ Built-in clauses and curated feed items are **illustrative**: they paraphrase th
 | `POST` | `/api/enterprise/byoc-scan` | Universal BYOC scanner for custom contracts and source code |
 | `GET` | `/api/enterprise/certificate` | Generates an RFC 8032 Ed25519 signed self-attestation (persistent key, published at `/api/enterprise/public-key`; not a legal conformity certificate) |
 | `POST` | `/api/enterprise/verify-signature` | Verifies an attestation against the server's trusted public key |
+| `POST` | `/api/enterprise/revoke` | Revokes an attestation certificate or signing key (administrators) |
+| `GET` | `/api/enterprise/revocations` | Published revocation list |
 | `GET` | `/api/enterprise/sarif` | Exports OASIS SARIF v2.1.0 static analysis report |
 
 ---

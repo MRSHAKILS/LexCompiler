@@ -240,6 +240,20 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - repository paths cannot escape the projects root;
   - per-project clause compilation, scans and the ledger work.
 
+### Step 18 · KMS / HSM signing, key rotation, revocation, RFC 3161 timestamps (L-8)
+- **Signers:** `server/enterprise/attestationSigner.ts` defines one signer interface with three backends, selected by `LEXCOMPILER_SIGNER`:
+  - `local`: the Ed25519 key file, as before.
+  - `gcp-kms`: Google Cloud KMS through `:asymmetricSign`. It supports `EC_SIGN_ED25519` and `EC_SIGN_P256_SHA256`, and the SOFTWARE or HSM protection level (Cloud HSM). The token comes from `LEXCOMPILER_GCP_ACCESS_TOKEN` or the metadata server.
+  - `aws-kms`: AWS KMS through the SDK. It uses `ECC_NIST_P256` with `ECDSA_SHA_256`, and the keys never leave the KMS HSMs.
+- **Certificates:** each one now carries a `keyId`, the signing backend, and the actual algorithm.
+- **Rotation:** every key that has signed is recorded in `data/attestation-keys.json` and stays trusted for verification after rotation. Caller-supplied keys are still rejected.
+- **Revocation:** `POST /api/enterprise/revoke` (admin only) adds a certificate id or key id to `data/revocations.json`, which `GET /api/enterprise/revocations` publishes. Verification fails for revoked certificates and for signatures by revoked keys.
+- **RFC 3161:** `server/enterprise/timestamp.ts` builds SHA-256 TimeStampReqs (with a nonce and certReq) and posts them to `LEXCOMPILER_TSA_URL`. It verifies tokens with pkijs: the message imprint over the signature, and the CMS signature of the TSA (and its chain, when trusted certificates are given). Certificates embed the token, and `verify-signature` checks it.
+- **Tests:** `server/signing.test.ts` covers:
+  - a fake Cloud KMS (Ed25519 and P-256, HSM) and a fake AWS KMS client, both backed by real keys;
+  - rotation and revocation;
+  - a fake TSA built with pkijs (self-signed RSA certificate, signed attributes): the token verifies, and is rejected for other data or after tampering.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -253,7 +267,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-5 | **Token-optimisation benchmark (AI4)** — LLMLingua-2, semantic dedup, KV-cache pinning | Needs the LLMLingua-2 model and provider cache telemetry | Real tokenizer and measured stages are done (Step 5). Remaining: run LLMLingua-2 compression, dedup by neural embedding cosine similarity, and read cache-hit tokens from provider usage fields. |
 | L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | Run `ollama serve` and pull the models; the LLM fallback, embeddings, and multi-model pipeline then use them (`available: true`). |
 | L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Implemented and tested against a mocked API (Step 7). Remaining: set `LEXCOMPILER_GITHUB_TOKEN` / `LEXCOMPILER_GITHUB_REPO`, open one real PR end to end, and optionally persist the returned PR number. |
-| L-8 | **Hardware-backed signing (C1)** | No KMS/HSM available | The key now persists in a file or an env PEM and is published (Step 4). Remaining: keep the Ed25519 key in AWS KMS / Cloud KMS / an HSM, and add RFC 3161 timestamping and revocation. |
+| L-8 | **Hardware-backed signing (C1)** | No cloud KMS account or TSA reachable here | Implemented (Step 18) and tested against fakes. Remaining: create a KMS key (GCP `EC_SIGN_ED25519` with HSM protection, or AWS `ECC_NIST_P256` SIGN_VERIFY), set `LEXCOMPILER_SIGNER` and the key id, set `LEXCOMPILER_TSA_URL` (e.g. `https://freetsa.org/tsr`), then issue and verify one certificate. |
 | L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | TypeScript now runs for real under Node's permission model, and Python under rlimits (Steps 1, 7). Remaining: run both in an unprivileged container (or gVisor/nsjail/Firecracker) with no network access. |
 | L-10 | **Real PostgreSQL execution (X2)** | — | ✅ Done (Step 12). Optional local check: run `verify:realworld` with `LEXCOMPILER_POSTGRES_URL` and `LEXCOMPILER_REDIS_URL` pointing at real servers. |
 | L-11 | **Tree-sitter queries (L3)** | — | ✅ Done (Steps 9, 14): Python, TypeScript and SQL grammars. |

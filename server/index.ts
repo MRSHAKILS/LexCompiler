@@ -1,3 +1,5 @@
+import { getAttestationSigner, revocations, revoke, trustedKeys } from './enterprise/attestationSigner.js';
+import { verifyTimestamp } from './enterprise/timestamp.js';
 import { OidcProvider, oidcConfigFromEnv } from './auth/oidc.js';
 import { ProjectStore } from './projects/projectStore.js';
 import { createAccessRouter, createAuthenticator } from './projects/router.js';
@@ -57,7 +59,6 @@ import {
   generateSignedConformityCertificate,
   verifyEd25519CertificateSignature,
 } from './enterprise/enterpriseSuite.js';
-import { getAttestationSigningKey } from './enterprise/signingKey.js';
 import {
   computeRealNeuralEmbedding,
   ensurePersistentSqliteDb,
@@ -1012,35 +1013,51 @@ app.post('/api/llm/multi-model-pipeline', async (req, res) => {
 app.get('/api/enterprise/certificate', async (_req, res) => {
   try {
     const report = await buildFullComplianceReport();
-    const cert = generateSignedConformityCertificate(report);
+    const cert = await generateSignedConformityCertificate(report);
     res.json(cert);
   } catch (err) {
     sendError(res, err);
   }
 });
 
-app.get('/api/enterprise/public-key', (_req, res) => {
-  const key = getAttestationSigningKey();
-  res.json({ algorithm: 'Ed25519', publicKeyPem: key.publicKeyPem, fingerprintSha256: key.fingerprintSha256 });
-});
-
-app.post('/api/enterprise/verify-signature', (req, res) => {
+app.get('/api/enterprise/public-key', async (_req, res) => {
   try {
-    const { canonicalPayloadJson, signatureHex, publicKeyPem } = (req.body || {}) as {
-      canonicalPayloadJson: string;
-      signatureHex: string;
-      publicKeyPem?: string;
-    };
-    const result = verifyEd25519CertificateSignature(
-      canonicalPayloadJson,
-      signatureHex,
-      publicKeyPem
-    );
-    res.json(result);
+    const signer = await getAttestationSigner();
+    res.json({ keyId: signer.keyId, algorithm: signer.algorithm, backend: signer.backend, publicKeyPem: signer.publicKeyPem, trustedKeys: trustedKeys(), revocations: revocations() });
   } catch (err) {
     sendError(res, err);
   }
 });
+
+app.post('/api/enterprise/verify-signature', async (req, res) => {
+  try {
+    const { canonicalPayloadJson, signatureHex, publicKeyPem, keyId, certificateId, timestamp } = (req.body || {}) as {
+      canonicalPayloadJson: string;
+      signatureHex: string;
+      publicKeyPem?: string;
+      keyId?: string;
+      certificateId?: string;
+      timestamp?: { tokenBase64: string };
+    };
+    const result = verifyEd25519CertificateSignature(canonicalPayloadJson, signatureHex, publicKeyPem, { keyId, certificateId });
+    const ts = timestamp?.tokenBase64 ? await verifyTimestamp(timestamp.tokenBase64, Buffer.from(signatureHex, 'hex')) : undefined;
+    res.json({ ...result, ...(ts ? { timestamp: ts, verified: result.verified && ts.valid } : {}) });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.post('/api/enterprise/revoke', (req, res) => {
+  const who = res.locals.principal as { globalRole?: string } | undefined;
+  if (who?.globalRole !== 'admin') return void res.status(403).json({ error: 'Only administrators can revoke attestations.' });
+  try {
+    res.json(revoke({ certificateId: req.body?.certificateId, keyId: req.body?.keyId, reason: req.body?.reason }));
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.get('/api/enterprise/revocations', (_req, res) => res.json(revocations()));
 
 app.get('/api/enterprise/sarif', async (_req, res) => {
   try {

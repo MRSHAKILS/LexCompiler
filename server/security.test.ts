@@ -195,7 +195,7 @@ describe('illustrative demo content', () => {
     expect(compiled.deontic.extractedParameters.minAiConfidenceThreshold).toBe(0.88);
   }, 10000);
 
-  it('does not label a self-signed attestation as a certification', () => {
+  it('does not label a self-signed attestation as a certification', async () => {
     const report = {
       repositoryName: 'demo',
       commitHash: 'abc12345',
@@ -207,7 +207,7 @@ describe('illustrative demo content', () => {
       z3EngineVersion: 'z3',
       proofs: [],
     } as unknown as FullComplianceScanReport;
-    const cert = generateSignedConformityCertificate(report);
+    const cert = await generateSignedConformityCertificate(report);
     expect(cert.overallVerdict).toBe('SAT_COMPLIANT_ATTESTED');
     expect(cert.issuer).not.toMatch(/hardware/i);
     expect(cert.standard).toMatch(/not an EU AI Act Art\. 43/);

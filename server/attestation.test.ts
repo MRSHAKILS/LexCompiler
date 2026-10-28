@@ -45,8 +45,8 @@ describe('attestation signing', () => {
     expect(crypto.createPrivateKey(fs.readFileSync(path, 'utf8')).asymmetricKeyType).toBe('ed25519');
   });
 
-  it('verifies its own signatures and detects tampering', () => {
-    const cert = generateSignedConformityCertificate(report);
+  it('verifies its own signatures and detects tampering', async () => {
+    const cert = await generateSignedConformityCertificate(report);
     expect(verifyEd25519CertificateSignature(cert.canonicalPayloadJson, cert.ed25519SignatureHex).verified).toBe(true);
     expect(
       verifyEd25519CertificateSignature(`${cert.canonicalPayloadJson} `, cert.ed25519SignatureHex).verified
