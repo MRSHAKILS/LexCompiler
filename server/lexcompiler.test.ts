@@ -96,7 +96,7 @@ describe('LexCompiler Neuro-Symbolic Law-to-AST Engine & AI-Heavy Suite', () => 
       'prove_repository_compliance_z3',
       { extractUnsatCore: true }
     );
-    expect(rpcRes.jsonRpcResponse.result.isError).toBe(false);
+    expect(rpcRes.jsonRpcResponse.result?.isError).toBe(false);
     expect(rpcRes.serverId).toBe('lex-z3-prover-mcp');
   });
 

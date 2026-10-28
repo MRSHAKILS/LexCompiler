@@ -454,14 +454,16 @@ export interface McpToolInvocationResult {
       arguments: Record<string, unknown>;
     };
   };
+  /** Exactly what the JSON-RPC endpoint returns: a result (possibly isError) or an error. */
   jsonRpcResponse: {
     jsonrpc: '2.0';
-    id: string;
-    result: {
+    id: string | number | null;
+    result?: {
       content: Array<{ type: 'text'; text: string }>;
-      structuredOutput: unknown;
+      structuredContent?: unknown;
       isError: boolean;
     };
+    error?: { code: number; message: string; data?: unknown };
   };
   timestamp: string;
 }

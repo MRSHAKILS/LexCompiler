@@ -1,62 +1,35 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
-import { getMcpServersCatalog, invokeMcpTool } from './mcpSuite.js';
+import { getInitialClauses } from '../compiler/legalCompiler.js';
+import { loadActiveClauseState } from '../state.js';
+import { getMcpServersCatalog, handleMcpMessage } from './mcpSuite.js';
 
+/**
+ * MCP stdio transport: newline-delimited JSON-RPC 2.0 on stdin/stdout, processed in
+ * order. Clauses come from the state the HTTP server persists, so both transports
+ * verify against the same amended clauses.
+ */
 const serverId = process.argv[2] || 'lex-z3-prover-mcp';
-const catalog = getMcpServersCatalog();
-const serverDesc = catalog.find((s) => s.id === serverId) || catalog[0];
+if (!getMcpServersCatalog().some((s) => s.id === serverId)) {
+  process.stderr.write(`Unknown MCP server "${serverId}"\n`);
+  process.exit(1);
+}
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  terminal: false,
-});
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+let queue: Promise<void> = Promise.resolve();
 
-rl.on('line', async (line) => {
+rl.on('line', (line) => {
   if (!line.trim()) return;
-  try {
-    const req = JSON.parse(line);
-    if (req.method === 'initialize') {
-      process.stdout.write(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id: req.id,
-          result: {
-            protocolVersion: '2025-03-26',
-            serverInfo: { name: serverDesc.name, version: serverDesc.version },
-            capabilities: { tools: {}, resources: {}, prompts: {} },
-          },
-        }) + '\n'
-      );
-    } else if (req.method === 'tools/list') {
-      process.stdout.write(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id: req.id,
-          result: { tools: serverDesc.tools },
-        }) + '\n'
-      );
-    } else if (req.method === 'tools/call') {
-      const res = await invokeMcpTool(
-        serverDesc.id,
-        req.params?.name,
-        req.params?.arguments || {}
-      );
-      process.stdout.write(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id: req.id,
-          result: res.jsonRpcResponse.result,
-        }) + '\n'
-      );
+  queue = queue.then(async () => {
+    let message: unknown;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } })}\n`);
+      return;
     }
-  } catch (err) {
-    process.stdout.write(
-      JSON.stringify({
-        jsonrpc: '2.0',
-        id: null,
-        error: { code: -32700, message: String(err) },
-      }) + '\n'
-    );
-  }
+    const clauses = loadActiveClauseState()?.clauses || getInitialClauses();
+    const response = await handleMcpMessage(serverId, message, clauses);
+    if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
+  });
 });

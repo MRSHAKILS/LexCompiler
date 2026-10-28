@@ -19,9 +19,11 @@ import {
   getBanglaInitialClauses,
   getInitialClauses,
   getMutationPresets,
+  inferRuleCategoryFromProse,
   sha256Hex,
 } from './compiler/legalCompiler.js';
-import { getMcpServersCatalog, invokeMcpTool } from './mcp/mcpSuite.js';
+import { getMcpServersCatalog, handleMcpMessage, invokeMcpTool } from './mcp/mcpSuite.js';
+import { loadActiveClauseState, saveActiveClauseState } from './state.js';
 import {
   compressLegalProseCaveman,
   compressRepoToGraphifySExpr,
@@ -93,9 +95,15 @@ ensureTargetRepoFilesExist();
 ensureTargetRepoGitInitialized();
 ensurePersistentSqliteDb();
 
-let activeClauses: LegalClause[] = getInitialClauses();
+const persistedState = loadActiveClauseState();
+let activeClauses: LegalClause[] = persistedState?.clauses || getInitialClauses();
 let activeAmendmentLabel: string | null =
-  'Amended DPA §4.2 / GDPR Art. 17: 72-Hour Purge + Tenant-Isolated KMS Keys';
+  persistedState?.amendmentLabel ?? 'Amended DPA §4.2 / GDPR Art. 17: 72-Hour Purge + Tenant-Isolated KMS Keys';
+
+/** Persists clause edits so they survive restarts and reach the stdio MCP server. */
+function persistClauses(): void {
+  saveActiveClauseState(activeClauses, activeAmendmentLabel);
+}
 let commitCounter = 1;
 
 async function buildFullComplianceReport(): Promise<FullComplianceScanReport> {
@@ -234,38 +242,40 @@ app.get('/api/mcp/servers', (_req, res) => {
   });
 });
 
+/** MCP Streamable HTTP transport: one JSON-RPC message per POST; notifications get 202. */
 app.post('/api/mcp/:serverId/rpc', async (req, res) => {
   try {
     const { serverId } = req.params;
-    const body = req.body || {};
-    const toolName = body.params?.name || body.toolName || 'prove_repository_compliance_z3';
-    const toolArgs = body.params?.arguments || body.arguments || {};
-
-    const result = await invokeMcpTool(serverId, toolName, toolArgs, activeClauses);
-    res.json(result);
+    if (!getMcpServersCatalog().some((s) => s.id === serverId)) {
+      res.status(404).json({ jsonrpc: '2.0', id: null, error: { code: -32602, message: `Unknown MCP server "${serverId}"` } });
+      return;
+    }
+    const response = await handleMcpMessage(serverId, req.body, activeClauses);
+    if (!response) {
+      res.status(202).end();
+      return;
+    }
+    res.json(response);
   } catch (err) {
     sendError(res, err);
   }
 });
 
-app.get('/api/mcp/:serverId/sse', (req, res) => {
-  const { serverId } = req.params;
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
+/** UI helper: runs tools/call and returns the full request/response trace. */
+app.post('/api/mcp/:serverId/invoke', async (req, res) => {
+  try {
+    const { serverId } = req.params;
+    const body = (req.body || {}) as { toolName?: string; arguments?: Record<string, unknown> };
+    res.json(await invokeMcpTool(serverId, String(body.toolName || ''), body.arguments || {}, activeClauses));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
 
-  const initEvent = {
-    jsonrpc: '2.0',
-    method: 'notifications/initialized',
-    params: {
-      serverId,
-      protocolVersion: '2025-03-26',
-      transport: 'sse',
-      timestamp: new Date().toISOString(),
-    },
-  };
-  res.write(`event: message\ndata: ${JSON.stringify(initEvent)}\n\n`);
-  res.end();
+/** This server does not offer a server-initiated SSE stream (allowed by Streamable HTTP). */
+app.get('/api/mcp/:serverId/rpc', (_req, res) => {
+  res.setHeader('Allow', 'POST');
+  res.status(405).json({ error: 'Use POST for MCP JSON-RPC messages; no server-initiated SSE stream is offered.' });
 });
 
 // ============================================================================
@@ -492,7 +502,7 @@ app.post('/api/clauses/compile', async (req, res) => {
       };
     } else {
       const newId = clauseId || `CLAUSE-CUSTOM-${Date.now().toString().slice(-4)}`;
-      const newCat: RuleCategory = category || 'RETENTION_AND_TENANT_KMS';
+      const newCat: RuleCategory = category || inferRuleCategoryFromProse(rawLegalText);
       const newCit = citation || 'Custom DPA Amendment §4.2';
       const compiledResult = await compileLegalProseToFormalPolicyAsync(
         rawLegalText,
@@ -519,6 +529,7 @@ app.post('/api/clauses/compile', async (req, res) => {
 
     activeAmendmentLabel =
       amendmentLabel || `Live Clause Mutation (${citation || clauseId || 'Custom Prose'})`;
+    persistClauses();
     const report = await buildFullComplianceReport();
     res.json(report);
   } catch (err) {
@@ -570,6 +581,7 @@ app.post('/api/clauses/mutate-preset', async (req, res) => {
     }
 
     activeAmendmentLabel = `${preset.name} (${preset.parameterDiffSummary})`;
+    persistClauses();
     const report = await buildFullComplianceReport();
     res.json(report);
   } catch (err) {
@@ -719,6 +731,7 @@ app.post('/api/repo/reset', async (req, res) => {
         'Amended DPA §4.2 / GDPR Art. 17: 72-Hour Purge + Tenant-Isolated KMS Keys';
     }
 
+    persistClauses();
     const report = await buildFullComplianceReport();
     res.json(report);
   } catch (err) {
@@ -750,6 +763,7 @@ app.post('/api/clauses/switch-locale', async (req, res) => {
       activeAmendmentLabel =
         'Amended DPA §4.2 / GDPR Art. 17: 72-Hour Purge + Tenant-Isolated KMS Keys';
     }
+    persistClauses();
     const report = await buildFullComplianceReport();
     res.json(report);
   } catch (err) {

@@ -52,6 +52,18 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - **`verify:cli` is a real gate:** on a real repository it exits 1 when any clause is not SAT. On the fixture it asserts detection plus remediation.
   - **`verify:realworld` asserts every stage** and exits 1 on failure.
 
+### Step 3 · MCP protocol compliance and persisted clause state
+- **M1 — spec-compliant JSON-RPC** (`server/mcp/mcpSuite.ts`, `handleMcpMessage`) shared by Streamable HTTP and stdio:
+  - **Methods:** `initialize` negotiates the protocol version (`2025-06-18`, `2025-03-26`), plus `ping`, `tools/list`, `tools/call`, `resources/list`, and `resources/read`.
+  - **Notifications** get no response.
+  - **Errors:** `-32600` invalid request, `-32601` unknown method, `-32602` unknown tool or invalid arguments (validated against each tool's `inputSchema`), `-32700` parse error (stdio).
+  - **Results:** tool failures come back in-band as `isError: true`, results carry `structuredContent`, and request ids are echoed.
+- **HTTP transport:** `POST /api/mcp/:id/rpc` is the Streamable HTTP endpoint (notifications get `202`). `GET` returns `405` because no server-initiated SSE stream is offered. `POST /api/mcp/:id/invoke` returns the request/response trace the UI shows.
+- **stdio transport:** processes messages in order.
+- **M2, P1 — shared, persistent clauses** (`server/state.ts`): active clauses persist to `data/active-clauses.json`, so they survive restarts and the stdio server uses the same amended clauses as the HTTP server.
+- **L2 — category inference:** clauses created through `POST /api/clauses/compile` without a category now have it inferred from the text.
+- **Tests:** `server/mcp.test.ts` covers version negotiation, notifications, error codes, tools, resources, and stdio ordering.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment

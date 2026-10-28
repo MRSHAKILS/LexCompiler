@@ -95,15 +95,10 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
   ) => {
     setIsInvoking(true);
     try {
-      const res = await fetch(`/api/mcp/${serverId}/rpc`, {
+      const res = await fetch(`/api/mcp/${serverId}/invoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: `req-${Date.now()}`,
-          method: 'tools/call',
-          params: { name: toolName, arguments: sampleArgs },
-        }),
+        body: JSON.stringify({ toolName, arguments: sampleArgs }),
       });
       if (res.ok) {
         const data = (await res.json()) as McpToolInvocationResult;
