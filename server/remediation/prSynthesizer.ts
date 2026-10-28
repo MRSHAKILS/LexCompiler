@@ -52,12 +52,12 @@ function replaceAssignmentNumber(content: string, symbol: string, next: number):
 }
 
 function replaceAssignmentBool(content: string, symbol: string, next: boolean): string {
-  const py = new RegExp(`(\\b${symbol}\\s*=\\s*)(True|False|true|false)`);
-  if (py.test(content)) {
-    return content.replace(py, `$1${next ? 'True' : 'False'}`);
-  }
-  const ts = new RegExp(`(\\b${symbol}\\s*=\\s*)(true|false)`);
-  return content.replace(ts, `$1${next ? 'true' : 'false'}`);
+  const re = new RegExp(`(\\b${symbol}\\s*=\\s*)(True|False|true|false)`);
+  return content.replace(re, (_match, prefix: string, current: string) => {
+    const pythonStyle = current === 'True' || current === 'False';
+    const value = pythonStyle ? (next ? 'True' : 'False') : next ? 'true' : 'false';
+    return `${prefix}${value}`;
+  });
 }
 
 function replaceAssignmentString(content: string, symbol: string, next: string): string {
@@ -628,7 +628,7 @@ export async function synthesizeRemediationPullRequest(
       title: p.title,
     })),
     prePatchZ3Status: 'UNSAT_VIOLATION',
-    postPatchZ3Status: allResolved ? 'SAT_COMPLIANT' : 'SAT_COMPLIANT',
+    postPatchZ3Status: allResolved ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION',
     postPatchVerifyTimeMs: sandboxVerification.totalZ3ExecutionMs,
     cryptographicAttestationHash: sandboxVerification.merkleAuditRoot,
     executiveSummary: `LexCompiler synthesized ${filePatches.length} polyglot AST/SQL patches across ${filePatches
