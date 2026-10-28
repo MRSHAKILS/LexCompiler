@@ -341,7 +341,7 @@ app.get('/api/ai-heavy/overview', async (_req, res) => {
       verification.proofs
     );
 
-    const multiAgentReport = buildMultiAgentExecutionReport(
+    const multiAgentReport = await buildMultiAgentExecutionReport(
       activeClauses,
       enrichedFiles,
       sqlTables,

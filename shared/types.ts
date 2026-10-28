@@ -516,6 +516,8 @@ export interface RagasEvaluationMetrics {
   answerRelevance: number;
   deonticAlignmentScore: number;
   overallRagasScore: number;
+  /** How the scores were computed (labels, judge model, …). */
+  evaluationMethod?: string;
 }
 
 export interface RagQueryExecutionReport {
@@ -546,7 +548,7 @@ export interface AgentExecutionStep {
   inputTokensOptimized: number;
   outputTokens: number;
   latencyMs: number;
-  status: 'COMPLETED';
+  status: 'COMPLETED' | 'FAILED';
   reasoningSummary: string;
   structuredArtifactPreview: string;
 }

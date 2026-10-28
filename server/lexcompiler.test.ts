@@ -115,7 +115,9 @@ describe('LexCompiler Neuro-Symbolic Law-to-AST Engine & AI-Heavy Suite', () => 
       4
     );
     expect(ragReport.retrievedChunks.length).toBe(4);
-    expect(ragReport.ragasMetrics.faithfulness).toBeGreaterThan(0.95);
+    expect(ragReport.retrievedChunks[0].chunk.linkedGraphEntities).toContain('CLAUSE-DPA-4.2');
+    expect(ragReport.ragasMetrics.contextPrecision).toBeGreaterThan(0.5);
+    expect(ragReport.ragasMetrics.evaluationMethod).toMatch(/relevance labels/);
 
     const tokBench = runTokenOptimizationBenchmark(
       clauses,
@@ -123,10 +125,15 @@ describe('LexCompiler Neuro-Symbolic Law-to-AST Engine & AI-Heavy Suite', () => 
       sqlTables,
       astFindings
     );
-    expect(tokBench.totalReductionPercent).toBeGreaterThan(75);
     expect(tokBench.stages.length).toBe(5);
+    for (const [i, stage] of tokBench.stages.entries()) {
+      expect(stage.tokensAfter).toBeLessThanOrEqual(stage.tokensBefore);
+      if (i > 0) expect(stage.tokensBefore).toBe(tokBench.stages[i - 1].tokensAfter);
+    }
+    expect(tokBench.rawContextTokens).toBe(tokBench.stages[0].tokensBefore);
+    expect(tokBench.totalReductionPercent).toBeGreaterThan(50);
 
-    const agentReport = buildMultiAgentExecutionReport(
+    const agentReport = await buildMultiAgentExecutionReport(
       clauses,
       enrichedFiles,
       sqlTables,
@@ -135,5 +142,7 @@ describe('LexCompiler Neuro-Symbolic Law-to-AST Engine & AI-Heavy Suite', () => 
       null
     );
     expect(agentReport.steps.length).toBe(6);
+    expect(agentReport.steps.every((s) => s.status === 'COMPLETED')).toBe(true);
+    expect(agentReport.steps.find((s) => s.agentId === 'agent-z3-formal-critic')?.reasoningSummary).toMatch(/UNSAT/);
   });
 });

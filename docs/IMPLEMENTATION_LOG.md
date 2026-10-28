@@ -72,6 +72,26 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **P2 — side-effect-free reads:** `GET` endpoints no longer append to the SQLite audit ledger; only state-changing requests record a scan.
 - **Tests:** `server/attestation.test.ts` covers key persistence and permissions, tamper detection, untrusted-key rejection, the Merkle tree, and SARIF shape.
 
+### Step 5 · AI subsystems now compute their numbers
+- **AI4 — token benchmark** (`server/optimization/tokenOptimizer.ts`):
+  - **Real tokenizer:** every stage is measured with the o200k BPE tokenizer (`gpt-tokenizer`, pinned 4.0.0).
+  - **Baseline:** the static SMT/Rego ontology plus full clause text plus full source files. The ×4 inflation and fixed ratios are gone.
+  - **Codeburn** now keeps Python indentation.
+  - **Dedup** removes segments with word-trigram Jaccard ≥ 0.8.
+  - **Cache stage** bills the measured static prefix at `LEXCOMPILER_CACHE_READ_MULTIPLIER`.
+  - **Cost and latency** come from `LEXCOMPILER_INPUT_PRICE_PER_MTOK_USD` and `LEXCOMPILER_PREFILL_TOKENS_PER_SEC`.
+  - On the fixture this measures 3417 → 989 tokens (71.1%).
+- **AI2 — retrieval** (`server/rag/hybridRagEngine.ts`):
+  - **Vectors:** 384-d feature-hashed embeddings (unigrams, bigrams, domain concepts) replace the 16-keyword bag.
+  - **BM25** uses correct token-set document frequencies, normalised.
+  - **Graph:** real 2-hop traversal of the statute ↔ code knowledge graph from entities named in the query.
+  - **Fusion:** real reciprocal rank fusion (k = 60).
+  - **HyDE** is built from the compiled clause for the query's inferred category.
+  - **With Ollama `all-minilm`:** every chunk is embedded and drives dense ranking (not only re-ranking the top results).
+- **AI3 — retrieval metrics:** context precision (AP@k), context recall, faithfulness (answer claims found in the retrieved context), answer relevance, and deontic alignment are computed against category-derived relevance labels, and `evaluationMethod` says so.
+- **AI1 — agent pipeline** (`server/agents/multiAgentOrchestrator.ts`): the six-agent report now runs each agent's MCP tool through the JSON-RPC handler. It records measured latency, real token counts of raw and optimized inputs and of the output, `COMPLETED`/`FAILED` status, and a summary built from the tool's result.
+- **Tests:** RAG, token, and agent assertions now check computed behaviour instead of constants.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -79,10 +99,10 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | # | Item | Why it couldn't be finished here | What remains |
 | :-- | :--- | :--- | :--- |
 | L-1 | **OPA Rego evaluation (V5)** | No OPA binary or Rego WASM in this environment | Install `opa` (v1.x), migrate the generated Rego to v1 syntax (`deny contains msg if { ... }`), evaluate it with `opa eval` (or compile to WASM and use `@open-policy-agent/opa-wasm`) against the analyzer facts, and fill `opaRegoTriggeredDenials` from real OPA output. |
-| L-2 | **6-agent crew (AI1)** — CrewAI, DSPy, Hermes, LangGraph, Pydantic-AI, OpenAI Swarm with Claude / DeepSeek / GPT-4o / Gemini / Llama / Qwen | Needs provider API keys, Python agent frameworks, and local GGUF models | Implement each agent as a real service calling its MCP server, record measured tokens and latencies, and replace the static `buildMultiAgentExecutionReport` trace with the real run log. |
-| L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No PostgreSQL/pgvector or Neo4j service | Run Postgres with pgvector (HNSW, 384-d) and Neo4j, index chunks with real `all-minilm` embeddings for retrieval (not only re-ranking), and run the 2-hop Cypher traversal shown in the UI. |
-| L-4 | **RAGAS evaluation (AI3)** | Needs an evaluation dataset and a judge LLM | Build a labelled question set over the fixture, run RAGAS (faithfulness, context precision/recall, answer relevance) with a judge model, and replace the constants with measured scores. |
-| L-5 | **Token-optimisation benchmark (AI4)** — LLMLingua-2, semantic dedup, KV-cache pinning | Needs a tokenizer, the LLMLingua-2 model, and provider cache telemetry | Count tokens with the target model's tokenizer, run LLMLingua-2 compression, deduplicate by real embedding cosine similarity, read cache-hit tokens from provider usage fields, and drop the ×4 baseline and fixed ratios. |
+| L-2 | **6-agent crew (AI1)** — CrewAI, DSPy, Hermes, LangGraph, Pydantic-AI, OpenAI Swarm with Claude / DeepSeek / GPT-4o / Gemini / Llama / Qwen | Needs provider API keys, Python agent frameworks, and local GGUF models | Each agent already calls its real MCP tool with measured latency and tokens (Step 5). Remaining: put the named framework and LLM in front of each tool call (agent reasoning, tool selection, structured outputs). |
+| L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No PostgreSQL/pgvector or Neo4j service | Retrieval, 2-hop traversal, and neural dense ranking now run in memory (Step 5). Remaining: persist chunk vectors in pgvector (HNSW, 384-d), store the knowledge graph in Neo4j, and run the traversal as Cypher. Add a BGE cross-encoder reranker. |
+| L-4 | **RAGAS evaluation (AI3)** | Needs an evaluation dataset and a judge LLM | Metrics are now computed against category-derived labels (Step 5). Remaining: a hand-labelled question set and RAGAS with a judge LLM. |
+| L-5 | **Token-optimisation benchmark (AI4)** — LLMLingua-2, semantic dedup, KV-cache pinning | Needs the LLMLingua-2 model and provider cache telemetry | Real tokenizer and measured stages are done (Step 5). Remaining: run LLMLingua-2 compression, dedup by neural embedding cosine similarity, and read cache-hit tokens from provider usage fields. |
 | L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | Run `ollama serve` and pull the models; the LLM fallback, embeddings, and multi-model pipeline then use them (`available: true`). |
 | L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Use `GITHUB_TOKEN` to push the remediation branch (`branchName`) and open a real PR via the GitHub API, then store the real PR number in `prNumber` (currently 0 for local bundles). |
 | L-8 | **Hardware-backed signing (C1)** | No KMS/HSM available | The key now persists in a file or an env PEM and is published (Step 4). Remaining: keep the Ed25519 key in AWS KMS / Cloud KMS / an HSM, and add RFC 3161 timestamping and revocation. |
