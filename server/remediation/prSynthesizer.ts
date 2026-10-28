@@ -200,7 +200,7 @@ function patchPythonFile(
       }
       if (anchor.role === 'SHARED_KEY_ENCRYPT_CALL' && requireTenantKms) {
         next = next.replace(
-          /\bencrypt_shared_aes256\s*\(([^)]+)\)/g,
+          /(?<!def )\bencrypt_shared_aes256\s*\(([^)]+)\)/g,
           'encrypt_with_tenant_kms($1, tenant_id=x_tenant_id)'
         );
       }
@@ -225,7 +225,7 @@ function patchPythonFile(
       'ENCRYPTION_CIPHER = "AES-256-GCM-TENANT-KMS"'
     );
     next = next.replace(
-      /\bencrypt_shared_aes256\s*\(([^)]+)\)/g,
+      /(?<!def )\bencrypt_shared_aes256\s*\(([^)]+)\)/g,
       'encrypt_with_tenant_kms($1, tenant_id=x_tenant_id)'
     );
     if (/encrypt_with_tenant_kms\(/.test(next) && !/def encrypt_with_tenant_kms\(/.test(next)) {
