@@ -9,6 +9,8 @@ import {
   GitBranch,
   GitPullRequest,
   Layers,
+  PanelLeftClose,
+  PanelLeftOpen,
   Radio,
   RotateCcw,
   Scale,
@@ -76,6 +78,25 @@ export function App() {
   const [shockwaveStage, setShockwaveStage] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [activeLocale, setActiveLocale] = useState<'en' | 'bn'>('en');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('lexcompiler.sidebarCollapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('lexcompiler.sidebarCollapsed', next ? '1' : '0');
+      } catch {
+        /* private mode */
+      }
+      return next;
+    });
+  }, []);
 
   const triggerToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -417,33 +438,61 @@ export function App() {
   return (
     <div className="min-h-screen flex bg-[#050609] text-[#F4F4F6]">
       {/* LEFT PRECISION NAVIGATION SIDEBAR (Harvey AI × Linear × Palantir Style) */}
-      <aside className="w-[258px] shrink-0 bg-[#080A0F] border-r border-white/[0.07] flex flex-col justify-between select-none">
+      <aside
+        className={`${
+          sidebarCollapsed ? 'w-16' : 'w-[258px]'
+        } shrink-0 overflow-hidden transition-[width] duration-200 ease-out bg-[#080A0F] border-r border-white/[0.07] flex flex-col justify-between select-none`}
+      >
         <div>
           {/* Brand Emblem */}
-          <div className="px-4 py-4 border-b border-white/[0.07] flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-b from-amber-400/20 to-amber-600/5 border border-amber-400/40 flex items-center justify-center shadow-[0_0_25px_rgba(229,193,88,0.18)]">
+          <div
+            className={`py-3 border-b border-white/[0.07] flex ${
+              sidebarCollapsed
+                ? 'flex-col items-center gap-2 px-2'
+                : 'flex-row items-center px-3 gap-2.5'
+            }`}
+          >
+            <div className="w-9 h-9 shrink-0 rounded-xl bg-gradient-to-b from-amber-400/20 to-amber-600/5 border border-amber-400/40 flex items-center justify-center shadow-[0_0_25px_rgba(229,193,88,0.18)]">
               <Scale className="w-4.5 h-4.5 text-amber-300" />
             </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-bold tracking-tight text-white">
-                  LexCompiler
-                </span>
-                <span className="px-1.5 py-0.2 rounded text-[9.5px] font-mono font-semibold bg-amber-400/15 text-amber-300 border border-amber-400/30">
-                  v2.5
-                </span>
+            {!sidebarCollapsed && (
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-bold tracking-tight text-white">
+                    LexCompiler
+                  </span>
+                  <span className="px-1.5 py-0.2 rounded text-[9.5px] font-mono font-semibold bg-amber-400/15 text-amber-300 border border-amber-400/30">
+                    v2.5
+                  </span>
+                </div>
+                <div className="text-[10.5px] font-mono text-zinc-500 truncate">
+                  JusticeSphere · ComplianceOS
+                </div>
               </div>
-              <div className="text-[10.5px] font-mono text-zinc-500 truncate">
-                JusticeSphere · ComplianceOS
-              </div>
-            </div>
+            )}
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              aria-expanded={!sidebarCollapsed}
+              aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              className="shrink-0 w-8 h-8 rounded-lg border border-white/[0.08] bg-white/[0.04] text-zinc-300 hover:text-white hover:bg-white/[0.08] flex items-center justify-center cursor-pointer"
+            >
+              {sidebarCollapsed ? (
+                <PanelLeftOpen className="w-4 h-4" />
+              ) : (
+                <PanelLeftClose className="w-4 h-4" />
+              )}
+            </button>
           </div>
 
           {/* Navigation Items */}
-          <div className="p-2.5 space-y-1">
-            <div className="px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-widest text-zinc-500">
-              Control Plane Modules
-            </div>
+          <div className="p-2 space-y-1">
+            {!sidebarCollapsed && (
+              <div className="px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-widest text-zinc-500">
+                Control Plane Modules
+              </div>
+            )}
             {navItems.map((item) => {
               const isActive = workspaceTab === item.id;
               return (
@@ -451,28 +500,32 @@ export function App() {
                   key={item.id}
                   type="button"
                   onClick={() => setWorkspaceTab(item.id)}
-                  className={`w-full text-left px-3 py-2.5 rounded-xl transition-all flex items-center justify-between gap-2 cursor-pointer border ${
+                  title={item.label}
+                  aria-label={item.label}
+                  className={`w-full text-left rounded-xl transition-all flex items-center cursor-pointer border ${
+                    sidebarCollapsed ? 'justify-center px-0 py-2.5' : 'justify-between gap-2 px-3 py-2.5'
+                  } ${
                     isActive
                       ? 'bg-white/[0.08] border-white/[0.15] text-white shadow-sm'
                       : 'bg-transparent hover:bg-white/[0.03] border-transparent text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
-                  <div className="flex items-center gap-2.5 min-w-0">
+                  <div className={`flex items-center min-w-0 ${sidebarCollapsed ? '' : 'gap-2.5'}`}>
                     {item.icon}
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold truncate">{item.label}</div>
-                      <div className="text-[10px] font-mono text-zinc-500 truncate">
-                        {item.sublabel}
+                    {!sidebarCollapsed && (
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold truncate">{item.label}</div>
+                        <div className="text-[10px] font-mono text-zinc-500 truncate">
+                          {item.sublabel}
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    {item.badge && (
-                      <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono font-medium bg-white/[0.06] text-zinc-300 border border-white/[0.08]">
-                        {item.badge}
-                      </span>
                     )}
                   </div>
+                  {!sidebarCollapsed && item.badge && (
+                    <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono font-medium bg-white/[0.06] text-zinc-300 border border-white/[0.08] shrink-0">
+                      {item.badge}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -480,38 +533,49 @@ export function App() {
         </div>
 
         {/* Bottom Live 6-Service Mesh Heartbeat Box */}
-        <div className="p-3 m-2.5 rounded-xl bg-[#0B0E16] border border-white/[0.07] space-y-2">
-          <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
-            <span className="flex items-center gap-1.5">
-              <Radio className="w-3 h-3 text-emerald-400 animate-pulse" />
-              Active Service Mesh
-            </span>
-            <span className="text-emerald-400">6/6 ONLINE</span>
-          </div>
+        <div
+          className={`m-2 rounded-xl bg-[#0B0E16] border border-white/[0.07] ${
+            sidebarCollapsed ? 'p-2 flex justify-center' : 'p-3 space-y-2'
+          }`}
+          title="Active service mesh · 6/6 online"
+        >
+          {sidebarCollapsed ? (
+            <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
+          ) : (
+            <>
+              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
+                <span className="flex items-center gap-1.5">
+                  <Radio className="w-3 h-3 text-emerald-400 animate-pulse" />
+                  Active Service Mesh
+                </span>
+                <span className="text-emerald-400">6/6 ONLINE</span>
+              </div>
 
-          <div className="space-y-1.5 text-[10.5px] font-mono">
-            <div className="flex items-center justify-between text-zinc-300">
-              <span className="truncate">Ollama (:11434)</span>
-              <span className="text-amber-300">
-                {serviceMeshSummary?.ollamaModels?.length || 3} Models
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-zinc-400 text-[10px]">
-              <span className="truncate">dolphin3:8b · qwen2.5 · minilm</span>
-            </div>
-            <div className="flex items-center justify-between text-zinc-300 pt-1 border-t border-white/[0.05]">
-              <span>Microsoft Z3 SMT</span>
-              <span className="text-emerald-400">{report.totalZ3ExecutionMs}ms</span>
-            </div>
-            <div className="flex items-center justify-between text-zinc-300">
-              <span>SQLite + 384d Vec</span>
-              <span className="text-indigo-300">Persisted</span>
-            </div>
-            <div className="flex items-center justify-between text-zinc-300">
-              <span>Python 3.12 + Git</span>
-              <span className="text-zinc-400">@{report.commitHash}</span>
-            </div>
-          </div>
+              <div className="space-y-1.5 text-[10.5px] font-mono">
+                <div className="flex items-center justify-between text-zinc-300">
+                  <span className="truncate">Ollama (:11434)</span>
+                  <span className="text-amber-300">
+                    {serviceMeshSummary?.ollamaModels?.length || 3} Models
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-zinc-400 text-[10px]">
+                  <span className="truncate">dolphin3:8b · qwen2.5 · minilm</span>
+                </div>
+                <div className="flex items-center justify-between text-zinc-300 pt-1 border-t border-white/[0.05]">
+                  <span>Microsoft Z3 SMT</span>
+                  <span className="text-emerald-400">{report.totalZ3ExecutionMs}ms</span>
+                </div>
+                <div className="flex items-center justify-between text-zinc-300">
+                  <span>SQLite + 384d Vec</span>
+                  <span className="text-indigo-300">Persisted</span>
+                </div>
+                <div className="flex items-center justify-between text-zinc-300">
+                  <span>Python 3.12 + Git</span>
+                  <span className="text-zinc-400">@{report.commitHash}</span>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </aside>
 

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { sha256Hex } from '../compiler/legalCompiler.js';
+import { sha256Hex } from '../util/hash.js';
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_HOST || 'http://localhost:11434';
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -308,10 +308,14 @@ export async function runRealLlmInference(params: {
   maxTokens?: number;
   cloudApiKey?: string;
   cloudProvider?: 'openai' | 'anthropic' | 'gemini';
+  timeoutMs?: number;
+  jsonSchema?: Record<string, unknown>;
+  temperature?: number;
 }): Promise<RealLlmGenerationResult> {
   const t0 = performance.now();
   const modelToUse = params.model || 'qwen2.5-coder:0.5b';
   const maxTokens = params.maxTokens || 140;
+  const temperature = params.temperature ?? 0.2;
 
   // If user supplied a live Cloud Frontier API key in the UI, call the cloud endpoint directly
   if (params.cloudApiKey && params.cloudProvider === 'openai') {
@@ -331,6 +335,8 @@ export async function runRealLlmInference(params: {
             { role: 'user', content: params.prompt },
           ],
           max_tokens: maxTokens,
+          temperature,
+          ...(params.jsonSchema ? { response_format: { type: 'json_object' } } : {}),
         }),
       });
       if (resp.ok) {
@@ -357,7 +363,7 @@ export async function runRealLlmInference(params: {
   // Default: Call REAL local Ollama LLM (`qwen2.5-coder:0.5b` or `dolphin3:latest`)
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 18000);
+    const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 18000);
     const fullPrompt = params.systemPrompt
       ? `${params.systemPrompt}\n\n${params.prompt}`
       : params.prompt;
@@ -369,9 +375,10 @@ export async function runRealLlmInference(params: {
         model: modelToUse,
         prompt: fullPrompt,
         stream: false,
+        ...(params.jsonSchema ? { format: params.jsonSchema } : {}),
         options: {
           num_predict: maxTokens,
-          temperature: 0.2,
+          temperature,
         },
       }),
       signal: controller.signal,

@@ -3,110 +3,197 @@ import type {
   CompiledPolicyArtifacts,
   ComplianceFrameworkId,
   DeonticExtraction,
+  DeonticExtractionProvenance,
   LegalClause,
   LiveRegulatoryFeedItem,
   RegulatoryMutationPreset,
   RuleCategory,
 } from '../../shared/types.js';
+import { runRealLlmInference } from '../services/realAiServiceMesh.js';
 
 export function sha256Hex(input: string): string {
   return crypto.createHash('sha256').update(input, 'utf8').digest('hex');
 }
 
+const BANGLA_DIGIT_MAP: Record<string, string> = {
+  '০': '0',
+  '১': '1',
+  '২': '2',
+  '৩': '3',
+  '৪': '4',
+  '৫': '5',
+  '৬': '6',
+  '৭': '7',
+  '৮': '8',
+  '৯': '9',
+};
+
+export function normalizeLegalProse(rawText: string): { normalized: string; lower: string } {
+  const normalized = rawText.trim().replace(/[০-৯]/g, (d) => BANGLA_DIGIT_MAP[d] || d);
+  return { normalized, lower: normalized.toLowerCase() };
+}
+
+export interface ExtractedDeonticBounds {
+  maxRetentionHours: number;
+  maxRetentionDays: number;
+  temporalHit: boolean;
+  temporalEvidence: string[];
+  requiresTenantIsolatedKeys: boolean;
+  requiredEncryptionAlgorithms: string[];
+  forbidPlaintextLogging: boolean;
+  requireCascadeErasure: boolean;
+  minAiConfidenceThreshold: number;
+  confidenceHit: boolean;
+  requireHumanOversightGate: boolean;
+  allowedDataRegions: string[];
+  requireEncryptionAtRest: boolean;
+  provenance: DeonticExtractionProvenance;
+}
+
+const LLM_DEONTIC_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    maxRetentionHours: { type: 'number' },
+    requiresTenantIsolatedKeys: { type: 'boolean' },
+    forbidPlaintextLogging: { type: 'boolean' },
+    requireCascadeErasure: { type: 'boolean' },
+    minAiConfidenceThreshold: { type: 'number' },
+    requireHumanOversightGate: { type: 'boolean' },
+    allowedDataRegions: { type: 'array', items: { type: 'string' } },
+    requireEncryptionAtRest: { type: 'boolean' },
+  },
+};
+
 /**
- * Neuro-Symbolic Deontic Legal Deconstruction & Policy Synthesis Compiler.
- * Dynamically parses natural-language legal clauses or contract amendments into:
- * 1. Deontic Intermediate Representation (Obligations O, Prohibitions F, Permissions P)
- * 2. First-Order Predicate Logic
- * 3. Executable SMT-LIB2 scripts for Microsoft Z3
- * 4. Open Policy Agent (OPA / Rego) rules
- * 5. Tree-sitter / AST structural query patterns
+ * Parses minutes, hours, days, weeks, months, and years (English + Bangla) into hours.
+ * Hours/Bangla ঘণ্টা win over coarser units when both are present (legacy 72 hours vs 30 days).
  */
-export function compileLegalProseToFormalPolicy(
-  rawText: string,
-  category: RuleCategory,
-  clauseId: string,
-  citation: string
-): { deontic: DeonticExtraction; compiled: CompiledPolicyArtifacts } {
-  const banglaDigitMap: Record<string, string> = {
-    '০': '0',
-    '১': '1',
-    '২': '2',
-    '৩': '3',
-    '৪': '4',
-    '৫': '5',
-    '৬': '6',
-    '৭': '7',
-    '৮': '8',
-    '৯': '9',
+export function extractTemporalHoursFromProse(lower: string): {
+  hours: number;
+  hit: boolean;
+  evidence: string[];
+} {
+  const evidence: string[] = [];
+  const tryMatch = (
+    re: RegExp,
+    toHours: (n: number) => number,
+    label: string
+  ): number | null => {
+    const m = lower.match(re);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    if (!Number.isFinite(n) || n < 0) return null;
+    evidence.push(`${label}:${m[0].trim()}`);
+    return toHours(n);
   };
-  const normalized = rawText
-    .trim()
-    .replace(/[০-৯]/g, (d) => banglaDigitMap[d] || d);
-  const lower = normalized.toLowerCase();
 
-  // Extract temporal retention bounds from English or pure Bangla natural language ("within 72 hours", "৭২ ঘণ্টা", "৪৮ ঘণ্টার মধ্যে", "30 days", "৩০ দিন")
-  let maxRetentionHours = 720; // default 30 days = 720 hours
-  const enHoursMatch = lower.match(/(\d+)\s*(?:hours|hour|hrs|hr|h)\b/);
-  const bnHoursMatch = lower.match(/(\d+)\s*(?:ঘণ্টা|ঘন্টা)/);
-  const enDaysMatch = lower.match(/(\d+)\s*(?:days|day|d)\b/);
-  const bnDaysMatch = lower.match(/(\d+)\s*(?:দিন)/);
+  const hours =
+    tryMatch(/(\d+(?:\.\d+)?)\s*(?:hours|hour|hrs|hr|h)\b/, (n) => n, 'hours') ??
+    tryMatch(/(\d+(?:\.\d+)?)\s*(?:ঘণ্টা|ঘন্টা)/, (n) => n, 'hours_bn') ??
+    tryMatch(/(\d+(?:\.\d+)?)\s*(?:minutes|minute|mins|min)\b/, (n) => n / 60, 'minutes') ??
+    tryMatch(/(\d+(?:\.\d+)?)\s*(?:days|day)\b/, (n) => n * 24, 'days') ??
+    tryMatch(/(\d+(?:\.\d+)?)\s*(?:দিন)/, (n) => n * 24, 'days_bn') ??
+    tryMatch(/(\d+(?:\.\d+)?)\s*(?:weeks|week|wks|wk)\b/, (n) => n * 24 * 7, 'weeks') ??
+    tryMatch(/(\d+(?:\.\d+)?)\s*(?:months|month|mos|mo)\b/, (n) => n * 24 * 30, 'months') ??
+    tryMatch(/(\d+(?:\.\d+)?)\s*(?:years|year|yrs|yr)\b/, (n) => n * 24 * 365, 'years');
 
-  if (enHoursMatch) {
-    maxRetentionHours = parseInt(enHoursMatch[1], 10);
-  } else if (bnHoursMatch) {
-    maxRetentionHours = parseInt(bnHoursMatch[1], 10);
-  } else if (enDaysMatch) {
-    maxRetentionHours = parseInt(enDaysMatch[1], 10) * 24;
-  } else if (bnDaysMatch) {
-    maxRetentionHours = parseInt(bnDaysMatch[1], 10) * 24;
+  if (hours != null) {
+    return { hours, hit: true, evidence };
   }
+  return { hours: 720, hit: false, evidence };
+}
+
+export function inferRuleCategoryFromProse(
+  rawText: string,
+  fallback: RuleCategory = 'RETENTION_AND_TENANT_KMS'
+): RuleCategory {
+  const { lower } = normalizeLegalProse(rawText);
+  if (
+    /prohibit|shall not log|never log|plaintext.*log|unredacted|pii.?log|লগ.*নিষিদ্ধ/.test(lower)
+  ) {
+    return 'PII_LOGGING_BAN';
+  }
+  if (
+    /human[- ]in[- ]the[- ]loop|human oversight|confidence|article 14|মানব তদারকি/.test(lower)
+  ) {
+    return 'AI_HUMAN_IN_THE_LOOP';
+  }
+  if (
+    /cross[- ]border|transfer|us-east|sovereign|article 44|দেশের বাইরে|স্থানান্তর/.test(lower)
+  ) {
+    return 'CROSS_BORDER_TRANSFER';
+  }
+  if (
+    /right to (be )?forgotten|erasure|cascade|article 17|মুছে ফেলতে হবে/.test(lower) &&
+    !/purged within|retention/.test(lower)
+  ) {
+    return 'RIGHT_TO_ERASURE_CASCADE';
+  }
+  if (
+    /encrypt(?:ed|ion)? at rest|aes-256|column.?encrypt/.test(lower) &&
+    !/purged within|retention|ttl|tenant[- ]isolated/.test(lower)
+  ) {
+    return 'ENCRYPTION_AT_REST';
+  }
+  return fallback;
+}
+
+export function extractDeonticBoundsFromProse(
+  rawText: string,
+  category: RuleCategory
+): ExtractedDeonticBounds {
+  const { normalized, lower } = normalizeLegalProse(rawText);
+  const temporal = extractTemporalHoursFromProse(lower);
+  const maxRetentionHours = temporal.hours;
   const maxRetentionDays = Math.max(1, Math.round((maxRetentionHours / 24) * 10) / 10);
 
-  // Extract tenant-isolated KMS key requirement (English + pure Bangla)
   const requiresTenantIsolatedKeys =
     /tenant[- ]isolated|tenant[- ]specific|per[- ]tenant|customer[- ]managed\s+key|tenant_kms|টেন্যান্ট|পৃথক\s*কী|আইসোলেটেড\s*কী|কেএমএস/i.test(
       normalized
     );
 
-  // Extract encryption algorithms
   const requiredEncryptionAlgorithms: string[] = ['AES-256-GCM'];
   if (requiresTenantIsolatedKeys) {
     requiredEncryptionAlgorithms.push('TENANT-ISOLATED-KMS-ENVELOPE');
   }
 
-  // Extract logging prohibition (English + pure Bangla)
   const forbidPlaintextLogging =
     /prohibit|shall not log|never log|forbid|unredacted|plaintext.*log|mask|redact|লগ.*নিষিদ্ধ|লগিং.*নিষিদ্ধ|অরক্ষিত.*লগ|প্রকাশ করা যাবে না|রিড্যাক্ট/i.test(
       normalized
     ) || category === 'PII_LOGGING_BAN';
 
-  // Extract cascade erasure requirement (English + pure Bangla)
   const requireCascadeErasure =
     /cascade|erasure|right to be forgotten|delete all linked|article 17|মুছে ফেলতে হবে|সম্পূর্ণরূপে মুছে/i.test(
       normalized
-    );
+    ) || category === 'RIGHT_TO_ERASURE_CASCADE';
 
-  // Extract AI confidence threshold ("0.85", "85%", "৮৫%", "৮৫ শতাংশ", "০.৮৫")
-  let minAiConfidenceThreshold = 0.70;
+  const requireEncryptionAtRest =
+    /encrypt(?:ed|ion)? at rest|encrypted at rest|aes-256|@encrypted/i.test(normalized) ||
+    category === 'ENCRYPTION_AT_REST' ||
+    category === 'RETENTION_AND_TENANT_KMS';
+
+  let minAiConfidenceThreshold = 0.7;
+  let confidenceHit = false;
   const decimalMatch = lower.match(
     /(?:threshold|confidence|score|below|minimum|at least|আত্মবিশ্বাস|স্কোর|কমপক্ষে)[^0-9]*?(0\.\d+)/
   );
   const percentMatch = lower.match(/(\d{2,3})\s*(?:%|শতাংশ)/);
   if (decimalMatch) {
     minAiConfidenceThreshold = parseFloat(decimalMatch[1]);
+    confidenceHit = true;
   } else if (percentMatch) {
     const pct = parseInt(percentMatch[1], 10);
     if (pct > 0 && pct <= 100) {
       minAiConfidenceThreshold = pct / 100;
+      confidenceHit = true;
     }
   }
+
   const requireHumanOversightGate =
     /human[- ]in[- ]the[- ]loop|human oversight|human review|manual approval|article 14|মানব তদারকি|মানুষের অনুমোদন|হিউম্যান/i.test(
       normalized
     ) || category === 'AI_HUMAN_IN_THE_LOOP';
 
-  // Extract allowed data regions
   const allowedDataRegions: string[] = ['eu-central-1', 'eu-west-1'];
   if (
     !/strict eu|eea only|prohibit.*us-east|non-adequate|sovereign eu|দেশের বাইরে|স্থানান্তর নিষিদ্ধ|সার্বভৌম/i.test(
@@ -118,6 +205,152 @@ export function compileLegalProseToFormalPolicy(
       allowedDataRegions.push('us-east-1');
     }
   }
+
+  const needsNumeric =
+    category === 'RETENTION_AND_TENANT_KMS' || category === 'AI_HUMAN_IN_THE_LOOP';
+  const missingNumeric =
+    (category === 'RETENTION_AND_TENANT_KMS' && !temporal.hit) ||
+    (category === 'AI_HUMAN_IN_THE_LOOP' && !confidenceHit);
+
+  return {
+    maxRetentionHours,
+    maxRetentionDays,
+    temporalHit: temporal.hit,
+    temporalEvidence: temporal.evidence,
+    requiresTenantIsolatedKeys,
+    requiredEncryptionAlgorithms,
+    forbidPlaintextLogging,
+    requireCascadeErasure,
+    minAiConfidenceThreshold,
+    confidenceHit,
+    requireHumanOversightGate,
+    allowedDataRegions,
+    requireEncryptionAtRest,
+    provenance: {
+      method: needsNumeric && missingNumeric ? 'DETERMINISTIC_DEFAULT' : 'DETERMINISTIC_PARSER',
+      evidence: [...temporal.evidence, ...(confidenceHit ? [`confidence:${minAiConfidenceThreshold}`] : [])],
+    },
+  };
+}
+
+function mergeLlmBounds(
+  base: ExtractedDeonticBounds,
+  parsed: Record<string, unknown>,
+  model: string,
+  latencyMs: number
+): ExtractedDeonticBounds {
+  const next = { ...base };
+  if (typeof parsed.maxRetentionHours === 'number' && parsed.maxRetentionHours > 0) {
+    next.maxRetentionHours = parsed.maxRetentionHours;
+    next.maxRetentionDays = Math.max(1, Math.round((parsed.maxRetentionHours / 24) * 10) / 10);
+    next.temporalHit = true;
+  }
+  if (typeof parsed.requiresTenantIsolatedKeys === 'boolean') {
+    next.requiresTenantIsolatedKeys = parsed.requiresTenantIsolatedKeys;
+  }
+  if (typeof parsed.forbidPlaintextLogging === 'boolean') {
+    next.forbidPlaintextLogging = parsed.forbidPlaintextLogging;
+  }
+  if (typeof parsed.requireCascadeErasure === 'boolean') {
+    next.requireCascadeErasure = parsed.requireCascadeErasure;
+  }
+  if (typeof parsed.minAiConfidenceThreshold === 'number') {
+    next.minAiConfidenceThreshold = parsed.minAiConfidenceThreshold;
+    next.confidenceHit = true;
+  }
+  if (typeof parsed.requireHumanOversightGate === 'boolean') {
+    next.requireHumanOversightGate = parsed.requireHumanOversightGate;
+  }
+  if (Array.isArray(parsed.allowedDataRegions)) {
+    next.allowedDataRegions = parsed.allowedDataRegions.filter((r) => typeof r === 'string');
+  }
+  if (typeof parsed.requireEncryptionAtRest === 'boolean') {
+    next.requireEncryptionAtRest = parsed.requireEncryptionAtRest;
+  }
+  next.provenance = {
+    method: 'LLM_JSON_FALLBACK',
+    evidence: [...base.provenance.evidence, 'llm_json_schema'],
+    llmModel: model,
+    llmLatencyMs: latencyMs,
+  };
+  return next;
+}
+
+export async function extractDeonticBoundsWithLlmFallback(
+  rawText: string,
+  category: RuleCategory
+): Promise<ExtractedDeonticBounds> {
+  const deterministic = extractDeonticBoundsFromProse(rawText, category);
+  const needsFallback =
+    (category === 'RETENTION_AND_TENANT_KMS' && !deterministic.temporalHit) ||
+    (category === 'AI_HUMAN_IN_THE_LOOP' && !deterministic.confidenceHit);
+  if (!needsFallback) {
+    return deterministic;
+  }
+
+  try {
+    const llm = await runRealLlmInference({
+      prompt: `Extract deontic compliance bounds as JSON from this legal clause.\nCategory: ${category}\nClause:\n${rawText}\n\nReturn only JSON with maxRetentionHours (hours, converting minutes/days/weeks/months/years), requiresTenantIsolatedKeys, forbidPlaintextLogging, requireCascadeErasure, minAiConfidenceThreshold (0-1), requireHumanOversightGate, allowedDataRegions, requireEncryptionAtRest.`,
+      systemPrompt:
+        'You are LexCompiler deontic extractor. Output a single JSON object matching the schema. Convert any time unit to hours.',
+      jsonSchema: LLM_DEONTIC_SCHEMA,
+      maxTokens: 220,
+      temperature: 0,
+      timeoutMs: 8000,
+    });
+    const jsonMatch = llm.responseText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return {
+        ...deterministic,
+        provenance: {
+          ...deterministic.provenance,
+          llmModel: llm.model,
+          llmLatencyMs: llm.totalDurationMs,
+          llmRejectedReason: 'no_json_object',
+        },
+      };
+    }
+    const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    return mergeLlmBounds(deterministic, parsed, llm.model, llm.totalDurationMs);
+  } catch (err) {
+    return {
+      ...deterministic,
+      provenance: {
+        ...deterministic.provenance,
+        llmRejectedReason: err instanceof Error ? err.message : 'llm_unavailable',
+      },
+    };
+  }
+}
+
+/**
+ * Neuro-Symbolic Deontic Legal Deconstruction & Policy Synthesis Compiler.
+ * Dynamically parses natural-language legal clauses or contract amendments into:
+ * 1. Deontic Intermediate Representation (Obligations O, Prohibitions F, Permissions P)
+ * 2. First-Order Predicate Logic
+ * 3. Executable SMT-LIB2 scripts for Microsoft Z3
+ * 4. Open Policy Agent (OPA / Rego) rules
+ * 5. Tree-sitter / AST structural query patterns
+ */
+function compileFromBounds(
+  bounds: ExtractedDeonticBounds,
+  category: RuleCategory,
+  clauseId: string,
+  citation: string
+): { deontic: DeonticExtraction; compiled: CompiledPolicyArtifacts } {
+  const {
+    maxRetentionHours,
+    maxRetentionDays,
+    requiresTenantIsolatedKeys,
+    requiredEncryptionAlgorithms,
+    forbidPlaintextLogging,
+    requireCascadeErasure,
+    minAiConfidenceThreshold,
+    requireHumanOversightGate,
+    allowedDataRegions,
+    requireEncryptionAtRest,
+    provenance,
+  } = bounds;
 
   if (category === 'RETENTION_AND_TENANT_KMS') {
     const deontic: DeonticExtraction = {
@@ -140,7 +373,9 @@ export function compileLegalProseToFormalPolicy(
         requiresTenantIsolatedKeys,
         requiredEncryptionAlgorithms,
         requireCascadeErasure,
+        requireEncryptionAtRest,
       },
+      extractionProvenance: provenance,
     };
 
     const compiled: CompiledPolicyArtifacts = {
@@ -228,6 +463,7 @@ deny[msg] {
       extractedParameters: {
         forbidPlaintextLogging,
       },
+      extractionProvenance: provenance,
     };
 
     const compiled: CompiledPolicyArtifacts = {
@@ -277,6 +513,7 @@ deny[msg] {
         requireHumanOversightGate,
         requireImmutableAuditLog: true,
       },
+      extractionProvenance: provenance,
     };
 
     const compiled: CompiledPolicyArtifacts = {
@@ -323,7 +560,104 @@ deny[msg] {
     return { deontic, compiled };
   }
 
-  // CROSS_BORDER_TRANSFER
+  if (category === 'ENCRYPTION_AT_REST') {
+    const deontic: DeonticExtraction = {
+      modality: 'OBLIGATION',
+      deonticOperatorSymbol: 'O(φ)',
+      actor: 'Data Controller / Persistent Storage Pipeline',
+      regulatedAction: `Encrypt all PII/PHI columns at rest${
+        requiresTenantIsolatedKeys ? ' with tenant-isolated KMS envelopes' : ' with AES-256-GCM'
+      }`,
+      targetDataScope: ['sql_pii_columns', 'object_storage_blobs'],
+      normativeCondition: `∀ col ∈ PII_Columns : EncryptedAtRest(col) = true${
+        requiresTenantIsolatedKeys ? ' ∧ TenantKeyIsolated(col) = true' : ''
+      }`,
+      formalPredicateSummary: `O(EncryptedAtRest${
+        requiresTenantIsolatedKeys ? ' ∧ TenantIsolatedKMS' : ''
+      })`,
+      extractedParameters: {
+        requiresTenantIsolatedKeys,
+        requiredEncryptionAlgorithms,
+        requireEncryptionAtRest: true,
+      },
+      extractionProvenance: provenance,
+    };
+    const compiled: CompiledPolicyArtifacts = {
+      deonticFormula: `O(∀x ∈ PII_Store : EncryptedAtRest(x) = true)`,
+      firstOrderLogic: `∀table ∈ SQLSchema : ContainsPII(table) → UnencryptedPiiColumns(table) = ∅`,
+      smtLib2Snippet: `; LexCompiler SMT-LIB2 Synthesis for ${citation} (${clauseId})
+(set-logic QF_UF)
+(set-option :produce-models true)
+(set-option :produce-unsat-cores true)
+
+(declare-const statutory_requires_encryption_at_rest Bool)
+(declare-const postgres_encrypted_at_rest Bool)
+(declare-const postgres_tenant_kms_isolated Bool)
+(declare-const statutory_requires_tenant_kms Bool)
+
+(assert (! (= statutory_requires_encryption_at_rest true) :named law_encryption_at_rest))
+(assert (! (= statutory_requires_tenant_kms ${requiresTenantIsolatedKeys}) :named law_requires_tenant_kms))
+(assert (! (=> statutory_requires_encryption_at_rest (= postgres_encrypted_at_rest true)) :named inv_all_pii_columns_encrypted))
+(assert (! (=> statutory_requires_tenant_kms (= postgres_tenant_kms_isolated true)) :named inv_tenant_kms_for_encrypted_store))`,
+      opaRegoRule: `package lexcompiler.crypto.encryption_at_rest
+
+deny[msg] {
+  table := input.sql_tables[_]
+  table.containsPII
+  count(table.unencryptedPiiColumns) > 0
+  msg := sprintf("VIOLATION [${citation}]: Table '%s' stores unencrypted PII columns %v", [table.tableName, table.unencryptedPiiColumns])
+}`,
+      astPatternQuery: `(sql_column_definition
+  name: (identifier) @col (#match? @col "ssn|email|phone|patient_|biometric_")
+  annotation: (comment) @enc (#match? @enc "@encrypted"))`,
+    };
+    return { deontic, compiled };
+  }
+
+  if (category === 'RIGHT_TO_ERASURE_CASCADE') {
+    const deontic: DeonticExtraction = {
+      modality: 'OBLIGATION',
+      deonticOperatorSymbol: 'O(φ)',
+      actor: 'Data Controller / Relational Persistence Layer',
+      regulatedAction:
+        'Cascade delete all linked PII/PHI child records when a data subject erasure request is executed (GDPR Art. 17)',
+      targetDataScope: ['sql_foreign_keys', 'erasure_handlers'],
+      normativeCondition: `∀ fk ∈ ForeignKeys(PII_Parent) : OnDeleteCascade(fk) = true`,
+      formalPredicateSummary: `O(ErasureCascade)`,
+      extractedParameters: {
+        requireCascadeErasure: true,
+      },
+      extractionProvenance: provenance,
+    };
+    const compiled: CompiledPolicyArtifacts = {
+      deonticFormula: `O(∀child ∈ DependentPII : ON_DELETE_CASCADE(child, parent))`,
+      firstOrderLogic: `∀t ∈ SQLTables : StoresPII(t) → HasErasureCascade(t)`,
+      smtLib2Snippet: `; LexCompiler SMT-LIB2 Synthesis for ${citation} (${clauseId})
+(set-logic QF_UF)
+(set-option :produce-models true)
+(set-option :produce-unsat-cores true)
+
+(declare-const statutory_requires_cascade_erasure Bool)
+(declare-const postgres_has_cascade_erasure Bool)
+
+(assert (! (= statutory_requires_cascade_erasure true) :named law_gdpr_art17_cascade_erasure))
+(assert (! (=> statutory_requires_cascade_erasure (= postgres_has_cascade_erasure true)) :named inv_fk_on_delete_cascade))`,
+      opaRegoRule: `package lexcompiler.gdpr.erasure_cascade
+
+deny[msg] {
+  table := input.sql_tables[_]
+  table.containsPII
+  not table.hasErasureCascade
+  msg := sprintf("VIOLATION [${citation}]: PII table '%s' lacks ON DELETE CASCADE erasure edges", [table.tableName])
+}`,
+      astPatternQuery: `(sql_foreign_key
+  references: (identifier) @parent
+  on_delete: (keyword) @action (#eq? @action "CASCADE"))`,
+    };
+    return { deontic, compiled };
+  }
+
+  // CROSS_BORDER_TRANSFER (explicit branch; never a silent fallthrough for other categories)
   const allowsUsEast = allowedDataRegions.includes('us-east-1');
   const deontic: DeonticExtraction = {
     modality: 'PROHIBITION',
@@ -340,6 +674,7 @@ deny[msg] {
     extractedParameters: {
       allowedDataRegions,
     },
+    extractionProvenance: provenance,
   };
 
   const compiled: CompiledPolicyArtifacts = {
@@ -376,6 +711,30 @@ region_allowed(r) {
   };
 
   return { deontic, compiled };
+}
+
+export function compileLegalProseToFormalPolicy(
+  rawText: string,
+  category: RuleCategory,
+  clauseId: string,
+  citation: string
+): { deontic: DeonticExtraction; compiled: CompiledPolicyArtifacts } {
+  return compileFromBounds(
+    extractDeonticBoundsFromProse(rawText, category),
+    category,
+    clauseId,
+    citation
+  );
+}
+
+export async function compileLegalProseToFormalPolicyAsync(
+  rawText: string,
+  category: RuleCategory,
+  clauseId: string,
+  citation: string
+): Promise<{ deontic: DeonticExtraction; compiled: CompiledPolicyArtifacts }> {
+  const bounds = await extractDeonticBoundsWithLlmFallback(rawText, category);
+  return compileFromBounds(bounds, category, clauseId, citation);
 }
 
 /**

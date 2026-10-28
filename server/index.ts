@@ -13,7 +13,7 @@ import {
   writeTargetRepoFile,
 } from './analyzer/repoBaseline.js';
 import {
-  compileLegalProseToFormalPolicy,
+  compileLegalProseToFormalPolicyAsync,
   fetchLiveRegulatoryFeed,
   getBanglaInitialClauses,
   getInitialClauses,
@@ -447,7 +447,7 @@ app.post('/api/clauses/compile', async (req, res) => {
     const existingIdx = activeClauses.findIndex((c) => c.id === clauseId);
     if (existingIdx >= 0) {
       const target = activeClauses[existingIdx];
-      const compiledResult = compileLegalProseToFormalPolicy(
+      const compiledResult = await compileLegalProseToFormalPolicyAsync(
         rawLegalText,
         category || target.category,
         target.id,
@@ -468,7 +468,7 @@ app.post('/api/clauses/compile', async (req, res) => {
       const newId = clauseId || `CLAUSE-CUSTOM-${Date.now().toString().slice(-4)}`;
       const newCat: RuleCategory = category || 'RETENTION_AND_TENANT_KMS';
       const newCit = citation || 'Custom DPA Amendment §4.2';
-      const compiledResult = compileLegalProseToFormalPolicy(
+      const compiledResult = await compileLegalProseToFormalPolicyAsync(
         rawLegalText,
         newCat,
         newId,
@@ -527,7 +527,7 @@ app.post('/api/clauses/mutate-preset', async (req, res) => {
     const idx = activeClauses.findIndex((c) => c.id === preset.clauseId);
     if (idx >= 0) {
       const target = activeClauses[idx];
-      const compiledResult = compileLegalProseToFormalPolicy(
+      const compiledResult = await compileLegalProseToFormalPolicyAsync(
         preset.mutatedLawText,
         target.category,
         target.id,
@@ -652,7 +652,7 @@ app.post('/api/repo/reset', async (req, res) => {
       const idx = activeClauses.findIndex((c) => c.id === 'CLAUSE-DPA-4.2');
       if (idx >= 0) {
         const target = activeClauses[idx];
-        const compiledResult = compileLegalProseToFormalPolicy(
+        const compiledResult = await compileLegalProseToFormalPolicyAsync(
           legacyText,
           target.category,
           target.id,
