@@ -309,6 +309,15 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - `security.test.ts` checks the curated/offline feed with an offline `fetch`, so it no longer depends on EUR-Lex being unreachable from the test host (it failed on any machine with internet access).
 - **L-1:** `server/opa.test.ts` no longer skips: both tests pass against OPA 1.4.2, and OPA's decisions agree with Z3 before and after remediation. All seven checks pass (97 tests).
 
+### Step 23 · Local Ollama models (L-6)
+- **Models:** `ollama pull` of `all-minilm`, `qwen2.5-coder:0.5b` and `dolphin3` on Ollama 0.13.5.
+- **Checked through the app's own functions** (`server/services/realAiServiceMesh.ts`):
+  - `getInstalledOllamaModels` lists all three.
+  - `computeRealNeuralEmbedding` returns a 384-d `all-minilm:latest` vector (not `fallback-lexical`).
+  - `runRealLlmInference` answers with `available: true` and provider `Ollama Local Sovereign Runtime (:11434)` for both `qwen2.5-coder:0.5b` and `dolphin3:latest`.
+  - `getLiveServiceMeshTelemetry` reports the Ollama service `ONLINE` with the models and their roles.
+- **Observed:** the very first embedding after a pull fell back to lexical because loading the model took longer than the 3.5 s timeout; later calls, including after `ollama stop`, load in about 1.3 s and succeed.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -320,7 +329,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No Neo4j server, and Hugging Face downloads are blocked here | Implemented (Step 13). Remaining: (1) start Neo4j (`docker run -p 7687:7687 -e NEO4J_AUTH=neo4j/<password> neo4j:5`), set `LEXCOMPILER_NEO4J_URL=bolt://localhost:7687` and the password, and run a RAG query; `graphDbBackend` must read `Neo4j`. (2) Optionally point `LEXCOMPILER_PGVECTOR_URL` at a PostgreSQL server with pgvector. (3) `npm install @huggingface/transformers`, set `LEXCOMPILER_RERANKER_MODEL=Xenova/bge-reranker-base`, run a query, and confirm `evaluationMethod` names the reranker. |
 | L-4 | **RAGAS evaluation (AI3)** | Needs a judge LLM | Labelled set, IR metrics and judge implemented (Step 19). Remaining: set `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL` (or `LEXCOMPILER_LLM_*`) and run `npm run eval:rag`; optionally also run the Python `ragas` package on the same dataset. |
 | L-5 | **Token-optimisation benchmark (AI4)** | Hugging Face downloads are blocked here | Implemented (Step 19). Remaining: `pip install llmlingua` (downloads the xlm-roberta model) and set `LEXCOMPILER_LLMLINGUA_PYTHON`. Run Ollama with `all-minilm` for neural dedup, and run an LLM agent so cache hits are measured. |
-| L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | Run `ollama serve` and pull the models; the LLM fallback, embeddings, and multi-model pipeline then use them (`available: true`). |
+| L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | ✅ Done (Step 23): all three models pulled; embeddings and both LLMs run on Ollama (`available: true`). |
 | L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Implemented and tested against a mocked API (Step 7). Remaining: set `LEXCOMPILER_GITHUB_TOKEN` / `LEXCOMPILER_GITHUB_REPO`, open one real PR end to end, and optionally persist the returned PR number. |
 | L-8 | **Hardware-backed signing (C1)** | No cloud KMS account or TSA reachable here | Implemented (Step 18) and tested against fakes. Remaining: create a KMS key (GCP `EC_SIGN_ED25519` with HSM protection, or AWS `ECC_NIST_P256` SIGN_VERIFY), set `LEXCOMPILER_SIGNER` and the key id, set `LEXCOMPILER_TSA_URL` (e.g. `https://freetsa.org/tsr`), then issue and verify one certificate. |
 | L-9 | **Isolated runtime sandbox (S2, X1)** | Containers can't be launched from this session | Implemented (Step 21) and tested with a fake engine. Remaining: run `docker build -f Dockerfile.sandbox -t lexcompiler-sandbox:1 .`, set `LEXCOMPILER_SANDBOX_CONTAINER=docker` (plus `LEXCOMPILER_SANDBOX_OCI_RUNTIME=runsc` if gVisor is installed), and run `npm run verify:realworld`; `isolation` must read `container`. |
