@@ -138,6 +138,11 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **Where they run:** the full scan report (`structuralQueryMatches`, per clause) and the AST MCP tool.
 - **Test:** `server/analysis.test.ts` checks that each clause's query finds the construct it constrains in the fixture (the Redis TTL, the logger calls, the confidence threshold, and the egress region).
 
+### Step 10 · Documentation and licensing
+- **README:** new sections cover the developer scripts, scanning your own repository (`LEXCOMPILER_TARGET_REPO`), OPA, Tree-sitter queries, GitHub pull requests, and a full configuration reference. The API table now lists `open-github-pr` and `verify-signature`, and the certificate row reflects the persistent key.
+- **`.env.example`:** lists every new environment variable.
+- **`LICENSE`:** MIT, matching the README; `package.json` declares `"license": "MIT"`.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -157,5 +162,9 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-11 | **Tree-sitter queries (L3)** | The WASM grammar bundle has no SQL grammar | Python and TypeScript queries now run for real (Step 9). Remaining: add a SQL grammar (e.g. `tree-sitter-sql` built to WASM) and run DDL queries over `schema/*.sql` instead of matching embedded `CREATE TABLE` strings. |
 | L-12 | **External MCP servers** (postgres-pgvector, neo4j-cypher, github, filesystem, duckdb, n8n) | The services aren't available here | Run and wire each server, then list them as integrated once they answer `initialize`. |
 | L-15 | **GitHub code-scanning upload** | Enabling code scanning is a repository setting | CI already produces `lexcompiler.sarif`. Enable code scanning, add `security-events: write`, and add `github/codeql-action/upload-sarif` for scans of real repositories (not the intentionally non-compliant fixture). |
+| L-16 | **Symbolic program semantics (V3)** | Needs a symbolic-execution or abstract-interpretation engine over Python/TypeScript | Today Z3 proves bounds over facts the analyzer extracts (constants, taint, sinks). Remaining: encode control flow and data flow (paths, branches, inter-procedural calls) as SMT, so properties are proven over program behaviour rather than extracted facts. |
+| L-17 | **More rule categories (L2)** — consent and lawful basis, 72-hour breach notification, DPIA, data minimisation, purpose limitation | Each needs its own extraction rules, analyzer facts, Z3 encoding, Rego policy, Tree-sitter query, and remediation | Add each category end to end, following the six existing ones, with fixture cases and regression tests. |
+| L-18 | **Multi-tenant users and projects (P1)** | Needs an identity provider and a multi-user database | Replace the single API token with OIDC sign-in, per-user roles, and per-project repositories, clauses, and ledgers. |
+| L-19 | **Full verification of real repositories at scale** | No large real-world repositories to benchmark against here | Run `LEXCOMPILER_TARGET_REPO=… npm run verify:cli` on real codebases, measure precision/recall of findings, and tune the analyzer heuristics. |
 | L-13 | **EUR-Lex SPARQL ingestion** | The EUR-Lex SPARQL endpoint isn't reachable from this session | Query the CELLAR SPARQL endpoint for amendments to the tracked CELEX numbers and replace the curated excerpts with official text. |
 | L-14 | **Docker image verification (D1)** | Docker isn't available in this session | The Dockerfile and compose file are written (Step 6). Remaining: run `LEXCOMPILER_API_TOKEN=… docker compose --profile ollama up --build`, pull the models, and confirm the health check and the non-root image. |

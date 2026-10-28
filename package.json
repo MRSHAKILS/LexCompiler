@@ -1,6 +1,7 @@
 {
   "name": "justicesphere-complianceos",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "JusticeSphere AI — ComplianceOS / GovernanceIQ: Autonomous Legal-to-Formal-Logic Compiler (SMT/Z3 + OPA Rego + AST) & Continuous Code/Schema Compliance Prover",
   "type": "module",
   "scripts": {

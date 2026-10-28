@@ -182,6 +182,64 @@ npm run build
 npm start
 ```
 
+### Developer Scripts
+
+| Script | Purpose |
+| :--- | :--- |
+| `npm run dev` | API server (`tsx watch`) and Vite UI together |
+| `npm start` | Compiled server from `dist-server/` (run `npm run build` first) |
+| `npm run start:tsx` | Server straight from TypeScript sources |
+| `npm test` | Vitest suite (runs on scratch copies; `target-repo/` is never modified) |
+| `npm run typecheck` | `tsc --noEmit` for the UI and the server |
+| `npm run lint` | ESLint flat config (`eslint.config.js`) |
+| `npm run verify:cli` | Compliance gate (exit 0 passed, 1 failed, 2 internal error) |
+| `npm run verify:realworld` | End-to-end sandbox demo |
+| `npm run sarif` | Writes `lexcompiler.sarif` (SARIF v2.1.0) for the scanned repository |
+
+### Scanning Your Own Repository
+
+```bash
+LEXCOMPILER_TARGET_REPO=/path/to/repo npm run verify:cli
+```
+
+With `LEXCOMPILER_TARGET_REPO` set, the gate proves every clause against that repository and exits `1` if any clause is `UNSAT_VIOLATION` or `UNKNOWN_NEEDS_REVIEW`. The repository is only read. Without it, the gate runs on a scratch copy of the bundled non-compliant fixture and checks that every violation is detected and remediated.
+
+### Open Policy Agent
+
+Each compiled clause carries a Rego v1 policy. When an `opa` binary is on `PATH` (or `LEXCOMPILER_OPA_BIN` points to one), the scan evaluates those policies with `opa eval`, and `policyDenialSource` reads `opa`. CI installs OPA 1.4.2, and the Docker image ships it.
+
+### Tree-sitter Structural Queries
+
+`astPatternQuery` holds real Tree-sitter queries for the Python and TypeScript grammars (WASM, from `@vscode/tree-sitter-wasm`). The scan report returns their matches per clause in `structuralQueryMatches`.
+
+### Opening Remediation Pull Requests on GitHub
+
+```bash
+LEXCOMPILER_GITHUB_TOKEN=ghp_… LEXCOMPILER_GITHUB_REPO=owner/name npm start
+curl -X POST -H 'X-LexCompiler-Client: cli' http://127.0.0.1:3001/api/remediation/open-github-pr
+```
+
+Only a `READY_TO_MERGE` remediation (post-patch Z3 `SAT`) can be opened. Optional: `LEXCOMPILER_GITHUB_BASE` (base branch; defaults to the repository's default branch), `LEXCOMPILER_GITHUB_PATH_PREFIX` (where the scanned files live inside the GitHub repository), and `GITHUB_API_URL` (GitHub Enterprise).
+
+### Configuration Reference
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `PORT` | `3001` | HTTP port |
+| `LEXCOMPILER_TARGET_REPO` | bundled `target-repo/` | Repository to scan |
+| `LEXCOMPILER_TARGET_REPO_IS_FIXTURE` | unset | `1` treats the target as the demo fixture |
+| `LEXCOMPILER_SANDBOX_GIT_DIR` | `data/sandbox-git` | Git directory for remediation commits |
+| `LEXCOMPILER_DATA_DIR` | `data/` | Ledger, vector store, persisted clauses, signing key |
+| `LEXCOMPILER_SIGNING_KEY_PEM` / `LEXCOMPILER_SIGNING_KEY_PATH` | generated in the data dir | Ed25519 attestation key |
+| `LEXCOMPILER_OPA_BIN` | `opa` on `PATH` | OPA binary |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
+| `LEXCOMPILER_INPUT_PRICE_PER_MTOK_USD` | built-in | Input price for token-cost estimates |
+| `LEXCOMPILER_CACHE_READ_MULTIPLIER` | built-in | Price multiplier for cached input tokens |
+| `LEXCOMPILER_PREFILL_TOKENS_PER_SEC` | built-in | Prefill throughput for latency estimates |
+| `LEXCOMPILER_GITHUB_TOKEN`, `LEXCOMPILER_GITHUB_REPO`, `LEXCOMPILER_GITHUB_BASE`, `LEXCOMPILER_GITHUB_PATH_PREFIX` | unset | GitHub pull-request integration |
+
+The security settings (`HOST`, `LEXCOMPILER_API_TOKEN`, `LEXCOMPILER_ALLOWED_ORIGINS`, `LEXCOMPILER_ALLOWED_HOSTS`, `LEXCOMPILER_ENABLE_RUNTIME_SANDBOX`) are described in [Security Model](#security-model).
+
 ### Invoking the Stdio MCP Server Directly
 
 ```bash
@@ -229,17 +287,19 @@ Built-in clauses and curated feed items are **illustrative**: they paraphrase th
 | `POST` | `/api/clauses/compile` | Compiles custom statutory/contractual prose into Z3 SMT-LIB2 & Rego |
 | `POST` | `/api/clauses/mutate-preset` | Triggers a regulatory amendment scenario and recalculates blast radius |
 | `POST` | `/api/remediation/apply-pr` | Applies synthesized AST patches to `target-repo/` and re-verifies `SAT` |
+| `POST` | `/api/remediation/open-github-pr` | Pushes the `READY_TO_MERGE` remediation to a branch and opens a GitHub pull request |
 | `GET` | `/api/sandbox/verify-runtime` | Executes `target-repo/` in SQLite3, Python 3.12, and TypeScript |
 | `GET` | `/api/services/mesh` | Live telemetry from Ollama (`:11434`), Z3, and SQLite vector ledger |
 | `POST` | `/api/llm/multi-model-pipeline` | Runs `all-minilm` 384-d embeddings + `qwen2.5-coder` + `dolphin3` |
 | `POST` | `/api/mcp/:serverId/rpc` | MCP JSON-RPC 2.0 `tools/call` endpoint for all 6 custom MCP servers |
 | `POST` | `/api/rag/query` | Executes Hybrid Contextual + Graph RAG query with RAGAS scoring |
 | `POST` | `/api/enterprise/byoc-scan` | Universal BYOC scanner for custom contracts and source code |
-| `GET` | `/api/enterprise/certificate` | Generates an RFC 8032 Ed25519 signed self-attestation (ephemeral key; not a legal conformity certificate) |
+| `GET` | `/api/enterprise/certificate` | Generates an RFC 8032 Ed25519 signed self-attestation (persistent key, published at `/api/enterprise/public-key`; not a legal conformity certificate) |
+| `POST` | `/api/enterprise/verify-signature` | Verifies an attestation against the server's trusted public key |
 | `GET` | `/api/enterprise/sarif` | Exports OASIS SARIF v2.1.0 static analysis report |
 
 ---
 
 ## License
 
-MIT License. Built by Shahriar Ahmed Seam for the International AI Builders Congress (JusticeSphere AI — ComplianceOS / GovernanceIQ Track).
+MIT License (see [`LICENSE`](LICENSE)). Built by Shahriar Ahmed Seam for the International AI Builders Congress (JusticeSphere AI — ComplianceOS / GovernanceIQ Track).
