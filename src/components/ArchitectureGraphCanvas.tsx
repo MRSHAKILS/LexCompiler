@@ -239,7 +239,7 @@ export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = (
             key={node.id}
             onClick={() => onSelectNode(node.id)}
             style={{ left: `${pos.x}%`, top: `${pos.y + 6}%` }}
-            className={`absolute z-10 w-[24.5%] min-w-[215px] max-w-[275px] rounded-lg p-2.5 cursor-pointer transition-all duration-200 border backdrop-blur-md ${
+            className={`absolute z-10 w-[25%] min-w-[220px] max-w-[340px] rounded-lg p-2.5 cursor-pointer transition-all duration-200 border backdrop-blur-md ${
               isViolation
                 ? isSelected
                   ? 'bg-rose-950/85 border-rose-400 shadow-[0_0_25px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/60 scale-[1.02]'

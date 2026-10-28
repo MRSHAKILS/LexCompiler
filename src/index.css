@@ -2,9 +2,9 @@
 
 @layer base {
   :root {
-    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-mono: 'JetBrains Mono', monospace;
-    --font-serif: 'Newsreader', Georgia, serif;
+    --font-sans: 'Inter', 'Noto Sans Bengali', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Noto Sans Bengali', monospace;
+    --font-serif: 'Newsreader', 'Noto Sans Bengali', Georgia, serif;
   }
 
   body {
@@ -64,7 +64,6 @@
   animation: dashFlow 1.2s linear infinite;
 }
 
-/* Precision minimal scrollbars */
 ::-webkit-scrollbar {
   width: 5px;
   height: 5px;

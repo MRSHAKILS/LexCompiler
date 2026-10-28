@@ -72,6 +72,7 @@ export function App() {
   const [shockwaveActive, setShockwaveActive] = useState<boolean>(false);
   const [shockwaveStage, setShockwaveStage] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [activeLocale, setActiveLocale] = useState<'en' | 'bn'>('en');
 
   const triggerToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -288,6 +289,35 @@ export function App() {
     await handleCompileCustomProse('CLAUSE-DPA-4.2', item.excerpt);
   };
 
+  const handleSwitchLocale = async (locale: 'en' | 'bn') => {
+    setActiveLocale(locale);
+    setIsCompiling(true);
+    runShockwaveAnimation(
+      locale === 'bn'
+        ? 'বাংলাদেশ ব্যাংক আইসিটি নীতিমালা ধারা ৪.২ (৪৮ ঘণ্টা)'
+        : 'GDPR Art. 17 & 32 / DPA §4.2 (72h)'
+    );
+    try {
+      const res = await fetch('/api/clauses/switch-locale', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ locale, resetRepo: true }),
+      });
+      if (res.ok) {
+        const updated = (await res.json()) as FullComplianceScanReport;
+        setReport(updated);
+        fetchAllTelemetry();
+        triggerToast(
+          locale === 'bn'
+            ? 'বাংলা আইন সক্রিয় করা হয়েছে: ৪টি ধারা (৪৮ ঘণ্টা রিটেনশন, টেন্যান্ট KMS, লগিং নিষেধাজ্ঞা, ৮৫% এআই গেট) Z3 দ্বারা যাচাইকৃত।'
+            : 'Switched to Global English statutory corpus (GDPR, HIPAA, EU AI Act) & verified in Z3.'
+        );
+      }
+    } finally {
+      setIsCompiling(false);
+    }
+  };
+
   if (!report) {
     return (
       <div className="min-h-screen bg-[#050609] text-zinc-100 flex items-center justify-center p-6">
@@ -366,8 +396,8 @@ export function App() {
     },
     {
       id: 'LIVE_DOCS_AND_RUBRIC',
-      label: 'Live /docs & 425-Pt Guide',
-      sublabel: 'Whitepaper & Prompt Library',
+      label: 'Architecture & Specs (/docs)',
+      sublabel: 'Formal Grammar & Prompts',
       shortcut: '⌘7',
       icon: <BookOpen className="w-4 h-4 text-zinc-300" />,
     },
@@ -479,8 +509,8 @@ export function App() {
         {/* Top Executive Command Bar */}
         <header className="sticky top-0 z-40 bg-[#07090E]/90 backdrop-blur-md border-b border-white/[0.07] px-5 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            {/* Left: Active Regime & Git Telemetry */}
-            <div className="flex items-center gap-3 min-w-0">
+            {/* Left: Active Regime, Locale Switcher & Git Telemetry */}
+            <div className="flex items-center gap-2.5 min-w-0">
               <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.04] border border-white/[0.08] text-xs font-mono text-zinc-300">
                 <GitBranch className="w-3.5 h-3.5 text-amber-300" />
                 <span>{report.repositoryName}</span>
@@ -488,9 +518,31 @@ export function App() {
                 <span className="text-amber-300 font-semibold">{report.commitHash}</span>
               </div>
 
-              <span className="text-xs font-mono text-zinc-400 truncate hidden xl:inline">
-                {report.activeAmendmentLabel}
-              </span>
+              {/* Bilingual EN / বাংলা Statutory Corpus Switcher */}
+              <div className="inline-flex items-center rounded-lg bg-white/[0.04] border border-white/[0.1] p-0.5 text-[11px] font-mono">
+                <button
+                  type="button"
+                  onClick={() => handleSwitchLocale('en')}
+                  className={`px-2 py-0.5 rounded-md transition-all cursor-pointer ${
+                    activeLocale === 'en'
+                      ? 'bg-amber-400 text-black font-bold'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  EN (Global)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSwitchLocale('bn')}
+                  className={`px-2.5 py-0.5 rounded-md transition-all cursor-pointer ${
+                    activeLocale === 'bn'
+                      ? 'bg-emerald-400 text-black font-bold'
+                      : 'text-zinc-300 hover:text-white'
+                  }`}
+                >
+                  বাংলা (BD Laws)
+                </button>
+              </div>
             </div>
 
             {/* Center: 3-Step Interactive Demo Scenario Triggers */}

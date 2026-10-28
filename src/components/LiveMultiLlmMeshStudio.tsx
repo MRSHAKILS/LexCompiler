@@ -111,7 +111,7 @@ export const LiveMultiLlmMeshStudio: React.FC<LiveMultiLlmMeshStudioProps> = ({
   }, []);
 
   return (
-    <div className="p-6 space-y-6 max-w-[1600px] mx-auto">
+    <div className="p-6 space-y-6 w-full">
       {/* Executive Header */}
       <div className="p-6 rounded-2xl bg-[#0A0C12] border border-white/[0.08] flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1.5 max-w-3xl">

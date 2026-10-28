@@ -15,6 +15,7 @@ import {
 import {
   compileLegalProseToFormalPolicy,
   fetchLiveRegulatoryFeed,
+  getBanglaInitialClauses,
   getInitialClauses,
   getMutationPresets,
   sha256Hex,
@@ -677,6 +678,37 @@ app.post('/api/repo/reset', async (req, res) => {
     res.json(report);
   } catch (err) {
     console.error('Error resetting repo:', err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/**
+ * Switch statutory corpus locale between Global English ('en') and Bangladesh Bangla ('bn')
+ */
+app.post('/api/clauses/switch-locale', async (req, res) => {
+  try {
+    const { locale, resetRepo } = (req.body || {}) as {
+      locale: 'en' | 'bn';
+      resetRepo?: boolean;
+    };
+    if (resetRepo) {
+      resetTargetRepoToBaseline();
+      resetTargetRepoGitHistory();
+      commitCounter++;
+    }
+    if (locale === 'bn') {
+      activeClauses = getBanglaInitialClauses();
+      activeAmendmentLabel =
+        'বাংলাদেশ ব্যাংক আইসিটি নীতিমালা ধারা ৪.২ (৪৮ ঘণ্টা রিটেনশন ও টেন্যান্ট KMS)';
+    } else {
+      activeClauses = getInitialClauses();
+      activeAmendmentLabel =
+        'Amended DPA §4.2 / GDPR Art. 17: 72-Hour Purge + Tenant-Isolated KMS Keys';
+    }
+    const report = await buildFullComplianceReport();
+    res.json(report);
+  } catch (err) {
+    console.error('Error switching locale:', err);
     res.status(500).json({ error: String(err) });
   }
 });

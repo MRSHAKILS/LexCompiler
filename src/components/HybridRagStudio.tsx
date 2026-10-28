@@ -50,7 +50,7 @@ export const HybridRagStudio: React.FC<HybridRagStudioProps> = ({ initialReport 
   if (!ragReport) return null;
 
   return (
-    <div className="p-5 space-y-5 max-w-[1600px] mx-auto">
+    <div className="p-6 space-y-5 w-full">
       {/* Top RAG Architecture Badges */}
       <div className="p-4 rounded-xl bg-[#0D131F] border border-indigo-500/40 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
