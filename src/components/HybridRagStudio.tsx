@@ -1,10 +1,14 @@
 import React, { useState } from 'react';
 import {
+  BookOpen,
+  CheckCircle2,
   Database,
+  GitMerge,
   Layers,
   Network,
   Search,
   Sparkles,
+  Zap,
 } from 'lucide-react';
 import type { RagQueryExecutionReport } from '../../shared/types';
 

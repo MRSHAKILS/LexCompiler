@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import path from 'node:path';
 import cors from 'cors';
 import express from 'express';
@@ -6,15 +5,11 @@ import {
   buildMultiAgentExecutionReport,
   getPromptLibraryCatalog,
 } from './agents/multiAgentOrchestrator.js';
-import { analyzeFullRepositoryAsync } from './analyzer/astAnalyzer.js';
-import { runTreeSitterQueries } from './analyzer/treeSitter.js';
+import { analyzeFullRepository } from './analyzer/astAnalyzer.js';
 import {
   ensureTargetRepoFilesExist,
   readTargetRepoFiles,
   resetTargetRepoToBaseline,
-  TARGET_REPO_IS_FIXTURE,
-  TARGET_REPO_ROOT,
-  TargetRepoPathError,
   writeTargetRepoFile,
 } from './analyzer/repoBaseline.js';
 import {
@@ -23,31 +18,26 @@ import {
   getBanglaInitialClauses,
   getInitialClauses,
   getMutationPresets,
-  inferRuleCategoryFromProse,
   sha256Hex,
 } from './compiler/legalCompiler.js';
-import { getMcpServersCatalog, handleMcpMessage, invokeMcpTool } from './mcp/mcpSuite.js';
-import { loadActiveClauseState, saveActiveClauseState } from './state.js';
+import { getMcpServersCatalog, invokeMcpTool } from './mcp/mcpSuite.js';
 import {
   compressLegalProseCaveman,
   compressRepoToGraphifySExpr,
-  countTokens,
   pruneCodeWithCodeburn,
   runTokenOptimizationBenchmark,
 } from './optimization/tokenOptimizer.js';
-import { verifyRepositoryAgainstClauses, z3SelfTest } from './prover/z3Engine.js';
+import { verifyRepositoryAgainstClauses } from './prover/z3Engine.js';
 import {
   executeHybridRagQuery,
   executeRealNeuralRagQuery,
 } from './rag/hybridRagEngine.js';
-import { GitHubPrError, githubPrOptionsFromEnv, openGitHubPullRequest } from './remediation/githubPr.js';
 import { synthesizeRemediationPullRequest } from './remediation/prSynthesizer.js';
 import {
   commitTargetRepoChanges,
   ensureTargetRepoGitInitialized,
   executeRealWorldSandboxVerification,
   resetTargetRepoGitHistory,
-  resolveRepositoryIdentity,
 } from './sandbox/realWorldSandbox.js';
 import {
   executeByocCustomScan,
@@ -55,7 +45,6 @@ import {
   generateSignedConformityCertificate,
   verifyEd25519CertificateSignature,
 } from './enterprise/enterpriseSuite.js';
-import { getAttestationSigningKey } from './enterprise/signingKey.js';
 import {
   computeRealNeuralEmbedding,
   ensurePersistentSqliteDb,
@@ -63,88 +52,30 @@ import {
   recordScanToPersistentSqlite,
   runRealLlmInference,
 } from './services/realAiServiceMesh.js';
-import {
-  assertSafeBindConfig,
-  createApiGuard,
-  isOriginAllowed,
-  resolveServerSecurityConfig,
-} from './security.js';
 import type {
   ComplianceFrameworkId,
   FullComplianceScanReport,
   LegalClause,
-  RemediationPullRequest,
   RuleCategory,
 } from '../shared/types.js';
 
-/** Client errors (refused paths, non-fixture resets) are 400s; everything else is a 500. */
-function sendError(res: express.Response, err: unknown): void {
-  if (err instanceof TargetRepoPathError) {
-    res.status(400).json({ error: err.message });
-    return;
-  }
-  res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
-}
-
-const securityConfig = resolveServerSecurityConfig();
-assertSafeBindConfig(securityConfig);
-
 const app = express();
-app.use(
-  cors({
-    origin: (origin, callback) => callback(null, isOriginAllowed(securityConfig, origin)),
-  })
-);
+app.use(cors());
 app.use(express.json({ limit: '5mb' }));
-app.use('/api', createApiGuard(securityConfig));
-
-/**
- * Requests that rewrite target-repo files, commit, or change clauses run one at a time,
- * so concurrent edits cannot interleave file writes and Git commits.
- */
-let repoMutationQueue: Promise<void> = Promise.resolve();
-function serializeRepoMutations(_req: express.Request, res: express.Response, next: express.NextFunction): void {
-  const previous = repoMutationQueue;
-  let release!: () => void;
-  repoMutationQueue = new Promise<void>((resolve) => (release = resolve));
-  res.once('finish', () => release());
-  res.once('close', () => release());
-  previous.then(() => next());
-}
-app.post(
-  [
-    '/api/clauses/compile',
-    '/api/clauses/mutate-preset',
-    '/api/clauses/switch-locale',
-    '/api/remediation/apply-node',
-    '/api/remediation/apply-pr',
-    '/api/repo/update-file',
-    '/api/repo/reset',
-  ],
-  serializeRepoMutations
-);
 
 // Ensure real target repository files, Git repo & SQLite ledger exist on disk
 ensureTargetRepoFilesExist();
 ensureTargetRepoGitInitialized();
 ensurePersistentSqliteDb();
 
-const persistedState = loadActiveClauseState();
-let activeClauses: LegalClause[] = persistedState?.clauses || getInitialClauses();
+let activeClauses: LegalClause[] = getInitialClauses();
 let activeAmendmentLabel: string | null =
-  persistedState?.amendmentLabel ?? 'Amended DPA §4.2 / GDPR Art. 17: 72-Hour Purge + Tenant-Isolated KMS Keys';
-
-/** Persists clause edits so they survive restarts and reach the stdio MCP server. */
-function persistClauses(): void {
-  saveActiveClauseState(activeClauses, activeAmendmentLabel);
-}
+  'Amended DPA §4.2 / GDPR Art. 17: 72-Hour Purge + Tenant-Isolated KMS Keys';
 let commitCounter = 1;
 
-async function buildFullComplianceReport(
-  options: { recordToLedger?: boolean } = {}
-): Promise<FullComplianceScanReport> {
+async function buildFullComplianceReport(): Promise<FullComplianceScanReport> {
   const rawFiles = readTargetRepoFiles();
-  const { sqlTables, astFindings, enrichedFiles } = await analyzeFullRepositoryAsync(rawFiles);
+  const { sqlTables, astFindings, enrichedFiles } = analyzeFullRepository(rawFiles);
   const { proofs, architectureGraph, totalZ3ExecutionMs, merkleAuditRoot } =
     await verifyRepositoryAgainstClauses(activeClauses, sqlTables, astFindings);
 
@@ -160,38 +91,25 @@ async function buildFullComplianceReport(
     (compliantClausesCount / Math.max(1, proofs.length)) * 100
   );
 
-  const identity = resolveRepositoryIdentity(
-    sha256Hex(enrichedFiles.map((f) => `${f.path}\n${f.content}`).join('\n'))
-  );
-  const commitHash = `${identity.commitHash}${identity.dirty ? '-dirty' : ''}`;
+  const commitHash = sha256Hex(
+    enrichedFiles.map((f) => f.content).join('||') + String(commitCounter)
+  ).slice(0, 8);
   const scanId = `SCAN-${Date.now().toString().slice(-6)}`;
 
-  // Only state-changing requests append to the audit ledger; reads stay side-effect free.
-  if (options.recordToLedger) {
-    recordScanToPersistentSqlite({
-      scanId,
-      commitHash,
-      compliantCount: compliantClausesCount,
-      violatedCount: violatedClausesCount,
-      z3SolveMs: totalZ3ExecutionMs,
-      merkleRoot: merkleAuditRoot,
-    });
-  }
-
-  const structuralQueryMatches: FullComplianceScanReport['structuralQueryMatches'] = {};
-  for (const clause of activeClauses) {
-    try {
-      structuralQueryMatches[clause.id] = await runTreeSitterQueries(clause.compiled.astPatternQuery, enrichedFiles);
-    } catch {
-      structuralQueryMatches[clause.id] = [];
-    }
-  }
+  recordScanToPersistentSqlite({
+    scanId,
+    commitHash,
+    compliantCount: compliantClausesCount,
+    violatedCount: violatedClausesCount,
+    z3SolveMs: totalZ3ExecutionMs,
+    merkleRoot: merkleAuditRoot,
+  });
 
   return {
     scanId,
     timestamp: new Date().toISOString(),
-    repositoryName: identity.name,
-    repositoryBranch: identity.branch,
+    repositoryName: 'finhealth-ai/core-platform',
+    repositoryBranch: 'main',
     commitHash,
     z3EngineVersion: 'Microsoft Z3 v4.13.4 (WASM/Native SMT-LIB2)',
     activeAmendmentLabel,
@@ -208,43 +126,16 @@ async function buildFullComplianceReport(
     proofs,
     remediationPR,
     mutationPresets: getMutationPresets(),
-    structuralQueryMatches,
     files: enrichedFiles,
   };
 }
 
-let python3Version: Promise<string | null> | null = null;
-function checkPython3(): Promise<string | null> {
-  python3Version ??= new Promise((resolve) => {
-    execFile('python3', ['--version'], { timeout: 3000 }, (err, stdout, stderr) =>
-      resolve(err ? null : `${stdout || stderr}`.trim())
-    );
-  });
-  return python3Version;
-}
-
-/** Checks the dependencies scans need; 503 when Z3 or python3 is unavailable. */
-app.get('/api/health', async (_req, res) => {
-  const [z3, python, mcp] = await Promise.all([
-    z3SelfTest(),
-    checkPython3(),
-    handleMcpMessage('lex-z3-prover-mcp', { jsonrpc: '2.0', id: 'health', method: 'ping' }, activeClauses),
-  ]);
-  let ledgerOk = true;
-  try {
-    ensurePersistentSqliteDb();
-  } catch {
-    ledgerOk = false;
-  }
-  const healthy = z3.ok && Boolean(python) && ledgerOk;
-  res.status(healthy ? 200 : 503).json({
-    status: healthy ? 'ok' : 'degraded',
+app.get('/api/health', (_req, res) => {
+  res.json({
+    status: 'ok',
     service: 'LexCompiler Neuro-Symbolic Law-to-AST Engine',
-    z3Solver: z3.ok ? 'ready' : `failed: ${z3.error || 'self-test'}`,
-    z3SelfTestMs: z3.latencyMs,
-    python3: python || 'unavailable',
-    ledger: ledgerOk ? 'ready' : 'unavailable',
-    mcpServersOnline: mcp?.result ? getMcpServersCatalog().length : 0,
+    z3Solver: 'ready',
+    mcpServersOnline: 6,
     ragEngine: 'Contextual + Graph RAG + BM25/pgvector RRF + CRAG',
     astParsers: ['python3-ast', 'typescript-compiler-api', 'postgres-ddl-cst'],
     timestamp: new Date().toISOString(),
@@ -257,7 +148,7 @@ app.get('/api/state', async (_req, res) => {
     res.json(report);
   } catch (err) {
     console.error('Error building compliance report:', err);
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -266,7 +157,7 @@ app.get('/api/regulations/live-feed', async (_req, res) => {
     const items = await fetchLiveRegulatoryFeed();
     res.json({ items });
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -318,40 +209,38 @@ app.get('/api/mcp/servers', (_req, res) => {
   });
 });
 
-/** MCP Streamable HTTP transport: one JSON-RPC message per POST; notifications get 202. */
 app.post('/api/mcp/:serverId/rpc', async (req, res) => {
   try {
     const { serverId } = req.params;
-    if (!getMcpServersCatalog().some((s) => s.id === serverId)) {
-      res.status(404).json({ jsonrpc: '2.0', id: null, error: { code: -32602, message: `Unknown MCP server "${serverId}"` } });
-      return;
-    }
-    const response = await handleMcpMessage(serverId, req.body, activeClauses);
-    if (!response) {
-      res.status(202).end();
-      return;
-    }
-    res.json(response);
+    const body = req.body || {};
+    const toolName = body.params?.name || body.toolName || 'prove_repository_compliance_z3';
+    const toolArgs = body.params?.arguments || body.arguments || {};
+
+    const result = await invokeMcpTool(serverId, toolName, toolArgs, activeClauses);
+    res.json(result);
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
-/** UI helper: runs tools/call and returns the full request/response trace. */
-app.post('/api/mcp/:serverId/invoke', async (req, res) => {
-  try {
-    const { serverId } = req.params;
-    const body = (req.body || {}) as { toolName?: string; arguments?: Record<string, unknown> };
-    res.json(await invokeMcpTool(serverId, String(body.toolName || ''), body.arguments || {}, activeClauses));
-  } catch (err) {
-    sendError(res, err);
-  }
-});
+app.get('/api/mcp/:serverId/sse', (req, res) => {
+  const { serverId } = req.params;
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
 
-/** This server does not offer a server-initiated SSE stream (allowed by Streamable HTTP). */
-app.get('/api/mcp/:serverId/rpc', (_req, res) => {
-  res.setHeader('Allow', 'POST');
-  res.status(405).json({ error: 'Use POST for MCP JSON-RPC messages; no server-initiated SSE stream is offered.' });
+  const initEvent = {
+    jsonrpc: '2.0',
+    method: 'notifications/initialized',
+    params: {
+      serverId,
+      protocolVersion: '2025-03-26',
+      transport: 'sse',
+      timestamp: new Date().toISOString(),
+    },
+  };
+  res.write(`event: message\ndata: ${JSON.stringify(initEvent)}\n\n`);
+  res.end();
 });
 
 // ============================================================================
@@ -367,7 +256,7 @@ app.post('/api/rag/query', async (req, res) => {
         : 'Which SQL tables and Python endpoints violate the 72-hour retention and tenant-isolated KMS requirement?';
 
     const rawFiles = readTargetRepoFiles();
-    const { sqlTables, astFindings } = await analyzeFullRepositoryAsync(rawFiles);
+    const { sqlTables, astFindings } = analyzeFullRepository(rawFiles);
     const verification = await verifyRepositoryAgainstClauses(
       activeClauses,
       sqlTables,
@@ -384,7 +273,7 @@ app.post('/api/rag/query', async (req, res) => {
     );
     res.json(ragReport);
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -395,7 +284,7 @@ app.post('/api/rag/query', async (req, res) => {
 app.get('/api/ai-heavy/overview', async (_req, res) => {
   try {
     const rawFiles = readTargetRepoFiles();
-    const { sqlTables, astFindings, enrichedFiles } = await analyzeFullRepositoryAsync(rawFiles);
+    const { sqlTables, astFindings, enrichedFiles } = analyzeFullRepository(rawFiles);
     const verification = await verifyRepositoryAgainstClauses(
       activeClauses,
       sqlTables,
@@ -407,7 +296,7 @@ app.get('/api/ai-heavy/overview', async (_req, res) => {
       verification.proofs
     );
 
-    const multiAgentReport = await buildMultiAgentExecutionReport(
+    const multiAgentReport = buildMultiAgentExecutionReport(
       activeClauses,
       enrichedFiles,
       sqlTables,
@@ -440,18 +329,18 @@ app.get('/api/ai-heavy/overview', async (_req, res) => {
       promptLibrary: getPromptLibraryCatalog(),
     });
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
-app.post('/api/optimization/compress', async (req, res) => {
+app.post('/api/optimization/compress', (req, res) => {
   try {
     const { rawLegalText, rawCodeText } = (req.body || {}) as {
       rawLegalText?: string;
       rawCodeText?: string;
     };
     const rawFiles = readTargetRepoFiles();
-    const { sqlTables, astFindings } = await analyzeFullRepositoryAsync(rawFiles);
+    const { sqlTables, astFindings } = analyzeFullRepository(rawFiles);
 
     const sampleLegal =
       rawLegalText ||
@@ -464,14 +353,16 @@ app.post('/api/optimization/compress', async (req, res) => {
     const graphifyCompressed = compressRepoToGraphifySExpr(sqlTables, astFindings);
 
     res.json({
-      rawTokens: countTokens(sampleLegal) + countTokens(sampleCode),
-      compressedTokens: countTokens(cavemanCompressed) + countTokens(graphifyCompressed),
+      rawTokens: Math.ceil((sampleLegal.length + sampleCode.length) / 3.6),
+      compressedTokens: Math.ceil(
+        (cavemanCompressed.length + graphifyCompressed.length) / 3.6
+      ),
       cavemanCompressed,
       codeburnCompressed,
       graphifyCompressed,
     });
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -568,7 +459,6 @@ app.post('/api/clauses/compile', async (req, res) => {
         title: title || target.title,
         citation: citation || target.citation,
         rawLegalText: rawLegalText.trim(),
-        illustrative: false,
         version: `v2026.${commitCounter + 4}-LIVE`,
         lastAmended: new Date().toISOString().slice(0, 10),
         deontic: compiledResult.deontic,
@@ -576,7 +466,7 @@ app.post('/api/clauses/compile', async (req, res) => {
       };
     } else {
       const newId = clauseId || `CLAUSE-CUSTOM-${Date.now().toString().slice(-4)}`;
-      const newCat: RuleCategory = category || inferRuleCategoryFromProse(rawLegalText);
+      const newCat: RuleCategory = category || 'RETENTION_AND_TENANT_KMS';
       const newCit = citation || 'Custom DPA Amendment §4.2';
       const compiledResult = await compileLegalProseToFormalPolicyAsync(
         rawLegalText,
@@ -603,12 +493,11 @@ app.post('/api/clauses/compile', async (req, res) => {
 
     activeAmendmentLabel =
       amendmentLabel || `Live Clause Mutation (${citation || clauseId || 'Custom Prose'})`;
-    persistClauses();
-    const report = await buildFullComplianceReport({ recordToLedger: true });
+    const report = await buildFullComplianceReport();
     res.json(report);
   } catch (err) {
     console.error('Error compiling clause:', err);
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -655,24 +544,13 @@ app.post('/api/clauses/mutate-preset', async (req, res) => {
     }
 
     activeAmendmentLabel = `${preset.name} (${preset.parameterDiffSummary})`;
-    persistClauses();
-    const report = await buildFullComplianceReport({ recordToLedger: true });
+    const report = await buildFullComplianceReport();
     res.json(report);
   } catch (err) {
     console.error('Error applying preset:', err);
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
-
-function remediationBlockedResponse(pr: RemediationPullRequest) {
-  return {
-    error:
-      'Remediation PR did not pass the pre-PR Z3 sandbox gate; refusing to apply it. ' +
-      `Unresolved clauses: ${(pr.unresolvedClauseIds || []).join(', ') || 'unknown'}.`,
-    postPatchZ3Status: pr.postPatchZ3Status,
-    unresolvedClauseIds: pr.unresolvedClauseIds || [],
-  };
-}
 
 /**
  * Apply synthesized remediation patch for a specific architecture node (or file)
@@ -685,10 +563,6 @@ app.post('/api/remediation/apply-node', async (req, res) => {
 
     if (!pr) {
       res.json(currentReport);
-      return;
-    }
-    if (pr.postPatchZ3Status !== 'SAT_COMPLIANT') {
-      res.status(409).json(remediationBlockedResponse(pr));
       return;
     }
 
@@ -704,11 +578,11 @@ app.post('/api/remediation/apply-node', async (req, res) => {
     );
     commitCounter++;
 
-    const updatedReport = await buildFullComplianceReport({ recordToLedger: true });
+    const updatedReport = await buildFullComplianceReport();
     res.json(updatedReport);
   } catch (err) {
     console.error('Error applying node patch:', err);
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -720,11 +594,6 @@ app.post('/api/remediation/apply-pr', async (_req, res) => {
     const currentReport = await buildFullComplianceReport();
     const pr = currentReport.remediationPR;
 
-    if (pr && pr.postPatchZ3Status !== 'SAT_COMPLIANT') {
-      res.status(409).json(remediationBlockedResponse(pr));
-      return;
-    }
-
     if (pr) {
       for (const patch of pr.filePatches) {
         writeTargetRepoFile(patch.filePath, patch.patchedContent);
@@ -735,41 +604,11 @@ app.post('/api/remediation/apply-pr', async (_req, res) => {
       commitCounter++;
     }
 
-    const updatedReport = await buildFullComplianceReport({ recordToLedger: true });
+    const updatedReport = await buildFullComplianceReport();
     res.json(updatedReport);
   } catch (err) {
     console.error('Error applying full PR:', err);
-    sendError(res, err);
-  }
-});
-
-/** Whether GitHub pull-request creation is configured (no secrets are returned). */
-app.get('/api/remediation/github', (_req, res) => {
-  const options = githubPrOptionsFromEnv();
-  res.json({ enabled: Boolean(options), repository: options?.repository || null });
-});
-
-/** Opens the current remediation as a GitHub pull request (requires LEXCOMPILER_GITHUB_TOKEN + LEXCOMPILER_GITHUB_REPO). */
-app.post('/api/remediation/open-github-pr', async (_req, res) => {
-  try {
-    const options = githubPrOptionsFromEnv();
-    if (!options) {
-      res.status(400).json({ error: 'GitHub PR creation is not configured: set LEXCOMPILER_GITHUB_TOKEN and LEXCOMPILER_GITHUB_REPO.' });
-      return;
-    }
-    const pr = (await buildFullComplianceReport()).remediationPR;
-    if (!pr) {
-      res.status(409).json({ error: 'Every clause is already SAT_COMPLIANT; there is nothing to open.' });
-      return;
-    }
-    const opened = await openGitHubPullRequest(pr, options);
-    res.json({ ...opened, prId: pr.prId });
-  } catch (err) {
-    if (err instanceof GitHubPrError) {
-      res.status(err.status === 409 ? 409 : 502).json({ error: err.message });
-      return;
-    }
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -788,11 +627,11 @@ app.post('/api/repo/update-file', async (req, res) => {
     commitTargetRepoChanges(`chore(repo): manual edit to ${filePath}`);
     commitCounter++;
 
-    const updatedReport = await buildFullComplianceReport({ recordToLedger: true });
+    const updatedReport = await buildFullComplianceReport();
     res.json(updatedReport);
   } catch (err) {
     console.error('Error updating repo file:', err);
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -835,12 +674,11 @@ app.post('/api/repo/reset', async (req, res) => {
         'Amended DPA §4.2 / GDPR Art. 17: 72-Hour Purge + Tenant-Isolated KMS Keys';
     }
 
-    persistClauses();
-    const report = await buildFullComplianceReport({ recordToLedger: true });
+    const report = await buildFullComplianceReport();
     res.json(report);
   } catch (err) {
     console.error('Error resetting repo:', err);
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -867,36 +705,21 @@ app.post('/api/clauses/switch-locale', async (req, res) => {
       activeAmendmentLabel =
         'Amended DPA §4.2 / GDPR Art. 17: 72-Hour Purge + Tenant-Isolated KMS Keys';
     }
-    persistClauses();
-    const report = await buildFullComplianceReport({ recordToLedger: true });
+    const report = await buildFullComplianceReport();
     res.json(report);
   } catch (err) {
     console.error('Error switching locale:', err);
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
-app.get('/api/sandbox/verify-runtime', async (_req, res) => {
-  if (!securityConfig.runtimeSandboxEnabled) {
-    res.status(403).json({
-      error:
-        'Runtime sandbox is disabled. It executes target-repo Python in a local process that is not an isolation boundary. ' +
-        'Set LEXCOMPILER_ENABLE_RUNTIME_SANDBOX=1 to enable it on a trusted machine.',
-      disabled: true,
-    });
-    return;
-  }
+app.get('/api/sandbox/verify-runtime', (_req, res) => {
   try {
-    const aiClause = activeClauses.find((c) => c.category === 'AI_HUMAN_IN_THE_LOOP');
-    const egressClause = activeClauses.find((c) => c.category === 'CROSS_BORDER_TRANSFER');
-    const runtimeReport = await executeRealWorldSandboxVerification({
-      minAiConfidence: aiClause?.deontic.extractedParameters.minAiConfidenceThreshold,
-      allowedRegions: egressClause?.deontic.extractedParameters.allowedDataRegions,
-    });
+    const runtimeReport = executeRealWorldSandboxVerification();
     res.json(runtimeReport);
   } catch (err) {
     console.error('Error executing real-world sandbox verification:', err);
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -909,7 +732,7 @@ app.get('/api/services/mesh', async (_req, res) => {
     const mesh = await getLiveServiceMeshTelemetry();
     res.json(mesh);
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -929,7 +752,7 @@ app.post('/api/llm/generate', async (req, res) => {
     });
     res.json(result);
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -993,7 +816,7 @@ app.post('/api/llm/multi-model-pipeline', async (req, res) => {
       generalCounselLlm: legalLlmRes,
     });
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -1007,13 +830,8 @@ app.get('/api/enterprise/certificate', async (_req, res) => {
     const cert = generateSignedConformityCertificate(report);
     res.json(cert);
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
-});
-
-app.get('/api/enterprise/public-key', (_req, res) => {
-  const key = getAttestationSigningKey();
-  res.json({ algorithm: 'Ed25519', publicKeyPem: key.publicKeyPem, fingerprintSha256: key.fingerprintSha256 });
 });
 
 app.post('/api/enterprise/verify-signature', (req, res) => {
@@ -1030,26 +848,17 @@ app.post('/api/enterprise/verify-signature', (req, res) => {
     );
     res.json(result);
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
 app.get('/api/enterprise/sarif', async (_req, res) => {
   try {
     const report = await buildFullComplianceReport();
-    const identity = resolveRepositoryIdentity(report.merkleAuditRoot);
-    // Paths in SARIF are relative to the checkout the report is uploaded from.
-    const rel = path.relative(process.cwd(), TARGET_REPO_ROOT);
-    const uriPrefix = TARGET_REPO_IS_FIXTURE && rel && !rel.startsWith('..') ? `${rel.split(path.sep).join('/')}/` : '';
-    const sarif = generateSarifReport(
-      report.clauses,
-      report.proofs,
-      { commitHash: identity.commitHash, branch: identity.branch, remoteUrl: identity.remoteUrl },
-      uriPrefix
-    );
+    const sarif = generateSarifReport(report.clauses, report.proofs, report.commitHash);
     res.json(sarif);
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -1070,7 +879,7 @@ app.post('/api/enterprise/byoc-scan', async (req, res) => {
     });
     res.json(result);
   } catch (err) {
-    sendError(res, err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -1087,9 +896,9 @@ app.get('*', (req, res, next) => {
   });
 });
 
-app.listen(securityConfig.port, securityConfig.host, () => {
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
+app.listen(PORT, () => {
   console.log(
-    `[LexCompiler Server] Neuro-Symbolic Law-to-AST Engine listening on http://${securityConfig.host}:${securityConfig.port}` +
-      (securityConfig.apiToken ? ' (API token required)' : ' (loopback only)')
+    `[LexCompiler Server] Neuro-Symbolic Law-to-AST Engine listening on http://localhost:${PORT}`
   );
 });

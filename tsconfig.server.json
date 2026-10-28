@@ -8,12 +8,5 @@
     "skipLibCheck": true,
     "outDir": "./dist-server"
   },
-  "include": [
-    "server",
-    "shared"
-  ],
-  "exclude": [
-    "server/**/*.test.ts",
-    "server/test-setup.ts"
-  ]
+  "include": ["server", "shared"]
 }

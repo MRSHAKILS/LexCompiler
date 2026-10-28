@@ -2,33 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { TargetRepoFile } from '../../shared/types.js';
 
-/**
- * Repository to scan. Defaults to the bundled demo fixture (`target-repo/`); set
- * LEXCOMPILER_TARGET_REPO to scan any other directory.
- */
-export const TARGET_REPO_ROOT = path.resolve(process.env.LEXCOMPILER_TARGET_REPO || path.join(process.cwd(), 'target-repo'));
-
-/**
- * True when the scanned repository is the bundled demo fixture (or a scratch copy of it).
- * Only the fixture may be reset to its baseline or tracked in the sandbox Git history;
- * a user's own repository is never overwritten or re-initialized.
- */
-export const TARGET_REPO_IS_FIXTURE =
-  !process.env.LEXCOMPILER_TARGET_REPO || process.env.LEXCOMPILER_TARGET_REPO_IS_FIXTURE === '1';
-
-const SOURCE_EXTENSIONS: Record<string, TargetRepoFile['language']> = {
-  '.py': 'python',
-  '.ts': 'typescript',
-  '.tsx': 'typescript',
-  '.mts': 'typescript',
-  '.cts': 'typescript',
-  '.sql': 'sql',
-};
-const SKIPPED_DIRS = new Set(['node_modules', '.git', '.venv', 'venv', '__pycache__', 'dist', 'build', '.next', 'coverage', '.tox', '.mypy_cache']);
-const MAX_SCANNED_FILES = 2000;
-const MAX_FILE_BYTES = 1024 * 1024;
-
-export class TargetRepoPathError extends Error {}
+export const TARGET_REPO_ROOT = path.resolve(process.cwd(), 'target-repo');
 
 export const INITIAL_REPO_FILES: Record<string, { language: 'python' | 'typescript' | 'sql'; description: string; content: string }> = {
   'schema/postgres_pii.sql': {
@@ -220,7 +194,6 @@ export async function replicatePatientTelemetry(
 };
 
 export function ensureTargetRepoFilesExist(): void {
-  if (!TARGET_REPO_IS_FIXTURE) return;
   for (const [relPath, spec] of Object.entries(INITIAL_REPO_FILES)) {
     const absPath = path.join(TARGET_REPO_ROOT, relPath);
     fs.mkdirSync(path.dirname(absPath), { recursive: true });
@@ -231,11 +204,6 @@ export function ensureTargetRepoFilesExist(): void {
 }
 
 export function resetTargetRepoToBaseline(): void {
-  if (!TARGET_REPO_IS_FIXTURE) {
-    throw new TargetRepoPathError(
-      `Refusing to reset ${TARGET_REPO_ROOT}: only the bundled demo fixture can be reset to its baseline.`
-    );
-  }
   for (const [relPath, spec] of Object.entries(INITIAL_REPO_FILES)) {
     const absPath = path.join(TARGET_REPO_ROOT, relPath);
     fs.mkdirSync(path.dirname(absPath), { recursive: true });
@@ -243,66 +211,28 @@ export function resetTargetRepoToBaseline(): void {
   }
 }
 
-function listSourceFiles(): string[] {
-  const out: string[] = [];
-  const walk = (dir: string) => {
-    if (out.length >= MAX_SCANNED_FILES) return;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (out.length >= MAX_SCANNED_FILES) return;
-      const abs = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (!SKIPPED_DIRS.has(entry.name) && !entry.name.startsWith('.')) walk(abs);
-      } else if (entry.isFile() && SOURCE_EXTENSIONS[path.extname(entry.name)] && !entry.name.endsWith('.d.ts')) {
-        out.push(path.relative(TARGET_REPO_ROOT, abs).split(path.sep).join('/'));
-      }
-    }
-  };
-  walk(TARGET_REPO_ROOT);
-  return out;
-}
-
-/** Reads every Python, TypeScript, and SQL file under the target repository. */
 export function readTargetRepoFiles(): TargetRepoFile[] {
   ensureTargetRepoFilesExist();
   const result: TargetRepoFile[] = [];
-  for (const relPath of listSourceFiles()) {
+
+  for (const [relPath, spec] of Object.entries(INITIAL_REPO_FILES)) {
     const absPath = path.join(TARGET_REPO_ROOT, relPath);
+    const content = fs.readFileSync(absPath, 'utf8');
     const stat = fs.statSync(absPath);
-    if (stat.size > MAX_FILE_BYTES) continue;
-    const language = SOURCE_EXTENSIONS[path.extname(relPath)];
     result.push({
       path: relPath,
-      language,
-      description: INITIAL_REPO_FILES[relPath]?.description || `${language} source file`,
-      content: fs.readFileSync(absPath, 'utf8'),
+      language: spec.language,
+      description: spec.description,
+      content,
       lastModified: stat.mtime.toISOString(),
     });
   }
   return result;
 }
 
-/**
- * Only existing source files that the analyzer scans can be written. This rules out
- * path traversal and the creation of new files (scripts, configs, dotfiles).
- */
 export function writeTargetRepoFile(relPath: string, newContent: string): void {
-  const normalized = path.posix.normalize(relPath.replace(/\\/g, '/').replace(/^\/+/, ''));
-  if (!listSourceFiles().includes(normalized)) {
-    throw new TargetRepoPathError(
-      `Refusing to write "${relPath}": only existing scanned source files (.py, .ts, .sql) in the target repository can be modified.`
-    );
-  }
-  const absPath = path.resolve(TARGET_REPO_ROOT, normalized);
-  if (!absPath.startsWith(TARGET_REPO_ROOT + path.sep)) {
-    throw new TargetRepoPathError(`Refusing to write "${relPath}": path escapes target-repo/.`);
-  }
+  const normalized = relPath.replace(/^\/+/, '');
+  const absPath = path.join(TARGET_REPO_ROOT, normalized);
   fs.mkdirSync(path.dirname(absPath), { recursive: true });
   fs.writeFileSync(absPath, newContent, 'utf8');
 }

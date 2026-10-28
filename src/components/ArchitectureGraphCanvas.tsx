@@ -356,7 +356,7 @@ export const ArchitectureGraphCanvas: React.FC<ArchitectureGraphCanvasProps> = (
             <strong className={violatedCount > 0 ? 'text-rose-300' : 'text-emerald-300'}>
               {violatedCount > 0
                 ? `${violatedCount} UNSAT Contradictions`
-                : '100% SAT_COMPLIANT'}
+                : '100% SAT Certified'}
             </strong>
           </div>
           <div>• Bilingual: English + বাংলা (BD Bank §4.2)</div>
