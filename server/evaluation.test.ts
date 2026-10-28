@@ -51,4 +51,36 @@ describe('retrieval evaluation', () => {
       server.close();
     }
   });
+
+  it('LLM judge: retries truncated JSON once, and an unparseable verdict leaves the question unjudged', async () => {
+    const valid = JSON.stringify({ claims: [{ claim: 'A', supported: true }], answerRelevancy: 0.5 });
+    // Truncated reply (as when a judge hits its token limit mid-list), then valid on the corrective turn.
+    let replies = ['{"claims":[{"claim":"A","supported":true},{"claim":"B"', valid];
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: replies.shift() ?? 'not json' }, finish_reason: 'length' }], usage: {} }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const judge = { provider: 'openai' as const, model: 'judge', baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
+    try {
+      expect((await judgeAnswer(judge, 'q', 'a', ['ctx'])).faithfulness).toBe(1);
+
+      const clauses = getInitialClauses();
+      const a = await analyzeFullRepositoryAsync(readTargetRepoFiles());
+      const v = await verifyRepositoryAgainstClauses(clauses, a.sqlTables, a.astFindings);
+      const dataset = loadEvalDataset().slice(0, 2);
+      replies = [valid]; // first question judged; the second gets only invalid replies
+      const report = await evaluateRag(async (q, k) => executeHybridRagQuery(q, clauses, a.sqlTables, a.astFindings, v.proofs, k), { judge, dataset });
+      expect(report.perQuestion[0].judge?.faithfulness).toBe(1);
+      expect(report.perQuestion[1].judge).toBeUndefined();
+      expect(report.perQuestion[1].judgeError).toMatch(/did not return valid JSON/);
+      expect(report.aggregate.judgedQuestions).toBe(1);
+      expect(report.aggregate.faithfulness).toBe(1);
+    } finally {
+      server.close();
+    }
+  });
 });

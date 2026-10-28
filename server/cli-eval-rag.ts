@@ -17,7 +17,7 @@ async function main() {
   const report = await evaluateRag((q, k) => executeStoreBackedRagQuery(q, clauses, a.sqlTables, a.astFindings, v.proofs, k), { judge });
   console.log(`RAG evaluation: ${report.questions} labelled questions, k=${report.k}${report.judgeModel ? `, judge ${report.judgeModel}` : ' (no judge model configured)'}`);
   for (const p of report.perQuestion) {
-    console.log(`  ${p.id} P@k=${p.scores.precisionAtK.toFixed(2)} R@k=${p.scores.recallAtK.toFixed(2)} MRR=${p.scores.mrr.toFixed(2)} nDCG=${p.scores.ndcgAtK.toFixed(2)}${p.judge ? ` faith=${p.judge.faithfulness.toFixed(2)} rel=${p.judge.answerRelevancy.toFixed(2)}` : ''}  ${p.query}`);
+    console.log(`  ${p.id} P@k=${p.scores.precisionAtK.toFixed(2)} R@k=${p.scores.recallAtK.toFixed(2)} MRR=${p.scores.mrr.toFixed(2)} nDCG=${p.scores.ndcgAtK.toFixed(2)}${p.judge ? ` faith=${p.judge.faithfulness.toFixed(2)} rel=${p.judge.answerRelevancy.toFixed(2)}` : ''}${p.judgeError ? ` judge-error=${JSON.stringify(p.judgeError)}` : ''}  ${p.query}`);
   }
   console.log(`Aggregate: ${JSON.stringify(report.aggregate)}`);
 }

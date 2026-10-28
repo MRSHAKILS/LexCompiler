@@ -50,14 +50,41 @@ export interface JudgeScores {
   claims: Array<{ claim: string; supported: boolean }>;
 }
 
+const JUDGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    claims: { type: 'array', items: { type: 'object', properties: { claim: { type: 'string' }, supported: { type: 'boolean' } }, required: ['claim', 'supported'] } },
+    answerRelevancy: { type: 'number' },
+  },
+  required: ['claims', 'answerRelevancy'],
+};
+
+type JudgeReply = { claims?: Array<{ claim: string; supported: boolean }>; answerRelevancy?: number };
+
+function parseJudgeReply(text: string): JudgeReply | null {
+  try {
+    const parsed = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) as JudgeReply;
+    return parsed && typeof parsed === 'object' && Array.isArray(parsed.claims) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 /** LLM judge following the RAGAS definitions (claim extraction → per-claim support verdicts). */
 export async function judgeAnswer(llm: LlmConfig, query: string, answer: string, contexts: string[]): Promise<JudgeScores> {
   const prompt = `Question: ${query}\nAnswer: ${answer}\nContexts:\n${contexts.map((c, i) => `[${i + 1}] ${c.slice(0, 1200)}`).join('\n')}\n\n` +
     'Split the answer into atomic factual claims. For each claim decide whether the contexts support it. Rate how directly the answer addresses the question (0-1). ' +
     'Reply with only JSON: {"claims":[{"claim":"...","supported":true}],"answerRelevancy":0.0}';
-  const res = await chat(llm, [{ role: 'system', content: 'You are a strict RAG evaluation judge.' }, { role: 'user', content: prompt }], [], { maxTokens: 800 });
-  const text = res.content;
-  const parsed = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) as { claims?: Array<{ claim: string; supported: boolean }>; answerRelevancy?: number };
+  const messages: Parameters<typeof chat>[1] = [{ role: 'system', content: 'You are a strict RAG evaluation judge.' }, { role: 'user', content: prompt }];
+  let res = await chat(llm, messages, [], { maxTokens: 1500, jsonSchema: JUDGE_SCHEMA });
+  let parsed = parseJudgeReply(res.content);
+  if (!parsed) {
+    // One corrective turn, as the agent runtime does for invalid structured output.
+    messages.push({ role: 'assistant', content: res.content }, { role: 'user', content: 'That was not valid JSON in the requested shape. Reply with only the JSON object, keeping each claim short.' });
+    res = await chat(llm, messages, [], { maxTokens: 1500, jsonSchema: JUDGE_SCHEMA });
+    parsed = parseJudgeReply(res.content);
+  }
+  if (!parsed) throw new Error(`Judge ${llm.label || llm.model} did not return valid JSON (finish reason: ${res.finishReason})`);
   const claims = (parsed.claims || []).map((c) => ({ claim: String(c.claim), supported: c.supported === true }));
   return {
     faithfulness: claims.length ? claims.filter((c) => c.supported).length / claims.length : 0,
@@ -69,8 +96,9 @@ export async function judgeAnswer(llm: LlmConfig, query: string, answer: string,
 export interface EvalReport {
   k: number;
   questions: number;
-  aggregate: RetrievalScores & { faithfulness?: number; answerRelevancy?: number };
-  perQuestion: Array<{ id: string; query: string; ranked: string[]; scores: RetrievalScores; judge?: JudgeScores }>;
+  /** Judge means cover only the questions the judge scored (`judgedQuestions`). */
+  aggregate: RetrievalScores & { faithfulness?: number; answerRelevancy?: number; judgedQuestions?: number };
+  perQuestion: Array<{ id: string; query: string; ranked: string[]; scores: RetrievalScores; judge?: JudgeScores; judgeError?: string }>;
   judgeModel?: string;
 }
 
@@ -83,10 +111,20 @@ export async function evaluateRag(run: (query: string, k: number) => Promise<Rag
   for (const q of opts.dataset || loadEvalDataset()) {
     const report = await run(q.query, k);
     const ranked = report.retrievedChunks.map((r) => r.chunk.chunkId);
-    const judge = opts.judge ? await judgeAnswer(opts.judge, q.query, report.synthesizedNeuroSymbolicAnswer, report.retrievedChunks.map((r) => r.chunk.contextualizedText)) : undefined;
-    perQuestion.push({ id: q.id, query: q.query, ranked, scores: scoreRanking(ranked, q.relevant, k), ...(judge ? { judge } : {}) });
+    let judge: JudgeScores | undefined;
+    let judgeError: string | undefined;
+    if (opts.judge) {
+      try {
+        judge = await judgeAnswer(opts.judge, q.query, report.synthesizedNeuroSymbolicAnswer, report.retrievedChunks.map((r) => r.chunk.contextualizedText));
+      } catch (err) {
+        // An unparseable verdict leaves the question unjudged instead of scoring it 0 or aborting the run.
+        judgeError = (err as Error).message;
+      }
+    }
+    perQuestion.push({ id: q.id, query: q.query, ranked, scores: scoreRanking(ranked, q.relevant, k), ...(judge ? { judge } : {}), ...(judgeError ? { judgeError } : {}) });
   }
   const agg = (key: keyof RetrievalScores) => r3(mean(perQuestion.map((p) => p.scores[key])));
+  const judged = perQuestion.flatMap((p) => (p.judge ? [p.judge] : []));
   return {
     k,
     questions: perQuestion.length,
@@ -97,7 +135,7 @@ export async function evaluateRag(run: (query: string, k: number) => Promise<Rag
       ndcgAtK: agg('ndcgAtK'),
       hitRate: agg('hitRate'),
       ...(opts.judge
-        ? { faithfulness: r3(mean(perQuestion.map((p) => p.judge!.faithfulness))), answerRelevancy: r3(mean(perQuestion.map((p) => p.judge!.answerRelevancy))) }
+        ? { faithfulness: r3(mean(judged.map((j) => j.faithfulness))), answerRelevancy: r3(mean(judged.map((j) => j.answerRelevancy))), judgedQuestions: judged.length }
         : {}),
     },
     perQuestion,

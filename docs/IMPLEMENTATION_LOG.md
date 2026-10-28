@@ -353,6 +353,16 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - These 0.5B–3B models are too weak to finish every step reliably; `dolphin3` does not support tool calls in Ollama.
 - **Agents pytest:** 5 passed.
 
+### Step 27 · RAG evaluation with an LLM judge (L-4)
+- **Bug fix:** `npm run eval:rag` with a judge aborted on the first judge reply that was not valid JSON (it was truncated at the 800-token limit mid-way through the claim list).
+  - The judge now asks for schema-constrained JSON (`response_format` with the claims schema), has 1,500 tokens, and gets one corrective turn, as the agent runtime does.
+  - A verdict that is still invalid leaves that question unjudged (`judgeError`), instead of scoring it 0 or aborting the run. The judge means cover the judged questions only (`aggregate.judgedQuestions`), and the CLI prints the error per question.
+  - A new test (a truncated reply, then a valid one on retry; a question whose judge never answers validly) fails without the fix.
+- **Run:** `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL=llama3.2` against Ollama's `/v1` endpoint completed all 16 labelled questions.
+  - Retrieval: MRR 0.656, nDCG@5 0.54, hit rate 0.938, matching the regression floor in `evaluation.test.ts`.
+  - Judge: 11 questions judged, faithfulness 0.593, answer relevancy 0.282; 5 were reported unjudged.
+  - These judge scores come from a 3B local model and are a smoke test of the pipeline, not a quality measurement.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -362,7 +372,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-1 | **OPA Rego evaluation (V5)** | Running a downloaded OPA binary was not permitted in this session | ✅ Done (Steps 8, 22): `server/opa.test.ts` passes against real OPA 1.4.2 locally. |
 | L-2 | **6-agent crew (AI1)** | Needs provider API keys and local GGUF models | Implemented (Step 19); verified locally (Step 26): requirements fixed, all six adapters import, and CrewAI, DSPy and OpenAI Agents, plus the TypeScript pipeline, run against the local Ollama models. Remaining: run the pipeline with the named models, which needs provider API keys (Claude, DeepSeek, GPT-4o, Gemini, hosted Llama 70B) or a local Qwen-2.5-Coder-7B with tool support. |
 | L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No Neo4j server, and Hugging Face downloads are blocked here | ✅ Done (Steps 13, 25): pgvector on PostgreSQL, Neo4j and the BGE cross-encoder all verified in one query. |
-| L-4 | **RAGAS evaluation (AI3)** | Needs a judge LLM | Labelled set, IR metrics and judge implemented (Step 19). Remaining: set `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL` (or `LEXCOMPILER_LLM_*`) and run `npm run eval:rag`; optionally also run the Python `ragas` package on the same dataset. |
+| L-4 | **RAGAS evaluation (AI3)** | Needs a judge LLM | Labelled set, IR metrics and judge implemented (Step 19); judge run end to end locally and made robust to invalid verdicts (Step 27). Remaining: score with a strong judge model (needs a provider API key, e.g. `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL=gpt-4o`); the Python `ragas` package run is optional. |
 | L-5 | **Token-optimisation benchmark (AI4)** | Hugging Face downloads are blocked here | Implemented (Step 19). Remaining: `pip install llmlingua` (downloads the xlm-roberta model) and set `LEXCOMPILER_LLMLINGUA_PYTHON`. Run Ollama with `all-minilm` for neural dedup, and run an LLM agent so cache hits are measured. |
 | L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | ✅ Done (Step 23): all three models pulled; embeddings and both LLMs run on Ollama (`available: true`). |
 | L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Implemented and tested against a mocked API (Step 7). Remaining: set `LEXCOMPILER_GITHUB_TOKEN` / `LEXCOMPILER_GITHUB_REPO`, open one real PR end to end, and optionally persist the returned PR number. |
