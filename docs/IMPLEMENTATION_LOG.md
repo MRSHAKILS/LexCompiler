@@ -299,13 +299,23 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **Reporting:** the report's `isolation` field states where the code ran.
 - **Tests:** `server/container.test.ts` checks the flags, and runs the full sandbox through a fake container engine that records the invocation and maps `/work`, so the wiring is exercised end to end.
 
+### Step 22 · Local verification on Windows; OPA against the real binary (L-1)
+- **Machine:** Windows 11, Node 24.12, Python 3.12.10 (`python`; `python3` is the Microsoft Store stub), OPA 1.4.2 on `PATH`, Docker Desktop 29.6, Ollama 0.13.5.
+- **Windows portability fixes** (no test was weakened; each now checks the same property on both platforms):
+  - `server/util/python.ts` resolves a Python >= 3.10 (`LEXCOMPILER_PYTHON`, `python3`, `python`, `py -3`) for the analyzer, the sandbox and `/api/health`.
+  - The generated signing key gets an owner-only ACL on Windows (`icacls`), where mode `0600` is ignored; the test checks the ACL there and the mode bits elsewhere.
+  - The local sandbox applies its CPU, memory and no-child-process limits through a Windows Job Object, because `resource` is POSIX-only.
+  - `container.test.ts` runs its fake engine as `node` with the script preloaded through `NODE_OPTIONS` (Windows cannot execute a `#!` script) and parses drive-letter mounts; `tokens.test.ts` uses the resolved Python.
+  - `security.test.ts` checks the curated/offline feed with an offline `fetch`, so it no longer depends on EUR-Lex being unreachable from the test host (it failed on any machine with internet access).
+- **L-1:** `server/opa.test.ts` no longer skips: both tests pass against OPA 1.4.2, and OPA's decisions agree with Z3 before and after remediation. All seven checks pass (97 tests).
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
 
 | # | Item | Why it couldn't be finished here | What remains |
 | :-- | :--- | :--- | :--- |
-| L-1 | **OPA Rego evaluation (V5)** | Running a downloaded OPA binary was not permitted in this session | Implemented (Step 8): Rego v1 policies, the `opa eval` integration, OPA in CI and Docker. Remaining: run `npm test` locally with `opa` on PATH (or check the CI run) to confirm `server/opa.test.ts` passes against real OPA. |
+| L-1 | **OPA Rego evaluation (V5)** | Running a downloaded OPA binary was not permitted in this session | ✅ Done (Steps 8, 22): `server/opa.test.ts` passes against real OPA 1.4.2 locally. |
 | L-2 | **6-agent crew (AI1)** | Needs provider API keys and local GGUF models | Implemented (Step 19). Remaining: set `LEXCOMPILER_LLM_*` / `LEXCOMPILER_AGENT_<ID>_*` (Claude, DeepSeek, GPT-4o, Gemini, Llama, Qwen) and run the pipeline. `pip install -r agents/requirements.txt`, then run `python -m lexcompiler_agents <agent-id>` for the CrewAI, DSPy and OpenAI Agents adapters (Pydantic-AI, LangGraph and Hermes are already tested). |
 | L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No Neo4j server, and Hugging Face downloads are blocked here | Implemented (Step 13). Remaining: (1) start Neo4j (`docker run -p 7687:7687 -e NEO4J_AUTH=neo4j/<password> neo4j:5`), set `LEXCOMPILER_NEO4J_URL=bolt://localhost:7687` and the password, and run a RAG query; `graphDbBackend` must read `Neo4j`. (2) Optionally point `LEXCOMPILER_PGVECTOR_URL` at a PostgreSQL server with pgvector. (3) `npm install @huggingface/transformers`, set `LEXCOMPILER_RERANKER_MODEL=Xenova/bge-reranker-base`, run a query, and confirm `evaluationMethod` names the reranker. |
 | L-4 | **RAGAS evaluation (AI3)** | Needs a judge LLM | Labelled set, IR metrics and judge implemented (Step 19). Remaining: set `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL` (or `LEXCOMPILER_LLM_*`) and run `npm run eval:rag`; optionally also run the Python `ragas` package on the same dataset. |
