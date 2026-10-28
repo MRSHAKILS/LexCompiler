@@ -22,7 +22,7 @@ async function main() {
   const clauses = await loadClausesForCli();
   const { sqlTables, astFindings } = await analyzeFullRepositoryAsync(readTargetRepoFiles());
   const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
-  const identity = resolveRepositoryIdentity(verification.merkleAuditRoot);
+  const identity = await resolveRepositoryIdentity(verification.merkleAuditRoot);
   const sarif = generateSarifReport(
     clauses,
     verification.proofs,

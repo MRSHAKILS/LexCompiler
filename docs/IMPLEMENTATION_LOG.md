@@ -384,6 +384,15 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **Result:** GDPR Art. 17 ("Right to erasure") and AI Act Art. 14 ("Human oversight") now come back with `illustrative: false` and the official article text. The feed's other items are unchanged.
 - **Test:** `eurLex.test.ts` covers the fallback (an empty 202 from EUR-Lex, then XHTML from CELLAR with the right `Accept` header).
 
+### Step 30 · No blocking subprocesses on the request path (L-20)
+- **Sandbox Git:** `realWorldSandbox.ts` runs Git with async `execFile`.
+  - `ensureTargetRepoGitInitialized`, `commitTargetRepoChanges`, `resetTargetRepoGitHistory` and `resolveRepositoryIdentity` return promises, and every caller awaits them.
+  - Sandbox Git work goes through a one-at-a-time queue, so concurrent requests never race on the index lock or interleave an add/commit sequence, which the synchronous code guaranteed implicitly.
+- **Python:** `resolvePythonAsync()` probes the interpreters without blocking; the server starts it at boot, and `/api/health` and the async AST parser await it. `resolveSandboxPython()` is async. The synchronous `resolvePython()` remains for CLIs and tests.
+- **Analyzer fallback:** the PR synthesizer's patch syntax check uses `checkSourceSyntaxAsync`, which primes the Python AST cache in a child process first. The BYOC scan uses `analyzeFullRepositoryAsync`. Request handlers no longer reach the synchronous Python parse.
+- **Left synchronous on purpose:** the CLIs (`setup-sandbox`, `build-sql-grammar`, the demo's MCP stdio probe) and the one-time `icacls` call when the signing key file is first created.
+- **Test:** `server/nonblocking.test.ts` checks that a 1 ms timer keeps firing during concurrent sandbox commits, that queued commits lose no change and leave a clean tree, and that the async and sync Python resolvers agree.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -407,7 +416,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-17 | **More rule categories (L2)** | — | ✅ Done (Step 15). Optional local check: write a real DPIA for `services/ai_credit_triage.ts` and reference it with `DPIA_REFERENCE`. |
 | L-18 | **Multi-tenant users and projects (P1)** | No real identity provider here | Implemented (Step 17) and tested against a local OpenID provider. Remaining: register LexCompiler with your IdP (Keycloak, Entra ID, Okta, Auth0…), set `LEXCOMPILER_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_REDIRECT_URI` and the roles claim, then sign in through `/api/auth/login`. |
 | L-19 | **Full verification of real repositories at scale** | No large real-world repositories to benchmark against here | Run `LEXCOMPILER_TARGET_REPO=… npm run verify:cli` on real codebases, measure precision/recall of findings, and tune the analyzer heuristics. |
-| L-20 | **Event-loop blocking (S6)** | Not reached in the cloud session | Replace the remaining `execFileSync` calls (sandbox Git history, the sync analyzer fallback, `resolvePython`) with async `execFile`/`spawn`, so a request never blocks the event loop. |
+| L-20 | **Event-loop blocking (S6)** | Not reached in the cloud session | ✅ Done (Step 30): sandbox Git, Python resolution and the analyzer fallback are async on the request path. |
 | L-21 | **PII classification beyond names (A1)** | Not reached in the cloud session | Classify PII from types and schemas (Pydantic field types, SQL column comments and constraints, TypeScript interfaces) and from value patterns in fixtures, in addition to identifier names; add precision/recall tests. |
 | L-22 | **Frontend accessibility and tests (U1)** | Not reached in the cloud session | Add `@testing-library/react` + jsdom tests for the dashboard, IDE drawer and agent console; fix keyboard focus, ARIA labels and colour contrast; split the largest components. |
 | L-13 | **EUR-Lex SPARQL ingestion** | EUR-Lex and CELLAR are blocked from this session (403) | ✅ Done (Steps 20, 29): the live feed returns the official Art. 17 / Art. 14 text (`illustrative: false`) through CELLAR, plus live amendments. |

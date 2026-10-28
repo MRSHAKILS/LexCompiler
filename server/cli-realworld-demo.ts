@@ -35,7 +35,7 @@ async function runRealWorldScenario() {
   console.log('================================================================================\n');
 
   resetTargetRepoToBaseline();
-  resetTargetRepoGitHistory();
+  await resetTargetRepoGitHistory();
   const clauses = getInitialClauses();
 
   console.log('--- [1] Runtime sandbox (pre-remediation) ---');
@@ -112,7 +112,7 @@ async function runRealWorldScenario() {
     check(pr.filePatches.every((fp) => fp.syntaxCheck?.passed), 'every patched file re-parses');
     if (pr.status === 'READY_TO_MERGE') {
       for (const patch of pr.filePatches) writeTargetRepoFile(patch.filePath, patch.patchedContent);
-      const commit = commitTargetRepoChanges(`fix(compliance): apply ${pr.prId} (${pr.filePatches.length} files)`);
+      const commit = await commitTargetRepoChanges(`fix(compliance): apply ${pr.prId} (${pr.filePatches.length} files)`);
       console.log(`  committed to sandbox git @ ${commit}`);
     }
   }

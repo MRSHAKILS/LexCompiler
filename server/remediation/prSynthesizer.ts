@@ -1,5 +1,5 @@
 import { createTwoFilesPatch } from 'diff';
-import { analyzeFullRepositoryAsync, checkSourceSyntax } from '../analyzer/astAnalyzer.js';
+import { analyzeFullRepositoryAsync, checkSourceSyntaxAsync } from '../analyzer/astAnalyzer.js';
 import { executeSchemaOnPostgres } from '../sandbox/postgresSandbox.js';
 import { verifyRepositoryAgainstClauses } from '../prover/z3Engine.js';
 import { sha256Hex } from '../util/hash.js';
@@ -434,7 +434,7 @@ export async function synthesizeRemediationPullRequest(
   for (const file of files) {
     const original = originals.get(file.path) ?? '';
     if (file.content === original) continue;
-    let syntaxCheck = checkSourceSyntax(file);
+    let syntaxCheck = await checkSourceSyntaxAsync(file);
     if (syntaxCheck.passed && file.language === 'sql') {
       // The patched DDL must also be accepted by a real PostgreSQL engine.
       try {

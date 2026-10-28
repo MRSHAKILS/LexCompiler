@@ -10,7 +10,7 @@ import type {
   SQLTableSchema,
   TargetRepoFile,
 } from '../../shared/types.js';
-import { resolvePython } from '../util/python.js';
+import { resolvePython, resolvePythonAsync } from '../util/python.js';
 import { collectGovernanceFindings } from './governanceFacts.js';
 import { summarizeTypeScriptFunction } from './symbolicTs.js';
 
@@ -1301,9 +1301,9 @@ export function parsePythonAstCached(content: string): ParsedPythonAst | null {
 }
 
 /** Parses a Python file in a child process without blocking the event loop. */
-function parsePythonAstAsync(content: string): Promise<ParsedPythonAst | null> {
-  const python = resolvePython();
-  if (!python) return Promise.resolve(null);
+async function parsePythonAstAsync(content: string): Promise<ParsedPythonAst | null> {
+  const python = await resolvePythonAsync();
+  if (!python) return null;
   return new Promise((resolve) => {
     const child = spawn(python.command, [...python.prefixArgs, '-I', '-c', PYTHON_AST_SCRIPT], {
       stdio: ['pipe', 'pipe', 'ignore'],
@@ -1788,6 +1788,12 @@ export function checkSourceSyntax(file: TargetRepoFile): { passed: boolean; mess
   }
   const { syntaxError } = parseSqlSchemaFile(file);
   return syntaxError ? { passed: false, message: syntaxError } : { passed: true };
+}
+
+/** checkSourceSyntax with Python parsing done off the event loop. */
+export async function checkSourceSyntaxAsync(file: TargetRepoFile): Promise<{ passed: boolean; message?: string }> {
+  await primePythonAstCache([file]);
+  return checkSourceSyntax(file);
 }
 
 const SYMBOLIC_TYPES = new Set<ASTFindingNode['constructType']>(['LOGGER_CALL', 'PII_ENTRYPOINT', 'LLM_INFERENCE_CALL', 'CROSS_BORDER_EGRESS']);

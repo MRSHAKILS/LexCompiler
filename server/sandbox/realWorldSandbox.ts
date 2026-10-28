@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import ts from 'typescript';
 import fs from 'node:fs';
@@ -125,61 +125,74 @@ const pick = (mod, re) => Object.entries(mod).find(([k, v]) => typeof v === 'fun
 /** Separate Git dir tracking the demo fixture's history (never the user's own `.git`). */
 const SANDBOX_GIT_DIR = path.resolve(process.env.LEXCOMPILER_SANDBOX_GIT_DIR || path.join(process.cwd(), 'data', 'sandbox-git'));
 
-function runGit(args: string[]): string {
-  try {
-    return execFileSync('git', args, {
-      cwd: TARGET_REPO_ROOT,
-      env: {
-        ...process.env,
-        GIT_DIR: SANDBOX_GIT_DIR,
-        GIT_WORK_TREE: TARGET_REPO_ROOT,
-      },
-      encoding: 'utf8',
-      timeout: 4000,
-    }).trim();
-  } catch {
-    return '';
-  }
+function execGit(args: string[], opts: { cwd?: string; env: NodeJS.ProcessEnv }): Promise<string> {
+  return new Promise((resolve) =>
+    execFile('git', args, { ...opts, encoding: 'utf8', timeout: 4000, windowsHide: true }, (err, stdout) => resolve(err ? '' : stdout.trim()))
+  );
 }
 
-export function ensureTargetRepoGitInitialized(): void {
-  if (!TARGET_REPO_IS_FIXTURE) return;
+function runGitNow(args: string[]): Promise<string> {
+  return execGit(args, { cwd: TARGET_REPO_ROOT, env: { ...process.env, GIT_DIR: SANDBOX_GIT_DIR, GIT_WORK_TREE: TARGET_REPO_ROOT } });
+}
+
+// Sandbox Git work runs one task at a time (as it did when it was synchronous), so concurrent
+// requests never race on the index lock or interleave an add/commit sequence.
+let gitQueue: Promise<unknown> = Promise.resolve();
+function serialGit<T>(task: () => Promise<T>): Promise<T> {
+  const next = gitQueue.then(task, task);
+  gitQueue = next.catch(() => undefined);
+  return next;
+}
+
+async function initSandboxGitNow(): Promise<void> {
   const legacyNestedGit = path.join(TARGET_REPO_ROOT, '.git');
   if (fs.existsSync(legacyNestedGit)) {
     fs.rmSync(legacyNestedGit, { recursive: true, force: true });
   }
   if (!fs.existsSync(SANDBOX_GIT_DIR)) {
     fs.mkdirSync(path.dirname(SANDBOX_GIT_DIR), { recursive: true });
-    runGit(['init']);
-    runGit(['checkout', '-B', 'main']);
-    runGit(['config', 'user.name', 'LexCompiler Autonomous Enforcer']);
-    runGit(['config', 'user.email', 'lexcompiler-bot@justicesphere.ai']);
-    runGit(['add', '.']);
-    runGit(['commit', '-m', 'feat(baseline): initial FinHealth AI polyglot repository (30d TTL)']);
+    await runGitNow(['init']);
+    await runGitNow(['checkout', '-B', 'main']);
+    await runGitNow(['config', 'user.name', 'LexCompiler Autonomous Enforcer']);
+    await runGitNow(['config', 'user.email', 'lexcompiler-bot@justicesphere.ai']);
+    await runGitNow(['add', '.']);
+    await runGitNow(['commit', '-m', 'feat(baseline): initial FinHealth AI polyglot repository (30d TTL)']);
   }
 }
 
-export function commitTargetRepoChanges(commitMessage: string): string {
-  if (!TARGET_REPO_IS_FIXTURE) return '';
-  ensureTargetRepoGitInitialized();
-  runGit(['add', '.']);
-  const status = runGit(['status', '--porcelain']);
-  if (status) {
-    runGit(['commit', '-m', commitMessage]);
-  }
-  return runGit(['rev-parse', '--short', 'HEAD']) || 'HEAD';
+/** Runs one sandbox Git command (after initialising the sandbox history if needed). */
+function runGit(args: string[]): Promise<string> {
+  return serialGit(async () => {
+    await initSandboxGitNow();
+    return runGitNow(args);
+  });
 }
 
-export function resetTargetRepoGitHistory(): void {
-  if (!TARGET_REPO_IS_FIXTURE) return;
-  const legacyNestedGit = path.join(TARGET_REPO_ROOT, '.git');
-  if (fs.existsSync(legacyNestedGit)) {
-    fs.rmSync(legacyNestedGit, { recursive: true, force: true });
-  }
-  if (fs.existsSync(SANDBOX_GIT_DIR)) {
-    fs.rmSync(SANDBOX_GIT_DIR, { recursive: true, force: true });
-  }
-  ensureTargetRepoGitInitialized();
+export function ensureTargetRepoGitInitialized(): Promise<void> {
+  if (!TARGET_REPO_IS_FIXTURE) return Promise.resolve();
+  return serialGit(initSandboxGitNow);
+}
+
+export function commitTargetRepoChanges(commitMessage: string): Promise<string> {
+  if (!TARGET_REPO_IS_FIXTURE) return Promise.resolve('');
+  return serialGit(async () => {
+    await initSandboxGitNow();
+    await runGitNow(['add', '.']);
+    if (await runGitNow(['status', '--porcelain'])) {
+      await runGitNow(['commit', '-m', commitMessage]);
+    }
+    return (await runGitNow(['rev-parse', '--short', 'HEAD'])) || 'HEAD';
+  });
+}
+
+export function resetTargetRepoGitHistory(): Promise<void> {
+  if (!TARGET_REPO_IS_FIXTURE) return Promise.resolve();
+  return serialGit(async () => {
+    if (fs.existsSync(SANDBOX_GIT_DIR)) {
+      fs.rmSync(SANDBOX_GIT_DIR, { recursive: true, force: true });
+    }
+    await initSandboxGitNow();
+  });
 }
 
 /**
@@ -192,14 +205,12 @@ export async function executeRealWorldSandboxVerification(
   if (!TARGET_REPO_IS_FIXTURE) {
     throw new Error('The runtime sandbox only supports the bundled demo fixture, not LEXCOMPILER_TARGET_REPO repositories.');
   }
-  ensureTargetRepoGitInitialized();
-
-  const branch = runGit(['rev-parse', '--abbrev-ref', 'HEAD']) || 'main';
-  const headCommit = runGit(['rev-parse', '--short', 'HEAD']) || 'initial';
-  const logRaw = runGit(['log', '--oneline', '-n', '5']);
+  const branch = (await runGit(['rev-parse', '--abbrev-ref', 'HEAD'])) || 'main';
+  const headCommit = (await runGit(['rev-parse', '--short', 'HEAD'])) || 'initial';
+  const logRaw = await runGit(['log', '--oneline', '-n', '5']);
   const commitLog = logRaw ? logRaw.split('\n') : [];
-  const gitDiffStat = runGit(['show', '--stat', '--oneline', 'HEAD']);
-  const workingTreeClean = runGit(['status', '--porcelain']) === '';
+  const gitDiffStat = await runGit(['show', '--stat', '--oneline', 'HEAD']);
+  const workingTreeClean = (await runGit(['status', '--porcelain'])) === '';
 
   const pyRunnerScript = `
 import sys
@@ -459,7 +470,7 @@ print(json.dumps({
       });
       stdout = out;
     } else {
-      const python = resolveSandboxPython();
+      const python = await resolveSandboxPython();
       if (!python) throw new Error('No Python >= 3.10 interpreter found (tried LEXCOMPILER_PYTHON, python3, python, py -3)');
       const { stdout: out } = await execFileAsync(python.command, [...python.prefixArgs, '-I', '-c', pyRunnerScript, workDir], {
         cwd: workDir,
@@ -515,27 +526,22 @@ export interface RepositoryIdentity {
  * demo fixture, or the repository's own `.git` otherwise. Falls back to a content hash
  * (prefixed `content-`) when the directory is not a Git checkout.
  */
-export function resolveRepositoryIdentity(contentFingerprint: string): RepositoryIdentity {
-  const git = (args: string[]): string => {
+export async function resolveRepositoryIdentity(contentFingerprint: string): Promise<RepositoryIdentity> {
+  const git = (args: string[]): Promise<string> => {
     if (TARGET_REPO_IS_FIXTURE) return runGit(args);
-    try {
-      const env = { ...process.env };
-      delete env.GIT_DIR;
-      delete env.GIT_WORK_TREE;
-      return execFileSync('git', ['-C', TARGET_REPO_ROOT, ...args], { encoding: 'utf8', timeout: 4000, env, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    } catch {
-      return '';
-    }
+    const env = { ...process.env };
+    delete env.GIT_DIR;
+    delete env.GIT_WORK_TREE;
+    return execGit(['-C', TARGET_REPO_ROOT, ...args], { env });
   };
-  if (TARGET_REPO_IS_FIXTURE) ensureTargetRepoGitInitialized();
-  const commit = git(['rev-parse', '--short=12', 'HEAD']);
-  const remoteUrl = TARGET_REPO_IS_FIXTURE ? undefined : git(['remote', 'get-url', 'origin']) || undefined;
+  const commit = await git(['rev-parse', '--short=12', 'HEAD']);
+  const remoteUrl = TARGET_REPO_IS_FIXTURE ? undefined : (await git(['remote', 'get-url', 'origin'])) || undefined;
   const remoteName = remoteUrl?.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1];
   return {
     name: TARGET_REPO_IS_FIXTURE ? 'finhealth-ai/core-platform' : remoteName || path.basename(TARGET_REPO_ROOT),
-    branch: git(['rev-parse', '--abbrev-ref', 'HEAD']) || 'unknown',
+    branch: (await git(['rev-parse', '--abbrev-ref', 'HEAD'])) || 'unknown',
     commitHash: commit || `content-${contentFingerprint.slice(0, 12)}`,
     remoteUrl,
-    dirty: commit ? git(['status', '--porcelain']) !== '' : false,
+    dirty: commit ? (await git(['status', '--porcelain'])) !== '' : false,
   };
 }

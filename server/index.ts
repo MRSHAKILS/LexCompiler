@@ -73,7 +73,7 @@ import {
   isOriginAllowed,
   resolveServerSecurityConfig,
 } from './security.js';
-import { resolvePython } from './util/python.js';
+import { resolvePythonAsync } from './util/python.js';
 import type {
   ComplianceFrameworkId,
   FullComplianceScanReport,
@@ -142,7 +142,9 @@ app.post(
 
 // Ensure real target repository files, Git repo & SQLite ledger exist on disk
 ensureTargetRepoFilesExist();
-ensureTargetRepoGitInitialized();
+// Off the event loop at startup; Git work is queued and Python is resolved once, before requests need them.
+void ensureTargetRepoGitInitialized();
+void resolvePythonAsync();
 ensurePersistentSqliteDb();
 
 const persistedState = loadActiveClauseState();
@@ -176,7 +178,7 @@ async function buildFullComplianceReport(
     (compliantClausesCount / Math.max(1, proofs.length)) * 100
   );
 
-  const identity = resolveRepositoryIdentity(
+  const identity = await resolveRepositoryIdentity(
     sha256Hex(enrichedFiles.map((f) => `${f.path}\n${f.content}`).join('\n'))
   );
   const commitHash = `${identity.commitHash}${identity.dirty ? '-dirty' : ''}`;
@@ -230,7 +232,7 @@ async function buildFullComplianceReport(
 }
 
 async function checkPython3(): Promise<string | null> {
-  return resolvePython()?.version ?? null;
+  return (await resolvePythonAsync())?.version ?? null;
 }
 
 /** Checks the dependencies scans need; 503 when Z3 or python3 is unavailable. */
@@ -653,7 +655,7 @@ app.post('/api/clauses/mutate-preset', async (req, res) => {
 
     if (resetRepoFiles) {
       resetTargetRepoToBaseline();
-      resetTargetRepoGitHistory();
+      await resetTargetRepoGitHistory();
       commitCounter++;
     }
 
@@ -728,7 +730,7 @@ app.post('/api/remediation/apply-node', async (req, res) => {
     for (const patch of matchingPatches) {
       writeTargetRepoFile(patch.filePath, patch.patchedContent);
     }
-    commitTargetRepoChanges(
+    await commitTargetRepoChanges(
       `fix(compliance): apply LexCompiler AST patch for ${nodeId || filePath}`
     );
     commitCounter++;
@@ -758,7 +760,7 @@ app.post('/api/remediation/apply-pr', async (_req, res) => {
       for (const patch of pr.filePatches) {
         writeTargetRepoFile(patch.filePath, patch.patchedContent);
       }
-      commitTargetRepoChanges(
+      await commitTargetRepoChanges(
         `fix(compliance): merge LexCompiler Auto-PR #${pr.prNumber} (${pr.filePatches.length} Z3-verified files)`
       );
       commitCounter++;
@@ -814,7 +816,7 @@ app.post('/api/repo/update-file', async (req, res) => {
     }
 
     writeTargetRepoFile(filePath, content);
-    commitTargetRepoChanges(`chore(repo): manual edit to ${filePath}`);
+    await commitTargetRepoChanges(`chore(repo): manual edit to ${filePath}`);
     commitCounter++;
 
     const updatedReport = await buildFullComplianceReport({ recordToLedger: true });
@@ -832,7 +834,7 @@ app.post('/api/repo/reset', async (req, res) => {
   try {
     const { mode } = (req.body || {}) as { mode?: 'LEGACY_30D_COMPLIANT_DPA' | 'AMENDED_72H' };
     resetTargetRepoToBaseline();
-    resetTargetRepoGitHistory();
+    await resetTargetRepoGitHistory();
     activeClauses = getInitialClauses();
     commitCounter++;
 
@@ -884,7 +886,7 @@ app.post('/api/clauses/switch-locale', async (req, res) => {
     };
     if (resetRepo) {
       resetTargetRepoToBaseline();
-      resetTargetRepoGitHistory();
+      await resetTargetRepoGitHistory();
       commitCounter++;
     }
     if (locale === 'bn') {
@@ -1082,7 +1084,7 @@ app.get('/api/enterprise/revocations', (_req, res) => res.json(revocations()));
 app.get('/api/enterprise/sarif', async (_req, res) => {
   try {
     const report = await buildFullComplianceReport();
-    const identity = resolveRepositoryIdentity(report.merkleAuditRoot);
+    const identity = await resolveRepositoryIdentity(report.merkleAuditRoot);
     // Paths in SARIF are relative to the checkout the report is uploaded from.
     const rel = path.relative(process.cwd(), TARGET_REPO_ROOT);
     const uriPrefix = TARGET_REPO_IS_FIXTURE && rel && !rel.startsWith('..') ? `${rel.split(path.sep).join('/')}/` : '';

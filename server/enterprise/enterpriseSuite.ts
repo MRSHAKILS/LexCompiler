@@ -5,7 +5,7 @@ import {
   inferRuleCategoryFromProse,
   sha256Hex,
 } from '../compiler/legalCompiler.js';
-import { analyzeFullRepository } from '../analyzer/astAnalyzer.js';
+import { analyzeFullRepositoryAsync } from '../analyzer/astAnalyzer.js';
 import { verifyRepositoryAgainstClauses } from '../prover/z3Engine.js';
 import { synthesizeRemediationPullRequest } from '../remediation/prSynthesizer.js';
 import { getAttestationSigner, localSigner, registerTrustedKey, revocations, trustedKeys, verifyAttestationSignature } from './attestationSigner.js';
@@ -304,7 +304,7 @@ export async function executeByocCustomScan(input: {
     content: input.sourceCode,
     lastModified: new Date().toISOString(),
   };
-  const analysis = analyzeFullRepository([file]);
+  const analysis = await analyzeFullRepositoryAsync([file]);
   const verification = await verifyRepositoryAgainstClauses(
     clauses,
     analysis.sqlTables,
