@@ -322,5 +322,28 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-17 | **More rule categories (L2)** | — | ✅ Done (Step 15). Optional local check: write a real DPIA for `services/ai_credit_triage.ts` and reference it with `DPIA_REFERENCE`. |
 | L-18 | **Multi-tenant users and projects (P1)** | No real identity provider here | Implemented (Step 17) and tested against a local OpenID provider. Remaining: register LexCompiler with your IdP (Keycloak, Entra ID, Okta, Auth0…), set `LEXCOMPILER_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_REDIRECT_URI` and the roles claim, then sign in through `/api/auth/login`. |
 | L-19 | **Full verification of real repositories at scale** | No large real-world repositories to benchmark against here | Run `LEXCOMPILER_TARGET_REPO=… npm run verify:cli` on real codebases, measure precision/recall of findings, and tune the analyzer heuristics. |
+| L-20 | **Event-loop blocking (S6)** | Not reached in the cloud session | Replace the remaining `execFileSync` calls (sandbox Git history, the sync analyzer fallback, `resolvePython`) with async `execFile`/`spawn`, so a request never blocks the event loop. |
+| L-21 | **PII classification beyond names (A1)** | Not reached in the cloud session | Classify PII from types and schemas (Pydantic field types, SQL column comments and constraints, TypeScript interfaces) and from value patterns in fixtures, in addition to identifier names; add precision/recall tests. |
+| L-22 | **Frontend accessibility and tests (U1)** | Not reached in the cloud session | Add `@testing-library/react` + jsdom tests for the dashboard, IDE drawer and agent console; fix keyboard focus, ARIA labels and colour contrast; split the largest components. |
 | L-13 | **EUR-Lex SPARQL ingestion** | EUR-Lex and CELLAR are blocked from this session (403) | Implemented and tested against recorded responses (Step 20). Remaining: run `GET /api/regulations/live-feed` with internet access and confirm the GDPR Art. 17 / AI Act Art. 14 items show `illustrative: false` with the official text. |
 | L-14 | **Docker image verification (D1)** | Docker isn't available in this session | The Dockerfile and compose file are written (Step 6). Remaining: run `LEXCOMPILER_API_TOKEN=… docker compose --profile ollama up --build`, pull the models, and confirm the health check and the non-root image. |
+
+---
+
+## Local verification prompt
+
+Paste this into Claude Code in your local clone (branch `claude/compassionate-hypatia-3mjhsk`):
+
+```text
+Pull origin/claude/compassionate-hypatia-3mjhsk. Read docs/IMPLEMENTATION_LOG.md: Part 1 is
+what is built, Part 2 lists what still needs this machine. Work through every Part 2 row whose
+"What remains" is not ✅ Done, in this order: L-1, L-6, L-14, L-9, L-10, L-3, L-7, L-8, L-18,
+L-2, L-4, L-5, L-12, L-13, L-15, L-19, L-20, L-21, L-22.
+For each row: tell me what you need to install or which credentials you need and wait for my OK;
+do the remaining step; fix anything that breaks in the code (never weaken a test or a claim in
+README.md / AGENTS.md); run npm run typecheck, npm run lint, npm test, npm run verify:cli,
+npm run verify:realworld, npm run build (and the agents/ pytest suite); mark the row done with a
+short note; commit as mrshakils <121shakilahmed@gmail.com> and push to the same branch.
+Never commit secrets. At the end, update docs/LIMITATIONS_REPORT.md §0 and summarise.
+```
+
