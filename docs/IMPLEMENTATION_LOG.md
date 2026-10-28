@@ -363,6 +363,16 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - Judge: 11 questions judged, faithfulness 0.593, answer relevancy 0.282; 5 were reported unjudged.
   - These judge scores come from a 3B local model and are a smoke test of the pipeline, not a quality measurement.
 
+### Step 28 · LLMLingua-2 and neural dedup in the token benchmark (L-5)
+- **Install:** `pip install llmlingua` into `.venv-llmlingua` (llmlingua 0.2.2, torch 2.15, transformers 5.21), with `LEXCOMPILER_LLMLINGUA_PYTHON` pointing at it. The venv is in `.gitignore` and ignored by ESLint.
+- **Sidecar:**
+  - The real `microsoft/llmlingua-2-xlm-roberta-large-meetingbank` model compressed the DPA clause and kept the forced deontic words, numbers and citations ("…must encrypted tenant-isolated keys purged within 72 hours…").
+  - The first call takes about 210 s on CPU because it downloads the model.
+- **Benchmark** (`runTokenOptimizationBenchmarkAsync`):
+  - The LLMLingua stage reports the xlm-roberta token classifier (2,846 → 2,705 tokens).
+  - Semantic dedup uses 384-d `all-minilm` embeddings from Ollama (1 of 25 segments removed).
+- **Not measured here:** provider-reported prompt-cache hits need an LLM agent run on a provider that returns cached-token counts (OpenAI or Anthropic); Ollama reports none.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -373,7 +383,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-2 | **6-agent crew (AI1)** | Needs provider API keys and local GGUF models | Implemented (Step 19); verified locally (Step 26): requirements fixed, all six adapters import, and CrewAI, DSPy and OpenAI Agents, plus the TypeScript pipeline, run against the local Ollama models. Remaining: run the pipeline with the named models, which needs provider API keys (Claude, DeepSeek, GPT-4o, Gemini, hosted Llama 70B) or a local Qwen-2.5-Coder-7B with tool support. |
 | L-3 | **pgvector + Neo4j Graph RAG (AI2)** | No Neo4j server, and Hugging Face downloads are blocked here | ✅ Done (Steps 13, 25): pgvector on PostgreSQL, Neo4j and the BGE cross-encoder all verified in one query. |
 | L-4 | **RAGAS evaluation (AI3)** | Needs a judge LLM | Labelled set, IR metrics and judge implemented (Step 19); judge run end to end locally and made robust to invalid verdicts (Step 27). Remaining: score with a strong judge model (needs a provider API key, e.g. `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL=gpt-4o`); the Python `ragas` package run is optional. |
-| L-5 | **Token-optimisation benchmark (AI4)** | Hugging Face downloads are blocked here | Implemented (Step 19). Remaining: `pip install llmlingua` (downloads the xlm-roberta model) and set `LEXCOMPILER_LLMLINGUA_PYTHON`. Run Ollama with `all-minilm` for neural dedup, and run an LLM agent so cache hits are measured. |
+| L-5 | **Token-optimisation benchmark (AI4)** | Hugging Face downloads are blocked here | Implemented (Step 19); LLMLingua-2 and neural dedup verified locally (Step 28). Remaining: measured cache hits need an agent run on OpenAI or Anthropic (provider API key). |
 | L-6 | **Ollama models** (`qwen2.5-coder:0.5b`, `dolphin3`, `all-minilm`) | No Ollama daemon here | ✅ Done (Step 23): all three models pulled; embeddings and both LLMs run on Ollama (`available: true`). |
 | L-7 | **GitHub pull requests (R4)** | No GitHub credentials for a target repository | Implemented and tested against a mocked API (Step 7). Remaining: set `LEXCOMPILER_GITHUB_TOKEN` / `LEXCOMPILER_GITHUB_REPO`, open one real PR end to end, and optionally persist the returned PR number. |
 | L-8 | **Hardware-backed signing (C1)** | No cloud KMS account or TSA reachable here | Implemented (Step 18) and tested against fakes. Remaining: create a KMS key (GCP `EC_SIGN_ED25519` with HSM protection, or AWS `ECC_NIST_P256` SIGN_VERIFY), set `LEXCOMPILER_SIGNER` and the key id, set `LEXCOMPILER_TSA_URL` (e.g. `https://freetsa.org/tsr`), then issue and verify one certificate. |

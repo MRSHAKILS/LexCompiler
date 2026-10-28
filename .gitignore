@@ -10,6 +10,7 @@ video-build/
 INTERNAL_AUDIT.md
 repos/
 .venv-agents/
+.venv-llmlingua/
 mcp-servers.json
 .handoff-state
 .handoff-stop
