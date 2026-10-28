@@ -215,6 +215,31 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **Note:** the OPA policies evaluate the extracted facts; the Z3 proof additionally applies the path-sensitive verdicts.
 - **Tests:** `server/symbolic.test.ts` (7 tests).
 
+### Step 17 · OIDC sign-in, roles, and projects (L-18)
+- **OIDC:** `server/auth/oidc.ts` is an OpenID Connect relying party.
+  - **Browser sign-in:** the authorization-code flow with PKCE (S256), plus single-use state and a nonce. It opens server-side sessions in an HttpOnly, SameSite=Lax cookie, which is Secure behind https.
+  - **API clients:** bearer JWTs are verified against the issuer's JWKS (signature, `iss`, `aud`, `exp`).
+  - **Roles:** a roles claim (`LEXCOMPILER_OIDC_ROLES_CLAIM`) maps `LEXCOMPILER_OIDC_ADMIN_ROLE` to the global admin role.
+  - **Endpoints:** `/api/auth/config`, `/login`, `/callback`, `/logout`, `/me`.
+- **Guard:** with OIDC configured, every `/api` route needs a session, an OIDC bearer, or the API token.
+  - Cookie sessions also need the client header on writes (CSRF).
+  - The single-repository endpoints act on the `default` project with `LEXCOMPILER_DEFAULT_PROJECT_ROLE` (viewer by default; writes need editor or admin).
+  - A non-loopback bind is allowed with OIDC alone.
+  - Loopback and API-token behaviour are unchanged.
+- **Projects:** `server/projects/` keeps a project registry with members and roles (viewer < editor < owner; admins act as owners). Each project has its own repository, clauses, and scan ledger (`scans.jsonl`), and projects are invisible to non-members.
+  - Repository paths must lie inside `LEXCOMPILER_PROJECT_REPOS_ROOT`.
+  - The last owner cannot be removed.
+  - **API:** `GET/POST /api/projects`, `GET/DELETE /api/projects/:id`, `PUT /api/projects/:id/members`, `GET/POST/DELETE /api/projects/:id/clauses`, `POST /api/projects/:id/scan`, `GET /api/projects/:id/scans`.
+- **UI:** a 401 that carries a `loginUrl` sends the browser to sign-in, and requests carry the session cookie.
+- **Tests:** `server/access.test.ts` runs a real local OpenID provider (discovery, JWKS, a PKCE-checking token endpoint, RS256 tokens) and checks:
+  - forged and wrong-audience tokens are rejected;
+  - the full code flow works, and its state is single-use;
+  - the CSRF header is enforced;
+  - default-project roles apply;
+  - membership isolates projects, and roles are enforced;
+  - repository paths cannot escape the projects root;
+  - per-project clause compilation, scans and the ledger work.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -236,7 +261,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-15 | **GitHub code-scanning upload** | Enabling code scanning is a repository setting | CI already produces `lexcompiler.sarif`. Enable code scanning, add `security-events: write`, and add `github/codeql-action/upload-sarif` for scans of real repositories (not the intentionally non-compliant fixture). |
 | L-16 | **Symbolic program semantics (V3)** | — | ✅ Done (Step 16): path-sensitive symbolic execution for TypeScript and Python, Z3 counterexamples, inter-procedural taint within a module. |
 | L-17 | **More rule categories (L2)** | — | ✅ Done (Step 15). Optional local check: write a real DPIA for `services/ai_credit_triage.ts` and reference it with `DPIA_REFERENCE`. |
-| L-18 | **Multi-tenant users and projects (P1)** | Needs an identity provider and a multi-user database | Replace the single API token with OIDC sign-in, per-user roles, and per-project repositories, clauses, and ledgers. |
+| L-18 | **Multi-tenant users and projects (P1)** | No real identity provider here | Implemented (Step 17) and tested against a local OpenID provider. Remaining: register LexCompiler with your IdP (Keycloak, Entra ID, Okta, Auth0…), set `LEXCOMPILER_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_REDIRECT_URI` and the roles claim, then sign in through `/api/auth/login`. |
 | L-19 | **Full verification of real repositories at scale** | No large real-world repositories to benchmark against here | Run `LEXCOMPILER_TARGET_REPO=… npm run verify:cli` on real codebases, measure precision/recall of findings, and tune the analyzer heuristics. |
 | L-13 | **EUR-Lex SPARQL ingestion** | The EUR-Lex SPARQL endpoint isn't reachable from this session | Query the CELLAR SPARQL endpoint for amendments to the tracked CELEX numbers and replace the curated excerpts with official text. |
 | L-14 | **Docker image verification (D1)** | Docker isn't available in this session | The Dockerfile and compose file are written (Step 6). Remaining: run `LEXCOMPILER_API_TOKEN=… docker compose --profile ollama up --build`, pull the models, and confirm the health check and the non-root image. |

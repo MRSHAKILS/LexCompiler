@@ -1,3 +1,6 @@
+import { OidcProvider, oidcConfigFromEnv } from './auth/oidc.js';
+import { ProjectStore } from './projects/projectStore.js';
+import { createAccessRouter, createAuthenticator } from './projects/router.js';
 import path from 'node:path';
 import cors from 'cors';
 import express from 'express';
@@ -96,7 +99,18 @@ app.use(
   })
 );
 app.use(express.json({ limit: '5mb' }));
-app.use('/api', createApiGuard(securityConfig));
+const oidcConfig = oidcConfigFromEnv();
+const oidcProvider = oidcConfig ? new OidcProvider(oidcConfig) : null;
+const projectStore = new ProjectStore(
+  path.resolve(process.env.LEXCOMPILER_DATA_DIR || path.join(process.cwd(), 'data')),
+  process.env.LEXCOMPILER_PROJECT_REPOS_ROOT || path.join(process.cwd(), 'repos')
+);
+// The single-repository endpoints operate on this project.
+if (!projectStore.get('default')) {
+  projectStore.create({ id: 'default', name: 'Default repository', repoPath: TARGET_REPO_ROOT, owner: 'local', trustedRepoPath: true });
+}
+app.use('/api', createApiGuard(securityConfig, oidcProvider ? createAuthenticator(oidcProvider, securityConfig.apiToken) : undefined));
+app.use('/api', createAccessRouter(projectStore, oidcProvider));
 
 /**
  * Requests that rewrite target-repo files, commit, or change clauses run one at a time,

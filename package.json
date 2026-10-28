@@ -28,6 +28,7 @@
     "diff": "^8.0.4",
     "express": "^4.21.2",
     "gpt-tokenizer": "4.0.0",
+    "jose": "6.2.12",
     "lucide-react": "^0.475.0",
     "neo4j-driver": "6.2.0",
     "pg": "8.19.0",

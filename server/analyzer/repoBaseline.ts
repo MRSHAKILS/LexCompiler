@@ -243,7 +243,7 @@ export function resetTargetRepoToBaseline(): void {
   }
 }
 
-function listSourceFiles(): string[] {
+function listSourceFiles(root: string = TARGET_REPO_ROOT): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
     if (out.length >= MAX_SCANNED_FILES) return;
@@ -260,12 +260,25 @@ function listSourceFiles(): string[] {
       if (entry.isDirectory()) {
         if (!SKIPPED_DIRS.has(entry.name) && !entry.name.startsWith('.')) walk(abs);
       } else if (entry.isFile() && SOURCE_EXTENSIONS[path.extname(entry.name)] && !entry.name.endsWith('.d.ts')) {
-        out.push(path.relative(TARGET_REPO_ROOT, abs).split(path.sep).join('/'));
+        out.push(path.relative(root, abs).split(path.sep).join('/'));
       }
     }
   };
-  walk(TARGET_REPO_ROOT);
+  walk(root);
   return out;
+}
+
+/** Reads every Python, TypeScript, and SQL file under `root` (a project's repository). */
+export function readRepositoryFilesAt(root: string): TargetRepoFile[] {
+  const result: TargetRepoFile[] = [];
+  for (const relPath of listSourceFiles(root)) {
+    const absPath = path.join(root, relPath);
+    const stat = fs.statSync(absPath);
+    if (stat.size > MAX_FILE_BYTES) continue;
+    const language = SOURCE_EXTENSIONS[path.extname(relPath)];
+    result.push({ path: relPath, language, description: `${language} source file`, content: fs.readFileSync(absPath, 'utf8'), lastModified: stat.mtime.toISOString() });
+  }
+  return result;
 }
 
 /** Reads every Python, TypeScript, and SQL file under the target repository. */

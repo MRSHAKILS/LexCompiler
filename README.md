@@ -222,6 +222,12 @@ curl -X POST -H 'X-LexCompiler-Client: cli' http://127.0.0.1:3001/api/remediatio
 
 Only a `READY_TO_MERGE` remediation (post-patch Z3 `SAT`) can be opened. Optional: `LEXCOMPILER_GITHUB_BASE` (base branch; defaults to the repository's default branch), `LEXCOMPILER_GITHUB_PATH_PREFIX` (where the scanned files live inside the GitHub repository), and `GITHUB_API_URL` (GitHub Enterprise).
 
+### Sign-in and Projects (OIDC)
+
+Set `LEXCOMPILER_OIDC_ISSUER` and `LEXCOMPILER_OIDC_CLIENT_ID` (plus `LEXCOMPILER_OIDC_CLIENT_SECRET` for confidential clients and `LEXCOMPILER_OIDC_REDIRECT_URI`, e.g. `https://lexcompiler.example.com/api/auth/callback`) to require sign-in with your identity provider. Users whose roles claim (`LEXCOMPILER_OIDC_ROLES_CLAIM`, default `roles`) contains `LEXCOMPILER_OIDC_ADMIN_ROLE` (default `lexcompiler-admin`) are administrators. Everyone else gets `LEXCOMPILER_DEFAULT_PROJECT_ROLE` (default `viewer`) on the default repository and their membership role on other projects.
+
+Projects (`/api/projects`) each have their own repository (inside `LEXCOMPILER_PROJECT_REPOS_ROOT`, default `repos/`), members (`viewer`, `editor`, `owner`), clauses, and scan history.
+
 ### Configuration Reference
 
 | Variable | Default | Purpose |

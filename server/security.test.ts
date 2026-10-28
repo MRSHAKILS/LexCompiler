@@ -35,6 +35,7 @@ function runGuard(
   let status: number | null = null;
   let passed = false;
   const res = {
+    locals: {},
     status(code: number) {
       status = code;
       return this;

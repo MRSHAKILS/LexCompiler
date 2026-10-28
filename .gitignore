@@ -8,3 +8,4 @@ video-build/
 /*.mp4
 .env
 INTERNAL_AUDIT.md
+repos/
