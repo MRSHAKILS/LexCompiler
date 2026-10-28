@@ -116,9 +116,11 @@ export function compressRepoToGraphifySExpr(
   const astNodes = astFindings
     .map(
       (f) =>
-        `(ASTNode ${f.constructType} :fn ${f.functionName} :loc "${f.filePath}:${f.line}" :meta ${JSON.stringify(
-          f.metadata
-        )})`
+        // The symbolic summary is a derived proof artefact, not context for the model.
+        `(ASTNode ${f.constructType} :fn ${f.functionName} :loc "${f.filePath}:${f.line}" :meta ${JSON.stringify({
+          ...f.metadata,
+          symbolic: undefined,
+        })})`
     )
     .join(' ');
 

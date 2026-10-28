@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import ts from 'typescript';
 import type {
   ASTFindingNode,
+  SymbolicSummary,
   SourceEditAnchor,
   SQLColumnNode,
   SQLDependentForeignKey,
@@ -11,6 +12,7 @@ import type {
 } from '../../shared/types.js';
 import { resolvePython } from '../util/python.js';
 import { collectGovernanceFindings } from './governanceFacts.js';
+import { summarizeTypeScriptFunction } from './symbolicTs.js';
 
 /** Identifier is PII when its last `_`-separated token(s) name a personal-data field. */
 const PII_IDENTIFIER =
@@ -761,6 +763,7 @@ export interface ParsedPythonAst {
   }>;
   classes: Array<{ name: string; lineno: number; end_lineno: number; bases?: string[]; fields?: Array<{ name: string; lineno: number; end_lineno: number }> }>;
   attr_reads?: string[];
+  symbolic?: Record<string, SymbolicSummary & { lineno: number; end_lineno: number }>;
   sinks: Array<{
     func: string;
     lineno: number;
@@ -1042,12 +1045,228 @@ for node in ast.walk(tree):
             "ttl_refs": refs,
         })
 
+# --- Inter-procedural taint: a module function whose parameter reaches a log sink (directly,
+# through local aliases, or through another such function) is itself a sink for that argument.
+fn_nodes = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+param_sinks = {}  # function name -> {parameter index: description of the inner sink}
+
+def arg_offset(fn, call):
+    params = [a.arg for a in fn.args.args]
+    return 1 if params and params[0] in ("self", "cls") and isinstance(call.func, ast.Attribute) else 0
+
+for _ in range(3):
+    for fname, fn in fn_nodes.items():
+        params = [a.arg for a in fn.args.args]
+        alias = {p: p for p in params}
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Assign):
+                src_param = next((alias[x.id] for x in ast.walk(n.value) if isinstance(x, ast.Name) and x.id in alias), None)
+                if src_param:
+                    for t in n.targets:
+                        if isinstance(t, ast.Name):
+                            alias[t.id] = src_param
+        for c in ast.walk(fn):
+            if not isinstance(c, ast.Call):
+                continue
+            cname = dotted(c.func) or ""
+            callee = cname.split(".")[-1]
+            flows = []
+            if is_log_sink(cname):
+                flows = [(arg, cname) for arg in list(c.args) + [k.value for k in c.keywords]]
+            elif callee in param_sinks and callee != fname:
+                off = arg_offset(fn_nodes[callee], c)
+                flows = [(c.args[i - off], f"{callee} -> {inner}") for i, inner in param_sinks[callee].items() if 0 <= i - off < len(c.args)]
+            for arg, inner in flows:
+                for x in ast.walk(arg):
+                    if isinstance(x, ast.Name) and x.id in alias:
+                        param_sinks.setdefault(fname, {})[params.index(alias[x.id])] = inner
+
+for node in ast.walk(tree):
+    if not isinstance(node, ast.Call):
+        continue
+    cname = dotted(node.func) or ""
+    callee = cname.split(".")[-1]
+    if callee not in param_sinks or is_log_sink(cname):
+        continue
+    off = arg_offset(fn_nodes[callee], node)
+    leaks = []
+    for i, inner in param_sinks[callee].items():
+        if 0 <= i - off < len(node.args):
+            for leaf, field in tainted_leaves(node.args[i - off]):
+                sp = span(leaf)
+                sp["field"] = field
+                leaks.append(sp)
+    if leaks:
+        sinks.append({"func": f"{cname} -> {list(param_sinks[callee].values())[0]}", "lineno": node.lineno, "end_lineno": node.end_lineno,
+                      "col": ccol(node.lineno, node.col_offset), "text": ast.get_source_segment(src, node) or "",
+                      "leaks": leaks, "via": callee})
+
+# --- Path-sensitive symbolic execution of each function (constants folded, parameters free).
+MAX_PATHS = 64
+TRUE = {"k": "bool", "v": True}
+
+def s_and(a, b):
+    if a == TRUE: return b
+    if b == TRUE: return a
+    return {"k": "op", "op": "and", "args": [a, b]}
+
+def s_not(a):
+    if a["k"] == "bool": return {"k": "bool", "v": not a["v"]}
+    return {"k": "op", "op": "not", "args": [a]}
+
+def s_sort(e):
+    k = e["k"]
+    if k in ("num", "bool", "str"): return k
+    if k == "var": return e["sort"]
+    if k == "ite": return s_sort(e["t"])
+    return "num" if e["op"] in ("add", "sub", "mul", "div", "neg") else "bool"
+
+CMP = {ast.Eq: "eq", ast.NotEq: "ne", ast.Lt: "lt", ast.LtE: "le", ast.Gt: "gt", ast.GtE: "ge", ast.Is: "eq", ast.IsNot: "ne"}
+ARITH = {ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "div"}
+
+class SymCtx:
+    def __init__(self, params):
+        self.params = params
+        self.approx = []
+        self.n = 0
+    def havoc(self, node, sort, why):
+        self.approx.append(f"{why}: {(ast.get_source_segment(src, node) or '')[:60]}")
+        self.n += 1
+        return {"k": "var", "name": f"__unknown_{self.n}", "sort": sort}
+
+def s_eval(e, env, ctx, want="num"):
+    if isinstance(e, ast.Constant):
+        v = e.value
+        if isinstance(v, bool): return {"k": "bool", "v": v}
+        if isinstance(v, (int, float)): return {"k": "num", "v": v}
+        if isinstance(v, str): return {"k": "str", "v": v}
+        if v is None: return {"k": "str", "v": "None"}
+    if isinstance(e, ast.Name):
+        if e.id in env: return env[e.id]
+        if e.id in consts and isinstance(consts[e.id], (bool, int, float, str)):
+            v = consts[e.id]
+            return {"k": "bool", "v": v} if isinstance(v, bool) else ({"k": "num", "v": v} if isinstance(v, (int, float)) else {"k": "str", "v": v})
+        if e.id in ctx.params: return {"k": "var", "name": e.id, "sort": want}
+        return ctx.havoc(e, want, "unbound name")
+    if isinstance(e, ast.Attribute):
+        d = dotted(e)
+        if d and d.split(".")[0] in ctx.params: return env.get(d) or {"k": "var", "name": d, "sort": want}
+        return ctx.havoc(e, want, "attribute of a non-parameter object")
+    if isinstance(e, ast.UnaryOp):
+        if isinstance(e.op, ast.Not): return s_not(s_eval(e.operand, env, ctx, "bool"))
+        if isinstance(e.op, ast.USub):
+            v = s_eval(e.operand, env, ctx, "num")
+            return {"k": "num", "v": -v["v"]} if v["k"] == "num" else {"k": "op", "op": "neg", "args": [v]}
+    if isinstance(e, ast.BoolOp):
+        vals = [s_eval(v, env, ctx, "bool") for v in e.values]
+        op = "and" if isinstance(e.op, ast.And) else "or"
+        out = vals[0]
+        for v in vals[1:]:
+            out = {"k": "op", "op": op, "args": [out, v]}
+        return out
+    if isinstance(e, ast.Compare) and all(type(o) in CMP for o in e.ops):
+        parts, left = [], s_eval(e.left, env, ctx, "num")
+        for o, r in zip(e.ops, e.comparators):
+            right = s_eval(r, env, ctx, s_sort(left))
+            # An untyped parameter takes the sort of what it is compared with.
+            if s_sort(left) != s_sort(right) and left["k"] == "var":
+                left = dict(left, sort=s_sort(right))
+            elif s_sort(left) != s_sort(right) and right["k"] == "var":
+                right = dict(right, sort=s_sort(left))
+            if s_sort(left) != s_sort(right):
+                return ctx.havoc(e, "bool", "comparison of different types")
+            parts.append({"k": "op", "op": CMP[type(o)], "args": [left, right]})
+            left = right
+        out = parts[0]
+        for p in parts[1:]: out = {"k": "op", "op": "and", "args": [out, p]}
+        return out
+    if isinstance(e, ast.BinOp) and type(e.op) in ARITH:
+        a, b = s_eval(e.left, env, ctx, "num"), s_eval(e.right, env, ctx, "num")
+        if s_sort(a) == "num" and s_sort(b) == "num":
+            return {"k": "op", "op": ARITH[type(e.op)], "args": [a, b]}
+        return ctx.havoc(e, want, "non-numeric arithmetic")
+    if isinstance(e, ast.IfExp):
+        c = s_eval(e.test, env, ctx, "bool")
+        t = s_eval(e.body, env, ctx, want)
+        f = s_eval(e.orelse, env, ctx, s_sort(t))
+        if c["k"] == "bool": return t if c["v"] else f
+        return {"k": "ite", "c": c, "t": t, "e": f}
+    if isinstance(e, ast.Await):
+        return ctx.havoc(e, want, "awaited value")
+    return ctx.havoc(e, want, "unmodelled expression")
+
+def s_events(node):
+    evs = []
+    for c in ast.walk(node):
+        if isinstance(c, ast.Call):
+            name = dotted(c.func) or ""
+            ev = {"call": name, "line": c.lineno}
+            if is_log_sink(name):
+                ev["leaks"] = sorted({f for arg in list(c.args) + [k.value for k in c.keywords] for _, f in tainted_leaves(arg)})
+            elif name.split(".")[-1] in param_sinks:
+                ev["leaks"] = sorted({f for arg in c.args for _, f in tainted_leaves(arg)})
+            evs.append(ev)
+    return sorted(evs, key=lambda x: x["line"])
+
+def s_exec(stmts, env, pc, events, ctx, out):
+    if len(out) >= MAX_PATHS:
+        ctx.approx.append(f"path limit ({MAX_PATHS}) reached")
+        return
+    if not stmts:
+        out.append({"pc": pc, "returns": {}, "events": events})
+        return
+    st, rest = stmts[0], stmts[1:]
+    if isinstance(st, (ast.Assign, ast.AnnAssign)) and st.value is not None:
+        nxt = dict(env)
+        targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+        for t in targets:
+            if isinstance(t, ast.Name): nxt[t.id] = s_eval(st.value, env, ctx, "bool")
+            else: ctx.approx.append(f"assignment target at line {st.lineno}")
+        return s_exec(rest, nxt, pc, events + s_events(st), ctx, out)
+    if isinstance(st, ast.Expr):
+        return s_exec(rest, env, pc, events + s_events(st), ctx, out)
+    if isinstance(st, ast.If):
+        c = s_eval(st.test, env, ctx, "bool")
+        evs = events + s_events(st.test)
+        if not (c["k"] == "bool" and not c["v"]):
+            s_exec(list(st.body) + rest, env, s_and(pc, c), evs, ctx, out)
+        if not (c["k"] == "bool" and c["v"]):
+            s_exec(list(st.orelse) + rest, env, s_and(pc, s_not(c)), evs, ctx, out)
+        return
+    if isinstance(st, ast.Return):
+        returns = {}
+        v = st.value
+        if isinstance(v, ast.Dict):
+            for k, val in zip(v.keys, v.values):
+                if isinstance(k, ast.Constant) and isinstance(k.value, str): returns[k.value] = s_eval(val, env, ctx, "bool")
+                else: ctx.approx.append(f"non-literal dict key at line {st.lineno}")
+        elif v is not None:
+            returns["value"] = s_eval(v, env, ctx, "bool")
+        out.append({"pc": pc, "returns": returns, "events": events + (s_events(v) if v is not None else [])})
+        return
+    if isinstance(st, ast.Raise):
+        out.append({"pc": pc, "returns": {"__throws": TRUE}, "events": events + s_events(st)})
+        return
+    if isinstance(st, (ast.Pass, ast.Import, ast.ImportFrom)):
+        return s_exec(rest, env, pc, events, ctx, out)
+    ctx.approx.append(f"{type(st).__name__} at line {st.lineno} executed without path splitting")
+    return s_exec(rest, env, pc, events + s_events(st), ctx, out)
+
+symbolic = {}
+for node in ast.walk(tree):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        ctx = SymCtx({a.arg for a in node.args.args + node.args.kwonlyargs})
+        paths = []
+        s_exec(list(node.body), {}, TRUE, [], ctx, paths)
+        symbolic[node.name] = {"functionName": node.name, "paths": paths, "approximations": sorted(set(ctx.approx)), "lineno": node.lineno, "end_lineno": node.end_lineno}
+
 print(json.dumps({
     "node_count": sum(1 for _ in ast.walk(tree)),
     "assignments": assignments,
     "functions": functions,
     "classes": classes,
     "attr_reads": attr_reads,
+    "symbolic": symbolic,
     "sinks": sinks,
     "encrypt_calls": encrypt_calls,
     "cache_calls": cache_calls,
@@ -1571,6 +1790,27 @@ export function checkSourceSyntax(file: TargetRepoFile): { passed: boolean; mess
   return syntaxError ? { passed: false, message: syntaxError } : { passed: true };
 }
 
+const SYMBOLIC_TYPES = new Set<ASTFindingNode['constructType']>(['LOGGER_CALL', 'PII_ENTRYPOINT', 'LLM_INFERENCE_CALL', 'CROSS_BORDER_EGRESS']);
+
+/** Adds the symbolic execution of each finding's enclosing function (see symbolicTs / the Python script). */
+function attachSymbolicSummaries(files: TargetRepoFile[], findings: ASTFindingNode[]): void {
+  const byPath = new Map(files.map((f) => [f.path, f]));
+  for (const f of findings) {
+    if (!SYMBOLIC_TYPES.has(f.constructType) || f.metadata.symbolic) continue;
+    const file = byPath.get(f.filePath);
+    if (!file) continue;
+    if (file.language === 'python') {
+      const py = parsePythonAstCached(file.content);
+      const fns = Object.values(py?.symbolic || {}).filter((s) => s.lineno <= f.line && f.line <= s.end_lineno);
+      const inner = fns.sort((a, b) => b.lineno - a.lineno)[0];
+      if (inner) f.metadata.symbolic = { functionName: inner.functionName, paths: inner.paths, approximations: inner.approximations };
+    } else if (file.language === 'typescript') {
+      const summary = summarizeTypeScriptFunction(file.content, file.path, f.functionName);
+      if (summary) f.metadata.symbolic = summary;
+    }
+  }
+}
+
 /** analyzeFullRepository with Python parsing done off the event loop. */
 export async function analyzeFullRepositoryAsync(files: TargetRepoFile[]): Promise<ReturnType<typeof analyzeFullRepository>> {
   await primePythonAstCache(files);
@@ -1605,6 +1845,7 @@ export function analyzeFullRepository(files: TargetRepoFile[]): {
     }
   }
   astFindings.push(...collectGovernanceFindings(files, astFindings));
+  attachSymbolicSummaries(files, astFindings);
 
   return { sqlTables, astFindings, enrichedFiles };
 }

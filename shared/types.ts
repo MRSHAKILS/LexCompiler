@@ -184,6 +184,30 @@ export interface SourceEditAnchor {
   context?: Record<string, string>;
 }
 
+/** Symbolic expression produced by the analyzer's symbolic execution (constants folded, inputs free). */
+export type SymExpr =
+  | { k: 'num'; v: number }
+  | { k: 'bool'; v: boolean }
+  | { k: 'str'; v: string }
+  | { k: 'var'; name: string; sort: 'num' | 'bool' | 'str' }
+  | { k: 'op'; op: 'and' | 'or' | 'not' | 'eq' | 'ne' | 'lt' | 'le' | 'gt' | 'ge' | 'add' | 'sub' | 'mul' | 'div' | 'neg'; args: SymExpr[] }
+  | { k: 'ite'; c: SymExpr; t: SymExpr; e: SymExpr };
+
+/** One feasible-or-not execution path of a function: its path condition and returned fields. */
+export interface SymPath {
+  pc: SymExpr;
+  returns: Record<string, SymExpr>;
+  /** Calls made on this path, in order, with the argument PII fields they receive. */
+  events?: Array<{ call: string; line: number; leaks?: string[] }>;
+}
+
+export interface SymbolicSummary {
+  functionName: string;
+  paths: SymPath[];
+  /** Constructs the executor could not model exactly; their values were left unconstrained. */
+  approximations: string[];
+}
+
 export interface ASTFindingNode {
   id: string;
   filePath: string;
@@ -238,6 +262,8 @@ export interface ASTFindingNode {
     /** DPIA_RECORD: reference to the impact assessment, and whether that file exists in the repository. */
     dpiaReference?: string | null;
     dpiaRecordExists?: boolean;
+    /** Symbolic execution of the function (paths, path conditions, returned values). */
+    symbolic?: SymbolicSummary;
   };
   editAnchors?: SourceEditAnchor[];
 }

@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { init as initZ3 } from 'z3-solver';
+import { behaviourVerdicts, describeWitness, type BehaviourVerdict } from './behaviour.js';
 import { buildRegoInput, evaluateRegoPolicy } from '../policy/opaEvaluator.js';
 import { sha256Hex } from '../util/hash.js';
 import type {
@@ -162,7 +163,8 @@ function planClause(
   Z3: Z3Any,
   clause: LegalClause,
   sqlTables: SQLTableSchema[],
-  astFindings: ASTFindingNode[]
+  astFindings: ASTFindingNode[],
+  behaviour: Map<string, BehaviourVerdict> = new Map()
 ): ClausePlan {
   const p = clause.deontic.extractedParameters;
   const laws: ClausePlan['laws'] = [];
@@ -187,7 +189,9 @@ function planClause(
     for (const f of byType('PII_ENTRYPOINT')) {
       const inst = findingInstance('entry', 'node-fastapi-endpoint', f);
       const has = Z3.Bool.const(`${inst.key}__consent_checked`);
-      const v = f.metadata.hasConsentCheck === true;
+      // With a symbolic model, "checked" means on every path that processes data, not just somewhere.
+      const verdict = behaviour.get(f.id);
+      const v = verdict ? !verdict.violated : f.metadata.hasConsentCheck === true;
       checks.push({
         instance: inst,
         facts: [{ name: `ast_${inst.key}_consent_${v}`, expr: has.eq(v), display: `${f.functionName}.consent_checked = ${v}` }],
@@ -195,7 +199,7 @@ function planClause(
           {
             name: `inv_${inst.key}_consent_checked`,
             expr: Z3.Implies(sReq, has.eq(true)),
-            explanation: `'${f.functionName}' processes personal data without checking consent or another lawful basis.`,
+            explanation: `'${f.functionName}' processes personal data without checking consent or another lawful basis${verdict?.violated ? ` on some path (${describeWitness(verdict)})` : ''}.`,
             remediation: 'Call require_consent(...) before processing (fails closed until a consent registry is configured)',
             repair: { z3Variable: `${inst.key}__consent_checked`, repairAction: 'INSERT_CONSENT_CHECK', currentValue: false, requiredValue: true },
           },
@@ -534,9 +538,18 @@ function planClause(
       const inst = findingInstance('log', 'node-fastapi-endpoint', f);
       const leaks = Z3.Bool.const(`${inst.key}__logs_plaintext_pii`);
       const fields = (f.metadata.leakedFields || []).join(', ');
+      // Path-sensitive: a leak on a branch no input can reach is not a violation.
+      const verdict = behaviour.get(f.id);
+      const reachable = verdict ? verdict.violated : true;
       checks.push({
         instance: inst,
-        facts: [{ name: `ast_${inst.key}_logs_pii_true`, expr: leaks.eq(true), display: `${f.functionName} logs tainted PII (${fields})` }],
+        facts: [
+          {
+            name: `ast_${inst.key}_logs_pii_${reachable}`,
+            expr: leaks.eq(reachable),
+            display: `${f.functionName} logs tainted PII (${fields})${verdict ? (reachable ? ` on a reachable path (${describeWitness(verdict)})` : ' only on unreachable paths') : ''}`,
+          },
+        ],
         invariants: [
           {
             name: `inv_${inst.key}_no_plaintext_pii`,
@@ -740,6 +753,33 @@ function planClause(
   return { laws, checks, watch, emptyMeaning: 'No cloud-region egress constants were found.', emptyNeedsReview: true };
 }
 
+/**
+ * Behavioural invariants (AI decisions, egress): Z3 searched the function's symbolic paths
+ * for a violating input. The verdict enters the proof as a fact so the unsat core names it.
+ */
+function addBehaviourInvariants(Z3: Z3Any, clause: LegalClause, plan: ClausePlan, behaviour: Map<string, BehaviourVerdict>): void {
+  if (clause.category !== 'AI_HUMAN_IN_THE_LOOP' && clause.category !== 'CROSS_BORDER_TRANSFER') return;
+  for (const check of plan.checks) {
+    const f = check.instance.finding;
+    const verdict = f && behaviour.get(f.id);
+    if (!verdict) continue;
+    const k = check.instance.key;
+    const flag = Z3.Bool.const(`${k}__behaviour_violates`);
+    check.facts.push({
+      name: `sym_${k}_violates_${verdict.violated}`,
+      expr: flag.eq(verdict.violated),
+      display: `symbolic execution of ${verdict.property}: ${verdict.violated ? describeWitness(verdict) : 'proven for every input'}`,
+    });
+    check.invariants.push({
+      name: `inv_${k}_behaviour`,
+      expr: flag.eq(false),
+      explanation: `Symbolic execution of '${f!.functionName}' refutes "${verdict.property}" — ${describeWitness(verdict)}.`,
+      remediation: 'Fix the decision logic so the property holds for every input',
+      repair: null,
+    });
+  }
+}
+
 function reviewReasonsFor(clause: LegalClause): string[] {
   const reasons: string[] = [];
   const prov = clause.deontic.extractionProvenance;
@@ -786,7 +826,9 @@ export async function verifyRepositoryAgainstClauses(
 
   for (const clause of clauses) {
     const t0 = performance.now();
-    const plan = planClause(Z3, clause, sqlTables, astFindings);
+    const behaviour = await behaviourVerdicts(Z3, clause, astFindings);
+    const plan = planClause(Z3, clause, sqlTables, astFindings, behaviour);
+    addBehaviourInvariants(Z3, clause, plan, behaviour);
     const solver = new Z3.Solver();
     solver.set('timeout', SOLVER_TIMEOUT_MS);
 

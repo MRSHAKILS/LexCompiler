@@ -201,6 +201,20 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 - **Remediation engine:** identical edits from several findings in one file (for example the same helper) are applied once.
 - **Tests:** `server/governance.test.ts` (9 tests) covers inference, extraction, facts, the OPA input, and refute → remediate → `SAT_COMPLIANT` for four categories. It also checks the breach deadline being tightened, the fail-closed consent check, and that a DPIA is satisfied only by a referenced file that exists.
 
+### Step 16 · Symbolic program semantics and inter-procedural taint (L-16)
+- **Symbolic execution:** the analyzer symbolically executes the functions behind logging sinks, PII handlers, AI decisions and egress. This uses the TypeScript compiler AST (`server/analyzer/symbolicTs.ts`) and the Python `ast` script.
+  - Module constants are folded, and parameters and their fields are free symbols.
+  - `if` and `?:` split paths, and each path records its condition, returned fields, and the ordered calls it makes (with the PII each receives).
+  - Anything outside the modelled subset is left unconstrained and listed as an approximation, so a proof is never claimed over code that was skipped.
+- **Prover:** `server/prover/behaviour.ts` translates the paths to Z3 (reals, booleans, strings as an enumerated table) and asks for a violating input. A `sat` answer comes with a counterexample from the model; `unsat` is a proof over every input. The verdict enters the clause proof as a fact, so unsat cores name it.
+  - **AI decisions:** is any input with confidence below the legal minimum decided autonomously? Compliant constants no longer hide hard-coded autonomous branches (for example `requestedCreditLimit < 1000`).
+  - **Egress:** does any input select a region outside the allowed set? A data-dependent region is refuted with the input that selects it (`event.tenantId = "tenant-us-01"`).
+  - **PII logging:** a leaking log call on a branch no input can reach (`if DEBUG_PII:` with `DEBUG_PII = False`) is not a violation.
+  - **Consent:** a check is required on every path. A check on only some paths is refuted with the path condition (`x_tenant_id = "internal"`).
+- **Inter-procedural taint:** a module function whose parameter reaches a log sink (directly, through local aliases, or through another such function, to a fixpoint) is treated as a sink. A call that passes PII into it is reported at the call site, and remediation wraps the argument (`audit(redact_pii(payload.email))`).
+- **Note:** the OPA policies evaluate the extracted facts; the Z3 proof additionally applies the path-sensitive verdicts.
+- **Tests:** `server/symbolic.test.ts` (7 tests).
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -220,7 +234,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-11 | **Tree-sitter queries (L3)** | — | ✅ Done (Steps 9, 14): Python, TypeScript and SQL grammars. |
 | L-12 | **External MCP servers** (postgres-pgvector, neo4j-cypher, github, filesystem, duckdb, n8n) | The services aren't available here | Run and wire each server, then list them as integrated once they answer `initialize`. |
 | L-15 | **GitHub code-scanning upload** | Enabling code scanning is a repository setting | CI already produces `lexcompiler.sarif`. Enable code scanning, add `security-events: write`, and add `github/codeql-action/upload-sarif` for scans of real repositories (not the intentionally non-compliant fixture). |
-| L-16 | **Symbolic program semantics (V3)** | Needs a symbolic-execution or abstract-interpretation engine over Python/TypeScript | Today Z3 proves bounds over facts the analyzer extracts (constants, taint, sinks). Remaining: encode control flow and data flow (paths, branches, inter-procedural calls) as SMT, so properties are proven over program behaviour rather than extracted facts. |
+| L-16 | **Symbolic program semantics (V3)** | — | ✅ Done (Step 16): path-sensitive symbolic execution for TypeScript and Python, Z3 counterexamples, inter-procedural taint within a module. |
 | L-17 | **More rule categories (L2)** | — | ✅ Done (Step 15). Optional local check: write a real DPIA for `services/ai_credit_triage.ts` and reference it with `DPIA_REFERENCE`. |
 | L-18 | **Multi-tenant users and projects (P1)** | Needs an identity provider and a multi-user database | Replace the single API token with OIDC sign-in, per-user roles, and per-project repositories, clauses, and ledgers. |
 | L-19 | **Full verification of real repositories at scale** | No large real-world repositories to benchmark against here | Run `LEXCOMPILER_TARGET_REPO=… npm run verify:cli` on real codebases, measure precision/recall of findings, and tune the analyzer heuristics. |
