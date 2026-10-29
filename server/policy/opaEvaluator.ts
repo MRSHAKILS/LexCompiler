@@ -54,6 +54,26 @@ export function buildRegoInput(sqlTables: SQLTableSchema[], astFindings: ASTFind
       has_human_oversight_gate: f.metadata.hasHumanOversightGate === true,
       writes_audit_log: f.metadata.writesAuditLog === true,
     })),
+    entrypoints: of('PII_ENTRYPOINT').map((f) => ({
+      name: f.functionName,
+      filePath: f.filePath,
+      line: f.line,
+      has_consent_check: f.metadata.hasConsentCheck === true,
+      purpose: f.metadata.declaredPurpose ?? null,
+    })),
+    models: of('PII_COLLECTION_MODEL').map((f) => ({
+      name: f.functionName,
+      filePath: f.filePath,
+      line: f.line,
+      unused_pii_fields: f.metadata.unusedPiiFields || [],
+    })),
+    breach_policies: of('BREACH_NOTIFICATION_POLICY').map((f) => ({
+      name: f.functionName,
+      filePath: f.filePath,
+      line: f.line,
+      hours: f.metadata.breachNotificationHours ?? null,
+    })),
+    dpia_records: of('DPIA_RECORD').map((f) => ({ name: f.functionName, filePath: f.filePath, reference: f.metadata.dpiaReference ?? null, exists: f.metadata.dpiaRecordExists === true })),
     egress_nodes: of('CROSS_BORDER_EGRESS').map((f) => ({
       name: f.functionName,
       filePath: f.filePath,

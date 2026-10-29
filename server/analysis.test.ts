@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeFullRepositoryAsync, parseSqlSchemaFile } from './analyzer/astAnalyzer.js';
+import { analyzeFullRepositoryAsync, parseSqlSchemaFile, ttlUnitFromComment } from './analyzer/astAnalyzer.js';
 import { INITIAL_REPO_FILES } from './analyzer/repoBaseline.js';
-import { runTreeSitterQueries } from './analyzer/treeSitter.js';
+import { runTreeSitterQueries, treeSitterQueriesFor } from './analyzer/treeSitter.js';
 import { compileLegalProseToFormalPolicy, getInitialClauses, mergeLlmBounds, extractDeonticBoundsFromProse } from './compiler/legalCompiler.js';
 import { executeByocCustomScan } from './enterprise/enterpriseSuite.js';
 import { verifyRepositoryAgainstClauses } from './prover/z3Engine.js';
@@ -54,6 +54,53 @@ describe('analyzer', () => {
     const ttl = (name: string) => astFindings.find((f) => f.metadata.retentionSource?.startsWith(name))?.metadata.retentionTtlHours;
     expect(ttl('PII_CACHE_TTL_HOURS')).toBe(720);
     expect(ttl('SESSION_TTL_SECONDS')).toBe(1);
+  });
+
+  it('analyzes Python with non-ASCII text (stdin is read as UTF-8, not the Windows code page)', async () => {
+    const files = fixture({
+      'workers/redis_cache_worker.py': (c) => `# Résumé cache — ব্যাংক নীতিমালা ✓\n${c.replace('"""Caches session PII', '"""Caches session PII 🔒')}`,
+    });
+    const { astFindings } = await analyzeFullRepositoryAsync(files);
+    const ttl = astFindings.find((f) => f.metadata.retentionSource?.startsWith('PII_CACHE_TTL_HOURS'));
+    expect(ttl?.metadata.retentionTtlHours).toBe(720);
+  });
+
+  it('takes a unitless TTL unit from its comment and ignores caches in modules without PII', async () => {
+    expect(ttlUnitFromComment(' 5 minutes', 300)).toEqual({ hoursPerUnit: 1 / 3600, unit: 'seconds' });
+    expect(ttlUnitFromComment(' 30 days', 30)).toEqual({ hoursPerUnit: 24, unit: 'days' });
+    expect(ttlUnitFromComment(' seconds', 900)).toEqual({ hoursPerUnit: 1 / 3600, unit: 'seconds' });
+    expect(ttlUnitFromComment(' Increased for slow servers', 30)).toBeNull();
+
+    const schemaCache = { path: 'mcp/client.py', language: 'python' as const, description: '', lastModified: '', content: '_cache_ttl = 300  # 5 minutes\n_schema_cache = {}\n\ndef get_schema(url):\n    return _schema_cache.get(url)\n' };
+    const piiCache = { ...schemaCache, path: 'workers/session.py', content: 'SESSION_TTL = 7200  # 2 hours\n\ndef store(redis, email):\n    redis.setex(email, SESSION_TTL, "1")\n' };
+    const { astFindings } = await analyzeFullRepositoryAsync([schemaCache, piiCache]);
+    const retention = astFindings.filter((f) => f.metadata.retentionTtlHours != null);
+    expect(retention.map((f) => f.filePath)).toEqual(['workers/session.py']);
+    expect(retention[0].metadata).toMatchObject({ retentionTtlHours: 2, retentionUnitAssumed: false });
+  });
+
+  it('scopes taint to the function: a same-named variable elsewhere in the module is not tainted', async () => {
+    const content = [
+      'import logging',
+      'logger = logging.getLogger(__name__)',
+      '',
+      'def notify(user_email, http):',
+      '    message = f"alert for {user_email}".strip()',
+      '    response = http.post("/hook", json={"to": user_email})',
+      '    logger.info("sent %s", message)',
+      '    logger.info("hook answered %s", response.status_code)',
+      '',
+      'def health(http):',
+      '    message = "ok"',
+      '    logger.info("health %s", message)',
+      '',
+    ].join('\n');
+    const { astFindings } = await analyzeFullRepositoryAsync([{ path: 'svc/alerts.py', language: 'python', description: '', lastModified: '', content }]);
+    const leaks = astFindings.filter((f) => f.constructType === 'LOGGER_CALL');
+    // Only the e-mail-derived message leaks: not the other function's "message", and not the
+    // response of an HTTP call that was merely sent the e-mail.
+    expect(leaks.map((f) => f.line)).toEqual([7]);
+    expect(leaks[0].metadata.leakedFields).toEqual(['user_email']);
   });
 
   it('tracks PII through assignments and ignores PII-looking text', async () => {
@@ -163,5 +210,17 @@ describe('tree-sitter structural queries', () => {
     expect((await runTreeSitterQueries(logging.compiled.astPatternQuery, files)).some((m) => m.captures.method === 'info')).toBe(true);
     expect((await runTreeSitterQueries(ai.compiled.astPatternQuery, files)).map((m) => m.captures.name)).toContain('MIN_CONFIDENCE_FOR_AUTO_APPROVAL');
     expect((await runTreeSitterQueries(egress.compiled.astPatternQuery, files))[0].captures.value).toBe('"us-east-1"');
+  });
+
+  it('runs SQL DDL queries with the SQL grammar', async () => {
+    const clauses = getInitialClauses();
+    const files = fixture();
+    const sqlOnly = (m: { language: string }) => m.language === 'sql';
+    const retention = (await runTreeSitterQueries(clauses[0].compiled.astPatternQuery, files)).filter(sqlOnly);
+    expect(retention).toEqual([expect.objectContaining({ filePath: 'schema/postgres_pii.sql', captures: { name: 'retention_ttl_hours', value: '720' } })]);
+    const fks = (await runTreeSitterQueries(treeSitterQueriesFor('RIGHT_TO_ERASURE_CASCADE'), files)).filter(sqlOnly);
+    expect(fks[0].captures).toMatchObject({ column: 'patient_id', parent: 'patient_records', action: 'CASCADE' });
+    const cols = (await runTreeSitterQueries(treeSitterQueriesFor('ENCRYPTION_AT_REST'), files)).filter(sqlOnly).map((m) => m.captures.name);
+    expect(cols).toEqual(expect.arrayContaining(['full_name', 'email', 'ssn', 'diagnosis_code']));
   });
 });

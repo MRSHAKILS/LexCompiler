@@ -10,6 +10,11 @@ export interface RegoBounds {
   requireImmutableAuditLog: boolean;
   requireCascadeErasure: boolean;
   allowedDataRegions: string[];
+  requireConsentCheck: boolean;
+  maxBreachNotificationHours: number;
+  requireDpia: boolean;
+  forbidUnusedPiiFields: boolean;
+  allowedProcessingPurposes: string[];
 }
 
 export const REGO_PACKAGES: Record<RuleCategory, string> = {
@@ -19,6 +24,11 @@ export const REGO_PACKAGES: Record<RuleCategory, string> = {
   CROSS_BORDER_TRANSFER: 'lexcompiler.gdpr.cross_border',
   ENCRYPTION_AT_REST: 'lexcompiler.crypto.encryption_at_rest',
   RIGHT_TO_ERASURE_CASCADE: 'lexcompiler.gdpr.erasure_cascade',
+  CONSENT_LAWFUL_BASIS: 'lexcompiler.gdpr.art6_lawful_basis',
+  BREACH_NOTIFICATION: 'lexcompiler.gdpr.art33_breach_notification',
+  DPIA_REQUIRED: 'lexcompiler.gdpr.art35_dpia',
+  DATA_MINIMISATION: 'lexcompiler.gdpr.art5_minimisation',
+  PURPOSE_LIMITATION: 'lexcompiler.gdpr.art5_purpose_limitation',
 };
 
 /**
@@ -171,6 +181,79 @@ deny contains msg if {
 	some e in input.egress_nodes
 	not e.region in allowed_regions
 	msg := sprintf("VIOLATION [%s]: %s transfers data to '%s' (allowed: %v)", [citation, e.name, e.region, allowed_regions])
+}
+`;
+    case 'CONSENT_LAWFUL_BASIS':
+      return `${header}
+requires_consent := ${b.requireConsentCheck}
+
+deny contains msg if {
+	requires_consent
+	some e in input.entrypoints
+	not e.has_consent_check
+	msg := sprintf("VIOLATION [%s]: %s at %s:%v processes personal data without a consent / lawful-basis check", [citation, e.name, e.filePath, e.line])
+}
+`;
+    case 'BREACH_NOTIFICATION':
+      return `${header}
+max_notification_hours := ${b.maxBreachNotificationHours}
+
+deny contains msg if {
+	some p in input.breach_policies
+	not is_number(p.hours)
+	msg := sprintf("VIOLATION [%s]: no breach-notification deadline is configured (%s)", [citation, p.filePath])
+}
+
+deny contains msg if {
+	some p in input.breach_policies
+	is_number(p.hours)
+	p.hours > max_notification_hours
+	msg := sprintf("VIOLATION [%s]: %s notifies within %vh (limit %vh)", [citation, p.name, p.hours, max_notification_hours])
+}
+`;
+    case 'DPIA_REQUIRED':
+      return `${header}
+requires_dpia := ${b.requireDpia}
+
+dpia_on_record if {
+	some d in input.dpia_records
+	d.exists
+}
+
+deny contains msg if {
+	requires_dpia
+	some n in input.ai_nodes
+	not dpia_on_record
+	msg := sprintf("VIOLATION [%s]: high-risk processing in %s has no DPIA on record", [citation, n.name])
+}
+`;
+    case 'DATA_MINIMISATION':
+      return `${header}
+forbid_unused_pii := ${b.forbidUnusedPiiFields}
+
+deny contains msg if {
+	forbid_unused_pii
+	some m in input.models
+	count(m.unused_pii_fields) > 0
+	msg := sprintf("VIOLATION [%s]: %s collects PII it never uses %v", [citation, m.name, m.unused_pii_fields])
+}
+`;
+    case 'PURPOSE_LIMITATION':
+      return `${header}
+allowed_purposes := ${JSON.stringify(b.allowedProcessingPurposes)}
+
+deny contains msg if {
+	some e in input.entrypoints
+	not is_string(e.purpose)
+	msg := sprintf("VIOLATION [%s]: %s declares no processing purpose", [citation, e.name])
+}
+
+deny contains msg if {
+	count(allowed_purposes) > 0
+	some e in input.entrypoints
+	is_string(e.purpose)
+	not e.purpose in allowed_purposes
+	msg := sprintf("VIOLATION [%s]: %s processes data for '%s' (allowed: %v)", [citation, e.name, e.purpose, allowed_purposes])
 }
 `;
   }

@@ -1,0 +1,8 @@
+node_modules
+.venv
+data
+dist
+dist-server
+.git
+.env
+*.sarif

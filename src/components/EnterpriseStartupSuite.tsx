@@ -189,7 +189,7 @@ def process_customer_payment(ssn: str, email: str, card_token: str):
               <button
                 type="button"
                 onClick={() => runByocScan(byocResult.remediatedCode)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer"
               >
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 Apply Synthesized Fix to Custom Code &amp; Re-Verify SAT
@@ -349,7 +349,7 @@ def process_customer_payment(ssn: str, email: str, card_token: str):
                 <button
                   type="button"
                   onClick={() => handleVerifySignature(false)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer"
                 >
                   <ShieldCheck className="w-3.5 h-3.5" />
                   Verify Ed25519 Signature (Authentic)
@@ -357,7 +357,7 @@ def process_customer_payment(ssn: str, email: str, card_token: str):
                 <button
                   type="button"
                   onClick={() => handleVerifySignature(true)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-rose-600/90 hover:bg-rose-500 text-white cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-rose-700 hover:bg-rose-800 text-white cursor-pointer"
                 >
                   <ShieldAlert className="w-3.5 h-3.5" />
                   Simulate Audit Log Tampering (Test Rejection)

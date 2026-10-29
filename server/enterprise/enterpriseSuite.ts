@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { createTwoFilesPatch } from 'diff';
 import {
@@ -6,10 +5,11 @@ import {
   inferRuleCategoryFromProse,
   sha256Hex,
 } from '../compiler/legalCompiler.js';
-import { analyzeFullRepository } from '../analyzer/astAnalyzer.js';
+import { analyzeFullRepositoryAsync } from '../analyzer/astAnalyzer.js';
 import { verifyRepositoryAgainstClauses } from '../prover/z3Engine.js';
 import { synthesizeRemediationPullRequest } from '../remediation/prSynthesizer.js';
-import { getAttestationSigningKey } from './signingKey.js';
+import { getAttestationSigner, localSigner, registerTrustedKey, revocations, trustedKeys, verifyAttestationSignature } from './attestationSigner.js';
+import { requestTimestamp, type TimestampToken } from './timestamp.js';
 import type {
   ClauseVerificationProof,
   FullComplianceScanReport,
@@ -37,16 +37,22 @@ export interface CryptographicConformityCertificate {
     merkleProofHash: string;
   }>;
   canonicalPayloadJson: string;
-  signatureAlgorithm: 'Ed25519 (RFC 8032 PureEdDSA)';
+  signatureAlgorithm: 'Ed25519 (RFC 8032 PureEdDSA)' | 'ECDSA P-256 / SHA-256 (DER)';
+  /** Trusted-key identifier; verification looks the key up by this id (keys survive rotation). */
+  keyId: string;
+  signingBackend: string;
   publicKeyPem: string;
   publicKeyFingerprintSha256: string;
+  /** Signature over canonicalPayloadJson (named for the original Ed25519 format; ECDSA keys use it too). */
   ed25519SignatureHex: string;
   ed25519SignatureBase64: string;
+  /** RFC 3161 timestamp over the signature, when LEXCOMPILER_TSA_URL is set. */
+  timestamp?: TimestampToken;
 }
 
-export function generateSignedConformityCertificate(
+export async function generateSignedConformityCertificate(
   report: FullComplianceScanReport
-): CryptographicConformityCertificate {
+): Promise<CryptographicConformityCertificate> {
   const canonicalPayload = {
     certificateVersion: '2026.1',
     repositoryName: report.repositoryName,
@@ -64,15 +70,19 @@ export function generateSignedConformityCertificate(
   };
 
   const canonicalPayloadJson = JSON.stringify(canonicalPayload, null, 2);
-  const key = getAttestationSigningKey();
-  const signatureBuffer = crypto.sign(null, Buffer.from(canonicalPayloadJson, 'utf8'), key.privateKey);
-  const publicKeyFingerprintSha256 = key.fingerprintSha256.slice(0, 32);
+  const signer = await getAttestationSigner();
+  const signatureBuffer = await signer.sign(Buffer.from(canonicalPayloadJson, 'utf8'));
+  const fingerprint = sha256Hex(signer.publicKeyPem);
+  const publicKeyFingerprintSha256 = fingerprint.slice(0, 32);
+  const tsaUrl = process.env.LEXCOMPILER_TSA_URL;
+  const timestamp = tsaUrl ? await requestTimestamp(signatureBuffer, tsaUrl) : undefined;
+  const algorithmLabel = signer.algorithm === 'Ed25519' ? ('Ed25519 (RFC 8032 PureEdDSA)' as const) : ('ECDSA P-256 / SHA-256 (DER)' as const);
 
   return {
     certificateId: `CERT-LEX-${report.commitHash.toUpperCase()}-${Date.now().toString().slice(-4)}`,
     standard: 'LEXCOMPILER-SELF-ATTESTATION (not an EU AI Act Art. 43 conformity assessment or SOC 2 report)',
     issuedAt: new Date().toISOString(),
-    issuer: `LexCompiler attestation key (Ed25519, SHA-256 fingerprint ${key.fingerprintSha256.slice(0, 16)}…)`,
+    issuer: `LexCompiler attestation key ${signer.keyId} (${signer.algorithm}, ${signer.backend})`,
     repositoryName: report.repositoryName,
     commitHash: report.commitHash,
     z3SolverEngine: report.z3EngineVersion,
@@ -90,62 +100,62 @@ export function generateSignedConformityCertificate(
       merkleProofHash: p.cryptographicProvenance.merkleProofHash,
     })),
     canonicalPayloadJson,
-    signatureAlgorithm: 'Ed25519 (RFC 8032 PureEdDSA)',
-    publicKeyPem: key.publicKeyPem,
+    signatureAlgorithm: algorithmLabel,
+    keyId: signer.keyId,
+    signingBackend: signer.backend,
+    publicKeyPem: signer.publicKeyPem,
     publicKeyFingerprintSha256,
     ed25519SignatureHex: signatureBuffer.toString('hex'),
     ed25519SignatureBase64: signatureBuffer.toString('base64'),
+    ...(timestamp ? { timestamp } : {}),
   };
 }
 
 export function verifyEd25519CertificateSignature(
   canonicalPayloadJson: string,
   signatureHex: string,
-  publicKeyPem?: string
+  publicKeyPem?: string,
+  ids: { keyId?: string; certificateId?: string } = {}
 ): {
   verified: boolean;
   algorithm: string;
   payloadSha256: string;
   verificationTimestamp: string;
   reason: string;
+  keyId?: string;
 } {
+  const base = { payloadSha256: sha256Hex(canonicalPayloadJson), verificationTimestamp: new Date().toISOString() };
   try {
-    // Only this server's attestation key is trusted; a caller-supplied key could sign anything.
-    const trusted = getAttestationSigningKey().publicKeyPem;
-    if (publicKeyPem && publicKeyPem.trim() !== trusted.trim()) {
-      return {
-        verified: false,
-        algorithm: 'Ed25519 (RFC 8032)',
-        payloadSha256: sha256Hex(canonicalPayloadJson),
-        verificationTimestamp: new Date().toISOString(),
-        reason: 'UNTRUSTED KEY: the supplied public key is not this server\'s attestation key (GET /api/enterprise/public-key).',
-      };
+    // Only keys this server has signed with are trusted; a caller-supplied key could sign anything.
+    const local = localSigner();
+    registerTrustedKey(local);
+    const keys = trustedKeys();
+    const revoked = revocations();
+    if (ids.certificateId && revoked.certificates.some((c) => c.certificateId === ids.certificateId)) {
+      return { ...base, verified: false, algorithm: 'n/a', reason: `REVOKED: certificate ${ids.certificateId} has been revoked.` };
     }
-    const keyToUse = trusted;
-    const sigBuf = Buffer.from(signatureHex, 'hex');
-    const isValid = crypto.verify(
-      null,
-      Buffer.from(canonicalPayloadJson, 'utf8'),
-      keyToUse,
-      sigBuf
-    );
-    return {
-      verified: isValid,
-      algorithm: 'Ed25519 (RFC 8032)',
-      payloadSha256: sha256Hex(canonicalPayloadJson),
-      verificationTimestamp: new Date().toISOString(),
-      reason: isValid
-        ? 'VALID: Ed25519 cryptographic signature matches canonical Z3 Merkle payload.'
-        : 'INVALID: Payload or signature has been tampered with! Cryptographic verification rejected.',
-    };
+    if (publicKeyPem && !keys.some((k) => k.publicKeyPem.trim() === publicKeyPem.trim())) {
+      return { ...base, verified: false, algorithm: 'n/a', reason: "UNTRUSTED KEY: the supplied public key is not one of this server's attestation keys (GET /api/enterprise/public-key)." };
+    }
+    const candidates = keys.filter((k) => (ids.keyId ? k.keyId === ids.keyId : true) && (!publicKeyPem || k.publicKeyPem.trim() === publicKeyPem.trim()));
+    if (candidates.length === 0) return { ...base, verified: false, algorithm: 'n/a', reason: `UNTRUSTED KEY: unknown key id ${ids.keyId}.` };
+    const sig = Buffer.from(signatureHex, 'hex');
+    const data = Buffer.from(canonicalPayloadJson, 'utf8');
+    const match = candidates.find((k) => {
+      try {
+        return verifyAttestationSignature(k.algorithm, k.publicKeyPem, data, sig);
+      } catch {
+        return false;
+      }
+    });
+    if (!match) {
+      return { ...base, verified: false, algorithm: candidates[0].algorithm, reason: 'INVALID: Payload or signature has been tampered with! Cryptographic verification rejected.' };
+    }
+    const keyRevoked = revoked.keys.find((k) => k.keyId === match.keyId);
+    if (keyRevoked) return { ...base, verified: false, algorithm: match.algorithm, keyId: match.keyId, reason: `REVOKED: signing key ${match.keyId} was revoked (${keyRevoked.reason}).` };
+    return { ...base, verified: true, algorithm: match.algorithm, keyId: match.keyId, reason: `VALID: ${match.algorithm} signature by trusted key ${match.keyId} matches the canonical Z3 Merkle payload.` };
   } catch (err) {
-    return {
-      verified: false,
-      algorithm: 'Ed25519 (RFC 8032)',
-      payloadSha256: sha256Hex(canonicalPayloadJson),
-      verificationTimestamp: new Date().toISOString(),
-      reason: `INVALID: Signature format error (${String(err)})`,
-    };
+    return { ...base, verified: false, algorithm: 'n/a', reason: `INVALID: Signature format error (${String(err)})` };
   }
 }
 
@@ -294,7 +304,7 @@ export async function executeByocCustomScan(input: {
     content: input.sourceCode,
     lastModified: new Date().toISOString(),
   };
-  const analysis = analyzeFullRepository([file]);
+  const analysis = await analyzeFullRepositoryAsync([file]);
   const verification = await verifyRepositoryAgainstClauses(
     clauses,
     analysis.sqlTables,

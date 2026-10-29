@@ -1,0 +1,6 @@
+# Real frameworks for the runtime sandbox (npm run setup:sandbox installs them into .venv).
+fastapi==0.115.12
+pydantic==2.11.7
+httpx==0.28.1
+fakeredis==2.30.1
+redis==6.2.0

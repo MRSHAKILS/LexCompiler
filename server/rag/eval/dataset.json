@@ -1,0 +1,21 @@
+{
+  "description": "Hand-labelled retrieval questions over the bundled fixture corpus. Relevance: 2 = primary evidence, 1 = supporting.",
+  "questions": [
+    { "id": "q01", "query": "Which endpoint logs plaintext SSN or email?", "relevant": { "chunk-ast-ast-py-logger-api/fastapi_intake.py-33-4": 2, "chunk-law-CLAUSE-HIPAA-312B": 1, "chunk-proof-CLAUSE-HIPAA-312B": 1, "chunk-ast-ast-py-endpoint-api/fastapi_intake.py-ingest_patient_pii": 1 } },
+    { "id": "q02", "query": "What does HIPAA 164.312(b) require for application logs?", "relevant": { "chunk-law-CLAUSE-HIPAA-312B": 2, "chunk-proof-CLAUSE-HIPAA-312B": 1 } },
+    { "id": "q03", "query": "How long does the Redis cache keep patient sessions?", "relevant": { "chunk-ast-ast-py-retention-workers/redis_cache_worker.py-PII_CACHE_TTL_HOURS": 2, "chunk-law-CLAUSE-DPA-4.2": 1 } },
+    { "id": "q04", "query": "Is the 72-hour purge window met by the patient_records table?", "relevant": { "chunk-sql-patient_records": 2, "chunk-ast-ast-sql-schema/postgres_pii.sql-patient_records": 2, "chunk-law-CLAUSE-DPA-4.2": 1, "chunk-proof-CLAUSE-DPA-4.2": 1 } },
+    { "id": "q05", "query": "Which tables lack a tenant-isolated KMS key column?", "relevant": { "chunk-sql-patient_records": 2, "chunk-ast-ast-sql-schema/postgres_pii.sql-patient_records": 2, "chunk-proof-CLAUSE-DPA-4.2": 1 } },
+    { "id": "q06", "query": "Does the credit triage AI auto-approve below 85% confidence?", "relevant": { "chunk-ast-ast-ts-ai-services/ai_credit_triage.ts-MIN_CONFIDENCE_FOR_AUTO_APPROVAL": 2, "chunk-law-CLAUSE-EU-AI-14": 1, "chunk-proof-CLAUSE-EU-AI-14": 1 } },
+    { "id": "q07", "query": "What human oversight does EU AI Act Article 14 demand?", "relevant": { "chunk-law-CLAUSE-EU-AI-14": 2, "chunk-proof-CLAUSE-EU-AI-14": 1 } },
+    { "id": "q08", "query": "Where is patient telemetry replicated outside the EU?", "relevant": { "chunk-ast-ast-ts-egress-services/cross_border_sync.ts-REPLICA_TARGET_REGION": 2, "chunk-law-CLAUSE-GDPR-44": 1, "chunk-proof-CLAUSE-GDPR-44": 1 } },
+    { "id": "q09", "query": "What does GDPR Article 44 say about third-country transfers?", "relevant": { "chunk-law-CLAUSE-GDPR-44": 2, "chunk-proof-CLAUSE-GDPR-44": 1 } },
+    { "id": "q10", "query": "Do audit rows cascade when a patient is erased?", "relevant": { "chunk-sql-clinical_triage_audits": 2, "chunk-ast-ast-sql-schema/postgres_pii.sql-clinical_triage_audits": 2, "chunk-sql-patient_records": 1 } },
+    { "id": "q11", "query": "Which fields does the patient intake payload collect?", "relevant": { "chunk-ast-ast-py-model-api/fastapi_intake.py-PatientIntakePayload": 2, "chunk-ast-ast-py-entry-api/fastapi_intake.py-ingest_patient_pii": 1 } },
+    { "id": "q12", "query": "Is a breach notification deadline configured?", "relevant": { "chunk-ast-ast-breach-api/fastapi_intake.py-BREACH_NOTIFICATION_DEADLINE_HOURS": 2 } },
+    { "id": "q13", "query": "Why does Z3 refute the DPA 4.2 retention clause?", "relevant": { "chunk-proof-CLAUSE-DPA-4.2": 2, "chunk-law-CLAUSE-DPA-4.2": 1, "chunk-sql-patient_records": 1 } },
+    { "id": "q14", "query": "Which SMT assertions encode the logging ban?", "relevant": { "chunk-proof-CLAUSE-HIPAA-312B": 2, "chunk-law-CLAUSE-HIPAA-312B": 1 } },
+    { "id": "q15", "query": "Does the intake service encrypt with a shared key instead of tenant KMS?", "relevant": { "chunk-ast-ast-py-endpoint-api/fastapi_intake.py-ingest_patient_pii": 2, "chunk-law-CLAUSE-DPA-4.2": 1, "chunk-proof-CLAUSE-DPA-4.2": 1 } },
+    { "id": "q16", "query": "What audit trail must the AI triage service write?", "relevant": { "chunk-ast-ast-ts-ai-services/ai_credit_triage.ts-MIN_CONFIDENCE_FOR_AUTO_APPROVAL": 2, "chunk-law-CLAUSE-EU-AI-14": 2, "chunk-sql-clinical_triage_audits": 1 } }
+  ]
+}

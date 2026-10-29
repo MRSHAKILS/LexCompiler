@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -7,7 +8,7 @@ import {
   generateSignedConformityCertificate,
   verifyEd25519CertificateSignature,
 } from './enterprise/enterpriseSuite.js';
-import { getAttestationSigningKey } from './enterprise/signingKey.js';
+import { currentWindowsAccount, getAttestationSigningKey } from './enterprise/signingKey.js';
 import { merkleRoot } from './prover/z3Engine.js';
 import { sha256Hex } from './util/hash.js';
 import type { ClauseVerificationProof, FullComplianceScanReport } from '../shared/types.js';
@@ -29,12 +30,23 @@ describe('attestation signing', () => {
     const key = getAttestationSigningKey();
     const path = key.source.replace(/ \(created\)$/, '');
     expect(fs.existsSync(path)).toBe(true);
-    expect(fs.statSync(path).mode & 0o077).toBe(0);
+    if (process.platform === 'win32') {
+      // Windows has no POSIX mode bits: the ACL must hold exactly one ACE, the owner's.
+      const acl = execFileSync('icacls', [path], { encoding: 'utf8' });
+      const aces = acl
+        .slice(acl.indexOf(path) + path.length)
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => /^[^:]+:\(/.test(l));
+      expect(aces).toEqual([`${currentWindowsAccount()}:(F)`]);
+    } else {
+      expect(fs.statSync(path).mode & 0o077).toBe(0);
+    }
     expect(crypto.createPrivateKey(fs.readFileSync(path, 'utf8')).asymmetricKeyType).toBe('ed25519');
   });
 
-  it('verifies its own signatures and detects tampering', () => {
-    const cert = generateSignedConformityCertificate(report);
+  it('verifies its own signatures and detects tampering', async () => {
+    const cert = await generateSignedConformityCertificate(report);
     expect(verifyEd25519CertificateSignature(cert.canonicalPayloadJson, cert.ed25519SignatureHex).verified).toBe(true);
     expect(
       verifyEd25519CertificateSignature(`${cert.canonicalPayloadJson} `, cert.ed25519SignatureHex).verified

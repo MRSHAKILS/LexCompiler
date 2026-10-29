@@ -9,7 +9,7 @@ RUN npm run build
 # --- runtime stage: production dependencies only, non-root ---
 FROM node:22-bookworm-slim
 # python3: Python AST analysis and the optional runtime sandbox; git: sandbox history and repo identity
-RUN apt-get update && apt-get install -y --no-install-recommends python3 git ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
 # OPA evaluates the generated Rego policies (LEXCOMPILER_OPA_BIN defaults to `opa` on PATH)
@@ -23,6 +23,9 @@ ENV NODE_ENV=production \
 
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
+# Real FastAPI / Pydantic / Redis client libraries for the runtime sandbox
+COPY requirements-sandbox.txt ./
+RUN python3 -m venv /app/.venv && /app/.venv/bin/pip install --no-cache-dir -q -r requirements-sandbox.txt
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/dist-server ./dist-server
 COPY target-repo ./target-repo

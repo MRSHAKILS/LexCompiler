@@ -13,7 +13,12 @@ export type RuleCategory =
   | 'PII_LOGGING_BAN'
   | 'RIGHT_TO_ERASURE_CASCADE'
   | 'AI_HUMAN_IN_THE_LOOP'
-  | 'CROSS_BORDER_TRANSFER';
+  | 'CROSS_BORDER_TRANSFER'
+  | 'CONSENT_LAWFUL_BASIS'
+  | 'BREACH_NOTIFICATION'
+  | 'DPIA_REQUIRED'
+  | 'DATA_MINIMISATION'
+  | 'PURPOSE_LIMITATION';
 
 export type DeonticExtractionMethod =
   | 'DETERMINISTIC_PARSER'
@@ -51,6 +56,11 @@ export interface DeonticExtraction {
     prohibitedDataRegions?: string[];
     requireImmutableAuditLog?: boolean;
     requireEncryptionAtRest?: boolean;
+    requireConsentCheck?: boolean;
+    maxBreachNotificationHours?: number;
+    requireDpia?: boolean;
+    forbidUnusedPiiFields?: boolean;
+    allowedProcessingPurposes?: string[];
   };
   extractionProvenance?: DeonticExtractionProvenance;
 }
@@ -106,7 +116,8 @@ export interface SQLColumnNode {
     onDeleteCascade: boolean;
     implicit?: boolean;
   };
-  piiInference?: 'ANNOTATION' | 'NAME_PATTERN' | 'NONE';
+  /** What classified the column: an @pii annotation, its name, its type, its schema documentation or CHECK pattern, or a value. */
+  piiInference?: 'ANNOTATION' | 'NAME_PATTERN' | 'TYPE' | 'SCHEMA' | 'VALUE' | 'NONE';
   line: number;
 }
 
@@ -149,7 +160,11 @@ export type SourceEditAnchorRole =
   | 'SOVEREIGN_BOUNDARY_FLAG'
   | 'SQL_COLUMN_INSERTION_POINT'
   | 'SQL_COLUMN_ENCRYPTION_ANNOTATION'
-  | 'SQL_FOREIGN_KEY_ON_DELETE';
+  | 'SQL_FOREIGN_KEY_ON_DELETE'
+  | 'PII_MODEL_FIELD'
+  | 'CONSENT_CHECK_INSERTION_POINT'
+  | 'PROCESSING_PURPOSE_LITERAL'
+  | 'BREACH_DEADLINE_LITERAL';
 
 /**
  * Exact source span of a value the remediation synthesizer may rewrite.
@@ -170,6 +185,30 @@ export interface SourceEditAnchor {
   context?: Record<string, string>;
 }
 
+/** Symbolic expression produced by the analyzer's symbolic execution (constants folded, inputs free). */
+export type SymExpr =
+  | { k: 'num'; v: number }
+  | { k: 'bool'; v: boolean }
+  | { k: 'str'; v: string }
+  | { k: 'var'; name: string; sort: 'num' | 'bool' | 'str' }
+  | { k: 'op'; op: 'and' | 'or' | 'not' | 'eq' | 'ne' | 'lt' | 'le' | 'gt' | 'ge' | 'add' | 'sub' | 'mul' | 'div' | 'neg'; args: SymExpr[] }
+  | { k: 'ite'; c: SymExpr; t: SymExpr; e: SymExpr };
+
+/** One feasible-or-not execution path of a function: its path condition and returned fields. */
+export interface SymPath {
+  pc: SymExpr;
+  returns: Record<string, SymExpr>;
+  /** Calls made on this path, in order, with the argument PII fields they receive. */
+  events?: Array<{ call: string; line: number; leaks?: string[] }>;
+}
+
+export interface SymbolicSummary {
+  functionName: string;
+  paths: SymPath[];
+  /** Constructs the executor could not model exactly; their values were left unconstrained. */
+  approximations: string[];
+}
+
 export interface ASTFindingNode {
   id: string;
   filePath: string;
@@ -187,7 +226,11 @@ export interface ASTFindingNode {
     | 'LOGGER_CALL'
     | 'LLM_INFERENCE_CALL'
     | 'CROSS_BORDER_EGRESS'
-    | 'ERASURE_HANDLER';
+    | 'ERASURE_HANDLER'
+    | 'PII_ENTRYPOINT'
+    | 'PII_COLLECTION_MODEL'
+    | 'BREACH_NOTIFICATION_POLICY'
+    | 'DPIA_RECORD';
   functionName: string;
   codeSnippet: string;
   metadata: {
@@ -208,6 +251,22 @@ export interface ASTFindingNode {
     retentionSource?: string;
     /** True when the TTL unit was not stated in the identifier and hours were assumed. */
     retentionUnitAssumed?: boolean;
+    /** PII_ENTRYPOINT: a consent / lawful-basis check is called before processing. */
+    hasConsentCheck?: boolean;
+    /** PII_ENTRYPOINT: processing purpose declared by the module (PROCESSING_PURPOSE) or the handler. */
+    declaredPurpose?: string | null;
+    /** PII_COLLECTION_MODEL: PII fields the model collects, and those never read by the module. */
+    collectedPiiFields?: string[];
+    unusedPiiFields?: string[];
+    /** Per PII field: the category and which signals (name, type, schema, value) classified it. */
+    piiFieldEvidence?: Record<string, { pii: boolean; category?: string; evidence: Array<'name' | 'type' | 'schema' | 'value'> }>;
+    /** BREACH_NOTIFICATION_POLICY: configured supervisory-authority notification deadline. */
+    breachNotificationHours?: number | null;
+    /** DPIA_RECORD: reference to the impact assessment, and whether that file exists in the repository. */
+    dpiaReference?: string | null;
+    dpiaRecordExists?: boolean;
+    /** Symbolic execution of the function (paths, path conditions, returned values). */
+    symbolic?: SymbolicSummary;
   };
   editAnchors?: SourceEditAnchor[];
 }
@@ -276,7 +335,12 @@ export type Z3RepairAction =
   | 'PIN_EGRESS_REGION'
   | 'ENABLE_SOVEREIGN_GUARD'
   | 'ENCRYPT_COLUMN'
-  | 'CASCADE_FOREIGN_KEY';
+  | 'CASCADE_FOREIGN_KEY'
+  | 'INSERT_CONSENT_CHECK'
+  | 'SET_BREACH_DEADLINE'
+  | 'ADD_BREACH_POLICY'
+  | 'REMOVE_UNUSED_PII_FIELD'
+  | 'PIN_PROCESSING_PURPOSE';
 
 /** A violated code fact from the Z3 unsat core, with the minimal-change value Z3 Optimize found for it. */
 export interface Z3RepairTarget {
@@ -556,6 +620,11 @@ export interface AgentExecutionStep {
   status: 'COMPLETED' | 'FAILED';
   reasoningSummary: string;
   structuredArtifactPreview: string;
+  /** LLM_AGENT: a configured model chose and called the tools; DIRECT_TOOL_CALL: no model configured. */
+  execution?: 'LLM_AGENT' | 'DIRECT_TOOL_CALL';
+  /** Provider-reported usage when an LLM ran (including cached prompt tokens). */
+  llmUsage?: { promptTokens: number; completionTokens: number; cachedPromptTokens: number; cacheWriteTokens: number };
+  toolCallsMade?: Array<{ name: string; ok: boolean; latencyMs: number }>;
 }
 
 export interface MultiAgentPipelineReport {

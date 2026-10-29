@@ -1,5 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { sha256Hex } from '../util/hash.js';
 
@@ -13,10 +15,29 @@ export interface AttestationSigningKey {
 
 let cached: AttestationSigningKey | null = null;
 
+/** Account name icacls accepts for the current user, e.g. `DOMAIN\user`. */
+export function currentWindowsAccount(): string {
+  const user = os.userInfo().username;
+  return process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${user}` : user;
+}
+
+/**
+ * Windows ignores POSIX mode bits, so `mode: 0o600` alone leaves the key readable by
+ * every local user through inherited ACLs. Drop inheritance and grant only the owner.
+ */
+function restrictToOwner(keyPath: string): void {
+  if (process.platform !== 'win32') return;
+  execFileSync('icacls', [keyPath, '/inheritance:r', '/grant:r', `${currentWindowsAccount()}:F`], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+}
+
 /**
  * Loads the Ed25519 attestation key so signatures stay verifiable across restarts:
  * LEXCOMPILER_SIGNING_KEY_PEM (PKCS#8 PEM) wins, then LEXCOMPILER_SIGNING_KEY_PATH,
- * then data/ed25519-signing-key.pem, which is created with mode 0600 on first use.
+ * then data/ed25519-signing-key.pem, which is created owner-only (mode 0600, or an
+ * owner-only ACL on Windows) on first use.
  */
 export function getAttestationSigningKey(): AttestationSigningKey {
   if (cached) return cached;
@@ -33,6 +54,7 @@ export function getAttestationSigningKey(): AttestationSigningKey {
       pem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
       fs.mkdirSync(path.dirname(keyPath), { recursive: true });
       fs.writeFileSync(keyPath, pem, { encoding: 'utf8', mode: 0o600 });
+      restrictToOwner(keyPath);
       source = `${keyPath} (created)`;
     }
   }

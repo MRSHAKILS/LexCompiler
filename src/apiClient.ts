@@ -29,6 +29,8 @@ function isApiRequest(input: RequestInfo | URL): boolean {
 
 function withAuthHeaders(init: RequestInit | undefined, token: string | null): RequestInit {
   const headers = new Headers(init?.headers);
+  // Same-origin requests carry the OIDC session cookie.
+  init = { credentials: 'same-origin', ...init };
   headers.set(CLIENT_HEADER, 'web');
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return { ...init, headers };
@@ -44,6 +46,14 @@ export function installApiClient(): void {
     }
     const res = await nativeFetch(input, withAuthHeaders(init, readToken()));
     if (res.status !== 401) {
+      return res;
+    }
+
+    // OIDC sign-in: the server names its login endpoint; the session cookie does the rest.
+    const body = (await res.clone().json().catch(() => null)) as { loginUrl?: string } | null;
+    if (body?.loginUrl) {
+      const returnTo = `${window.location.pathname}${window.location.search}`;
+      window.location.assign(`${body.loginUrl}?returnTo=${encodeURIComponent(returnTo)}`);
       return res;
     }
 

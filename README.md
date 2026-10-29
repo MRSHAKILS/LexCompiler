@@ -189,11 +189,12 @@ npm start
 | `npm run dev` | API server (`tsx watch`) and Vite UI together |
 | `npm start` | Compiled server from `dist-server/` (run `npm run build` first) |
 | `npm run start:tsx` | Server straight from TypeScript sources |
-| `npm test` | Vitest suite (runs on scratch copies; `target-repo/` is never modified) |
+| `npm test` | Vitest suite: server tests in Node, and UI tests in jsdom (dashboard, IDE drawer, agent console, keyboard and ARIA behaviour, WCAG AA colour contrast) rendered from a real scan. Runs on scratch copies; `target-repo/` is never modified |
 | `npm run typecheck` | `tsc --noEmit` for the UI and the server |
 | `npm run lint` | ESLint flat config (`eslint.config.js`) |
 | `npm run verify:cli` | Compliance gate (exit 0 passed, 1 failed, 2 internal error) |
 | `npm run verify:realworld` | End-to-end sandbox demo |
+| `npm run setup:sandbox` | Creates `.venv` with the real FastAPI, Pydantic, httpx and Redis packages for the runtime sandbox |
 | `npm run sarif` | Writes `lexcompiler.sarif` (SARIF v2.1.0) for the scanned repository |
 
 ### Scanning Your Own Repository
@@ -210,7 +211,7 @@ Each compiled clause carries a Rego v1 policy. When an `opa` binary is on `PATH`
 
 ### Tree-sitter Structural Queries
 
-`astPatternQuery` holds real Tree-sitter queries for the Python and TypeScript grammars (WASM, from `@vscode/tree-sitter-wasm`). The scan report returns their matches per clause in `structuralQueryMatches`.
+`astPatternQuery` holds real Tree-sitter queries for the Python and TypeScript grammars (WASM, from `@vscode/tree-sitter-wasm`) and the SQL grammar (`server/analyzer/grammars/tree-sitter-sql.wasm`, rebuilt with `npm run build:sql-grammar`, which needs clang and wasm-ld). The scan report returns their matches per clause in `structuralQueryMatches`.
 
 ### Opening Remediation Pull Requests on GitHub
 
@@ -221,6 +222,46 @@ curl -X POST -H 'X-LexCompiler-Client: cli' http://127.0.0.1:3001/api/remediatio
 
 Only a `READY_TO_MERGE` remediation (post-patch Z3 `SAT`) can be opened. Optional: `LEXCOMPILER_GITHUB_BASE` (base branch; defaults to the repository's default branch), `LEXCOMPILER_GITHUB_PATH_PREFIX` (where the scanned files live inside the GitHub repository), and `GITHUB_API_URL` (GitHub Enterprise).
 
+### Sign-in and Projects (OIDC)
+
+Set `LEXCOMPILER_OIDC_ISSUER` and `LEXCOMPILER_OIDC_CLIENT_ID` (plus `LEXCOMPILER_OIDC_CLIENT_SECRET` for confidential clients and `LEXCOMPILER_OIDC_REDIRECT_URI`, e.g. `https://lexcompiler.example.com/api/auth/callback`) to require sign-in with your identity provider. Users whose roles claim (`LEXCOMPILER_OIDC_ROLES_CLAIM`, default `roles`) contains `LEXCOMPILER_OIDC_ADMIN_ROLE` (default `lexcompiler-admin`) are administrators. Everyone else gets `LEXCOMPILER_DEFAULT_PROJECT_ROLE` (default `viewer`) on the default repository and their membership role on other projects.
+
+Projects (`/api/projects`) each have their own repository (inside `LEXCOMPILER_PROJECT_REPOS_ROOT`, default `repos/`), members (`viewer`, `editor`, `owner`), clauses, and scan history.
+
+### LLM Agents and Framework Adapters
+
+Set `LEXCOMPILER_LLM_MODEL` (plus `LEXCOMPILER_LLM_PROVIDER` = `openai` | `anthropic`, `LEXCOMPILER_LLM_BASE_URL`, `LEXCOMPILER_LLM_API_KEY`), or per agent `LEXCOMPILER_AGENT_<ID>_MODEL` (e.g. `LEXCOMPILER_AGENT_Z3_FORMAL_CRITIC_MODEL=deepseek-reasoner` with `LEXCOMPILER_AGENT_Z3_FORMAL_CRITIC_BASE_URL=https://api.deepseek.com/v1`). Configured agents reason over their MCP tools with real tool calls and return validated structured output; the others call their tool directly.
+
+The Python adapters in `agents/` run each agent in its named framework (CrewAI, DSPy, Hermes, LangGraph, Pydantic-AI, OpenAI Agents SDK) against a running server:
+
+```bash
+pip install -r agents/requirements.txt
+cd agents && python -m lexcompiler_agents agent-contextual-graph-rag
+```
+
+`npm run eval:rag` scores retrieval on the labelled dataset (`server/rag/eval/dataset.json`); with `LEXCOMPILER_AGENT_RAG_JUDGE_MODEL` set it also runs the RAGAS-style judge.
+
+### External MCP Servers
+
+Copy `mcp-servers.example.json` to `mcp-servers.json` (or point `LEXCOMPILER_EXTERNAL_MCP_CONFIG` at another file) to connect external MCP servers over stdio or streamable HTTP. `/api/mcp/servers` shows each one as `ONLINE` with its live tools once it answers `initialize`, and `POST /api/mcp/external/:id/call` calls its tools.
+
+The DuckDB server runs in memory; it reads the SQLite ledger with `ATTACH 'data/lexcompiler_enterprise.db' AS ledger (TYPE sqlite, READ_ONLY)`. `uvx` servers download their packages on first start, which can exceed the 20 s `initialize` timeout, so run each once (for example `uvx mcp-neo4j-cypher --help`) before the first probe. On Windows, `npx` and other `.cmd` commands are started through `cmd.exe` with every argument escaped.
+
+### Scanning Repositories in GitHub Actions
+
+```yaml
+jobs:
+  compliance:
+    uses: mrshakils/lexcompiler/.github/workflows/lexcompiler-scan.yml@main
+    with:
+      clauses-file: compliance/clauses.json   # [{ "rawLegalText": "...", "citation": "GDPR Art. 6" }]
+    permissions:
+      contents: read
+      security-events: write
+```
+
+The workflow uploads the findings to GitHub code scanning and fails the job when a clause is not proven compliant. Locally, the same clauses file works with `LEXCOMPILER_CLAUSES_FILE=… LEXCOMPILER_TARGET_REPO=… npm run verify:cli`.
+
 ### Configuration Reference
 
 | Variable | Default | Purpose |
@@ -228,10 +269,21 @@ Only a `READY_TO_MERGE` remediation (post-patch Z3 `SAT`) can be opened. Optiona
 | `PORT` | `3001` | HTTP port |
 | `LEXCOMPILER_TARGET_REPO` | bundled `target-repo/` | Repository to scan |
 | `LEXCOMPILER_TARGET_REPO_IS_FIXTURE` | unset | `1` treats the target as the demo fixture |
+| `LEXCOMPILER_MAX_SCANNED_FILES` | `2000` | Source files read from the target repository; `verify:cli` fails the gate when a scan stops at this limit |
 | `LEXCOMPILER_SANDBOX_GIT_DIR` | `data/sandbox-git` | Git directory for remediation commits |
 | `LEXCOMPILER_DATA_DIR` | `data/` | Ledger, vector store, persisted clauses, signing key |
 | `LEXCOMPILER_SIGNING_KEY_PEM` / `LEXCOMPILER_SIGNING_KEY_PATH` | generated in the data dir | Ed25519 attestation key |
+| `LEXCOMPILER_POSTGRES_URL` | unset (in-process PostgreSQL via PGlite) | PostgreSQL server for the sandbox schema run |
+| `LEXCOMPILER_REDIS_URL` | unset (fakeredis) | Redis server for the sandbox cache worker |
+| `LEXCOMPILER_SANDBOX_PYTHON` | `.venv` Python | Interpreter for the runtime sandbox |
+| `LEXCOMPILER_PGVECTOR_URL` | unset (PGlite in `data/pgvector`) | PostgreSQL + pgvector server for RAG chunk vectors |
+| `LEXCOMPILER_NEO4J_URL`, `LEXCOMPILER_NEO4J_USER`, `LEXCOMPILER_NEO4J_PASSWORD`, `LEXCOMPILER_NEO4J_DATABASE` | unset (in-memory graph) | Neo4j for the Graph RAG traversal (Cypher) |
+| `LEXCOMPILER_RERANKER_MODEL`, `LEXCOMPILER_RERANKER_LOCAL_DIR`, `LEXCOMPILER_RERANKER_DTYPE` | unset | BGE cross-encoder reranker through transformers.js (`npm install @huggingface/transformers`) |
+| `LEXCOMPILER_SIGNER` | `local` | Attestation signer: `local` (Ed25519 key file), `gcp-kms` (`LEXCOMPILER_GCP_KMS_KEY_VERSION`, Cloud HSM supported), or `aws-kms` (`LEXCOMPILER_AWS_KMS_KEY_ID`) |
+| `LEXCOMPILER_TSA_URL` | unset | RFC 3161 Time-Stamp Authority used to timestamp attestation signatures |
+| `LEXCOMPILER_SANDBOX_CONTAINER`, `LEXCOMPILER_SANDBOX_IMAGE`, `LEXCOMPILER_SANDBOX_OCI_RUNTIME` | unset | Run the runtime sandbox in a locked-down container (`docker`/`podman`, image from `Dockerfile.sandbox`, optional `runsc` for gVisor) |
 | `LEXCOMPILER_OPA_BIN` | `opa` on `PATH` | OPA binary |
+| `LEXCOMPILER_PYTHON` | first of `python3`, `python`, `py -3` that is Python >= 3.10 | Python interpreter for AST parsing and the runtime sandbox |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `OPENAI_API_KEY` | unset | Server-side key for cloud mode, so the browser never sends one |
 | `LEXCOMPILER_INPUT_PRICE_PER_MTOK_USD` | built-in | Input price for token-cost estimates |
@@ -289,7 +341,7 @@ Built-in clauses and curated feed items are **illustrative**: they paraphrase th
 | `POST` | `/api/clauses/mutate-preset` | Triggers a regulatory amendment scenario and recalculates blast radius |
 | `POST` | `/api/remediation/apply-pr` | Applies synthesized AST patches to `target-repo/` and re-verifies `SAT` |
 | `POST` | `/api/remediation/open-github-pr` | Pushes the `READY_TO_MERGE` remediation to a branch and opens a GitHub pull request |
-| `GET` | `/api/sandbox/verify-runtime` | Executes `target-repo/` in SQLite3, Python 3.12, and TypeScript |
+| `GET` | `/api/sandbox/verify-runtime` | Executes `target-repo/` on PostgreSQL, FastAPI / Pydantic / Redis (Python), and TypeScript |
 | `GET` | `/api/services/mesh` | Live telemetry from Ollama (`:11434`), Z3, and SQLite vector ledger |
 | `POST` | `/api/llm/multi-model-pipeline` | Runs `all-minilm` 384-d embeddings + `qwen2.5-coder` + `dolphin3` |
 | `POST` | `/api/mcp/:serverId/rpc` | MCP JSON-RPC 2.0 `tools/call` endpoint for all 6 custom MCP servers |
@@ -297,6 +349,8 @@ Built-in clauses and curated feed items are **illustrative**: they paraphrase th
 | `POST` | `/api/enterprise/byoc-scan` | Universal BYOC scanner for custom contracts and source code |
 | `GET` | `/api/enterprise/certificate` | Generates an RFC 8032 Ed25519 signed self-attestation (persistent key, published at `/api/enterprise/public-key`; not a legal conformity certificate) |
 | `POST` | `/api/enterprise/verify-signature` | Verifies an attestation against the server's trusted public key |
+| `POST` | `/api/enterprise/revoke` | Revokes an attestation certificate or signing key (administrators) |
+| `GET` | `/api/enterprise/revocations` | Published revocation list |
 | `GET` | `/api/enterprise/sarif` | Exports OASIS SARIF v2.1.0 static analysis report |
 
 ---

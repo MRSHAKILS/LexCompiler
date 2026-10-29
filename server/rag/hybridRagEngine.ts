@@ -5,6 +5,9 @@ import {
 } from '../services/realAiServiceMesh.js';
 import { inferRuleCategoryFromProse } from '../compiler/legalCompiler.js';
 import { countTokens } from '../optimization/tokenOptimizer.js';
+import { getGraphStore, type GraphStore } from './graphStore.js';
+import { getCrossEncoder } from './reranker.js';
+import { getVectorStore, type VectorStore } from './vectorStore.js';
 import type {
   ASTFindingNode,
   ClauseVerificationProof,
@@ -243,9 +246,38 @@ export function buildContextualRagCorpus(
 }
 
 interface RetrievalOptions {
-  /** Dense similarity per chunk id from a neural model; feature-hashed vectors otherwise. */
+  /** Dense similarity per chunk id (pgvector search); in-memory feature-hashed cosine otherwise. */
   denseScores?: Map<string, number>;
   denseBackend?: string;
+  vectorDbBackend?: string;
+  /** Entity hop distances from a graph store (Neo4j / in-memory); computed in-process otherwise. */
+  entityDistances?: Map<string, number>;
+  graphDbBackend?: string;
+  /** Cross-encoder relevance per chunk id; the final order follows it when present. */
+  rerankScores?: Map<string, number>;
+  rerankBackend?: string;
+}
+
+/** Graph seeds: entities named in the query plus the ids of the query category's clauses. */
+export function graphSeeds(query: string, category: RuleCategory, clauses: LegalClause[], entities: Iterable<string>): string[] {
+  const q = query.toLowerCase();
+  const seeds = new Set<string>();
+  for (const node of entities) {
+    if (node.startsWith('chunk:') || node.length < 4) continue;
+    if (q.includes(node)) seeds.add(node);
+  }
+  for (const c of clauses.filter((x) => x.category === category)) seeds.add(c.id.toLowerCase());
+  return [...seeds];
+}
+
+function chunkDistancesFrom(dist: Map<string, number>, chunks: ContextualRagChunk[], triples: KnowledgeGraphTriple[]) {
+  const chunkDistance = new Map<string, number>();
+  for (const c of chunks) {
+    const ds = c.linkedGraphEntities.map((e) => dist.get(e.toLowerCase())).filter((d): d is number => d !== undefined);
+    if (ds.length > 0) chunkDistance.set(c.chunkId, Math.min(...ds));
+  }
+  const reachedTriples = triples.filter((t) => dist.has(t.subject.toLowerCase()) || dist.has(t.object.toLowerCase()));
+  return { chunkDistance, reachedTriples };
 }
 
 function categoryHyde(query: string, clauses: LegalClause[]): { category: RuleCategory; hyde: string } {
@@ -285,13 +317,7 @@ function graphDistances(
     if (file !== t.subject) link(t.subject, file);
   }
 
-  const q = query.toLowerCase();
-  const seeds = new Set<string>();
-  for (const node of adj.keys()) {
-    if (node.startsWith('chunk:') || node.length < 4) continue;
-    if (q.includes(node)) seeds.add(node);
-  }
-  for (const c of clauses.filter((x) => x.category === category)) seeds.add(c.id.toLowerCase());
+  const seeds = graphSeeds(query, category, clauses, adj.keys());
 
   const dist = new Map<string, number>();
   let frontier = [...seeds];
@@ -380,7 +406,9 @@ function hybridRetrieve(
   const bm25Max = Math.max(1e-9, ...bm25Raw);
 
   // Graph
-  const { chunkDistance, reachedTriples } = graphDistances(query, category, clauses, chunks, triples);
+  const { chunkDistance, reachedTriples } = options.entityDistances
+    ? chunkDistancesFrom(options.entityDistances, chunks, triples)
+    : graphDistances(query, category, clauses, chunks, triples);
 
   // Reciprocal Rank Fusion over the three rankings (k = 60)
   const rankOf = (scores: number[]) => {
@@ -402,10 +430,11 @@ function hybridRetrieve(
     bm25KeywordScore: round(bm25Raw[i] / bm25Max),
     graphTraversalBoost: round(graphArr[i]),
     rrfHybridScore: round(rrf[i] / rrfMax),
-    crossEncoderRerankScore: round(rrf[i] / rrfMax),
+    crossEncoderRerankScore: round(options.rerankScores?.get(chunk.chunkId) ?? rrf[i] / rrfMax),
     cragVerdict: bm25Raw[i] > 0 || denseArr[i] >= 0.25 ? 'CORRECT_HIGH_CONFIDENCE' : 'AMBIGUOUS_REFINED',
   }));
   scored.sort((a, b) => b.rrfHybridScore - a.rrfHybridScore);
+  if (options.rerankScores) scored.sort((a, b) => b.crossEncoderRerankScore - a.crossEncoderRerankScore);
   const topRetrieved = scored.slice(0, topK);
 
   // Grounded answer built only from retrieved chunks and Z3 results
@@ -464,10 +493,10 @@ function hybridRetrieve(
       answerRelevance: metrics[3],
       deonticAlignmentScore: metrics[4],
       overallRagasScore: round(metrics.reduce((a, b) => a + b, 0) / metrics.length),
-      evaluationMethod: `Computed against category-derived relevance labels (${relevant.length} relevant chunks for ${category}); dense backend: ${options.denseBackend || '384-d feature hashing'}`,
+      evaluationMethod: `Computed against category-derived relevance labels (${relevant.length} relevant chunks for ${category}); dense backend: ${options.denseBackend || '384-d feature hashing'}; reranker: ${options.rerankBackend || 'RRF order (no cross-encoder loaded)'}`,
     },
-    vectorDbBackend: 'pgvector (HNSW Cosine Index, dim=384) + In-Memory Dense Store',
-    graphDbBackend: 'Neo4j Cypher + ArangoDB Multi-Model Property Graph',
+    vectorDbBackend: options.vectorDbBackend || 'in-memory cosine over 384-d feature-hashed vectors',
+    graphDbBackend: options.graphDbBackend || 'in-memory adjacency graph (breadth-first, 2 hops)',
   };
 }
 
@@ -492,6 +521,67 @@ export function executeHybridRagQuery(
   return hybridRetrieve(query, clauses, sqlTables, astFindings, proofs, topK);
 }
 
+/** Cross-encoder scorer: relevance of each passage to the query (higher is better). */
+export type CrossEncoder = { name: string; score(query: string, passages: string[]): Promise<number[]> };
+
+/**
+ * The pipeline backed by real stores: chunk vectors are synced to pgvector and ranked by
+ * its HNSW cosine index; the entity graph is loaded into the graph store (Neo4j when
+ * configured) and traversed there; an optional cross-encoder reranks the fused list.
+ */
+export async function executeStoreBackedRagQuery(
+  query: string,
+  clauses: LegalClause[],
+  sqlTables: SQLTableSchema[],
+  astFindings: ASTFindingNode[],
+  proofs: ClauseVerificationProof[],
+  topK = 5,
+  deps: {
+    embed?: (text: string) => Promise<{ embedding: number[]; model: string }>;
+    vectorStore?: VectorStore;
+    graphStore?: GraphStore;
+    crossEncoder?: CrossEncoder | null;
+  } = {}
+): Promise<RagQueryExecutionReport> {
+  const t0 = performance.now();
+  const { chunks, triples } = buildContextualRagCorpus(clauses, sqlTables, astFindings, proofs);
+  const { category, hyde } = categoryHyde(query, clauses);
+  const embed = deps.embed || (async (text: string) => ({ embedding: computeSemanticEmbedding(text), model: '384-d feature hashing' }));
+
+  const queryVec = await embed(`${query} ${hyde}`);
+  const records = [];
+  for (const c of chunks) records.push({ id: c.chunkId, text: c.contextualizedText, embedding: (await embed(c.contextualizedText)).embedding });
+  const vectorStore = deps.vectorStore || (await getVectorStore(queryVec.model, queryVec.embedding.length));
+  await vectorStore.sync(records);
+  const denseScores = await vectorStore.search(queryVec.embedding, chunks.length);
+
+  const graphStore = deps.graphStore || (await getGraphStore());
+  await graphStore.load(triples);
+  // Entities linked only from chunks are not graph edges but can still be named by the query.
+  const known = new Set([...(await graphStore.entities()), ...chunks.flatMap((c) => c.linkedGraphEntities.map((e) => e.toLowerCase()))]);
+  const seeds = graphSeeds(query, category, clauses, known);
+  const entityDistances = await graphStore.distancesFrom(seeds, 2);
+
+  const options: RetrievalOptions = {
+    denseScores,
+    denseBackend: queryVec.model,
+    vectorDbBackend: vectorStore.backend,
+    entityDistances,
+    graphDbBackend: graphStore.backend,
+  };
+  const crossEncoder = deps.crossEncoder === undefined ? await getCrossEncoder() : deps.crossEncoder;
+  if (crossEncoder) {
+    // Rerank the fused candidates (2 × topK) with the cross-encoder.
+    const fused = hybridRetrieve(query, clauses, sqlTables, astFindings, proofs, Math.min(chunks.length, topK * 2), options);
+    const scores = await crossEncoder.score(query, fused.retrievedChunks.map((r) => r.chunk.contextualizedText));
+    options.rerankScores = new Map(fused.retrievedChunks.map((r, i) => [r.chunk.chunkId, scores[i]]));
+    for (const c of chunks) if (!options.rerankScores.has(c.chunkId)) options.rerankScores.set(c.chunkId, -Infinity);
+    options.rerankBackend = crossEncoder.name;
+  }
+  const report = hybridRetrieve(query, clauses, sqlTables, astFindings, proofs, topK, options);
+  return { ...report, latencyMs: Math.round((performance.now() - t0) * 10) / 10 };
+}
+
 /**
  * Same pipeline with neural dense retrieval: when Ollama `all-minilm` is reachable,
  * every chunk and the query are embedded (cached by content hash) and those cosine
@@ -506,19 +596,16 @@ export async function executeRealNeuralRagQuery(
   topK = 5
 ): Promise<RagQueryExecutionReport> {
   const t0 = performance.now();
-  const { chunks } = buildContextualRagCorpus(clauses, sqlTables, astFindings, proofs);
-  const { hyde } = categoryHyde(query, clauses);
-  const queryNeural = await computeRealNeuralEmbedding(`${query}\n${hyde}`);
-  let options: RetrievalOptions = {};
-  if (queryNeural.embedding.length > 0) {
-    const denseScores = new Map<string, number>();
-    for (const c of chunks) {
-      const e = await computeRealNeuralEmbedding(c.contextualizedText);
-      if (e.embedding.length > 0) denseScores.set(c.chunkId, cosineSimilarity(queryNeural.embedding, e.embedding));
-    }
-    options = { denseScores, denseBackend: queryNeural.modelUsed };
-  }
-  const report = hybridRetrieve(query, clauses, sqlTables, astFindings, proofs, topK, options);
+  const probe = await computeRealNeuralEmbedding(query);
+  const embed =
+    probe.embedding.length > 0
+      ? async (text: string) => {
+          const e = await computeRealNeuralEmbedding(text);
+          if (e.embedding.length === 0) throw new Error(`Embedding model ${probe.modelUsed} stopped answering`);
+          return { embedding: e.embedding, model: probe.modelUsed };
+        }
+      : undefined;
+  const report = await executeStoreBackedRagQuery(query, clauses, sqlTables, astFindings, proofs, topK, { embed });
 
   const contextBlock = report.retrievedChunks
     .slice(0, 3)

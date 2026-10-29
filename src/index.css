@@ -11,6 +11,12 @@
     font-size: 17px;
   }
 
+  /* Visible keyboard focus on every control (WCAG 2.4.7); amber-300 is >= 3:1 on all panel backgrounds. */
+  :focus-visible {
+    outline: 2px solid var(--color-amber-300);
+    outline-offset: 2px;
+  }
+
   body, #root {
     width: 100%;
     min-height: 100vh;

@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { init as initZ3 } from 'z3-solver';
+import { behaviourVerdicts, describeWitness, type BehaviourVerdict } from './behaviour.js';
 import { buildRegoInput, evaluateRegoPolicy } from '../policy/opaEvaluator.js';
 import { sha256Hex } from '../util/hash.js';
 import type {
@@ -162,7 +163,8 @@ function planClause(
   Z3: Z3Any,
   clause: LegalClause,
   sqlTables: SQLTableSchema[],
-  astFindings: ASTFindingNode[]
+  astFindings: ASTFindingNode[],
+  behaviour: Map<string, BehaviourVerdict> = new Map()
 ): ClausePlan {
   const p = clause.deontic.extractedParameters;
   const laws: ClausePlan['laws'] = [];
@@ -179,6 +181,161 @@ function planClause(
   const byType = (...types: ASTFindingNode['constructType'][]) =>
     astFindings.filter((f) => types.includes(f.constructType));
   const law = (name: string, expr: Z3Any, display: string) => laws.push({ name, expr, display });
+
+  if (clause.category === 'CONSENT_LAWFUL_BASIS') {
+    const req = p.requireConsentCheck ?? true;
+    const sReq = Z3.Bool.const('law_requires_consent__value');
+    law('law_requires_consent', sReq.eq(req), `consent / lawful-basis check required = ${req}`);
+    for (const f of byType('PII_ENTRYPOINT')) {
+      const inst = findingInstance('entry', 'node-fastapi-endpoint', f);
+      const has = Z3.Bool.const(`${inst.key}__consent_checked`);
+      // With a symbolic model, "checked" means on every path that processes data, not just somewhere.
+      const verdict = behaviour.get(f.id);
+      const v = verdict ? !verdict.violated : f.metadata.hasConsentCheck === true;
+      checks.push({
+        instance: inst,
+        facts: [{ name: `ast_${inst.key}_consent_${v}`, expr: has.eq(v), display: `${f.functionName}.consent_checked = ${v}` }],
+        invariants: [
+          {
+            name: `inv_${inst.key}_consent_checked`,
+            expr: Z3.Implies(sReq, has.eq(true)),
+            explanation: `'${f.functionName}' processes personal data without checking consent or another lawful basis${verdict?.violated ? ` on some path (${describeWitness(verdict)})` : ''}.`,
+            remediation: 'Call require_consent(...) before processing (fails closed until a consent registry is configured)',
+            repair: { z3Variable: `${inst.key}__consent_checked`, repairAction: 'INSERT_CONSENT_CHECK', currentValue: false, requiredValue: true },
+          },
+        ],
+      });
+    }
+    return { laws, checks, watch, emptyMeaning: 'No request handlers that process personal data were found.', emptyNeedsReview: true };
+  }
+
+  if (clause.category === 'BREACH_NOTIFICATION') {
+    const maxHours = p.maxBreachNotificationHours ?? 72;
+    const sMax = Z3.Int.const('law_max_breach_notification_minutes');
+    law(`law_breach_notification_${sanitize(fmtHours(maxHours))}`, sMax.eq(minutes(maxHours)), `notify within ${fmtHours(maxHours)}`);
+    for (const f of byType('BREACH_NOTIFICATION_POLICY')) {
+      const inst = findingInstance('breach', 'node-fastapi-endpoint', f);
+      const has = Z3.Bool.const(`${inst.key}__configured`);
+      const mins = Z3.Int.const(`${inst.key}__notification_minutes`);
+      const hours = f.metadata.breachNotificationHours;
+      const facts = [{ name: `ast_${inst.key}_configured_${hours != null}`, expr: has.eq(hours != null), display: `breach deadline configured = ${hours != null}` }];
+      if (hours != null) facts.push({ name: `ast_${inst.key}_hours_${sanitize(fmtHours(hours))}`, expr: mins.eq(minutes(hours)), display: `${f.functionName} = ${fmtHours(hours)}` });
+      checks.push({
+        instance: inst,
+        facts,
+        invariants: [
+          {
+            name: `inv_${inst.key}_configured`,
+            expr: has.eq(true),
+            explanation: 'No personal-data breach notification deadline is configured.',
+            remediation: `Add BREACH_NOTIFICATION_DEADLINE_HOURS = ${maxHours}`,
+            repair: { z3Variable: `${inst.key}__configured`, repairAction: 'ADD_BREACH_POLICY', currentValue: false, requiredValue: maxHours },
+          },
+          ...(hours != null
+            ? [
+                {
+                  name: `inv_${inst.key}_within_limit`,
+                  expr: mins.le(sMax),
+                  explanation: `'${f.functionName}' allows ${fmtHours(hours)} to notify the supervisory authority (limit ${fmtHours(maxHours)}).`,
+                  remediation: `Set ${f.functionName} to ${maxHours} hours`,
+                  repair: { z3Variable: `${inst.key}__notification_minutes`, repairAction: 'SET_BREACH_DEADLINE' as const, currentValue: hours, requiredValue: maxHours },
+                },
+              ]
+            : []),
+        ],
+      });
+      watch.push({ name: `${inst.key}__notification_minutes`, expr: mins });
+    }
+    return { laws, checks, watch, emptyMeaning: 'No personal data is processed, so no breach-notification deadline applies.', emptyNeedsReview: true };
+  }
+
+  if (clause.category === 'DPIA_REQUIRED') {
+    const req = p.requireDpia ?? true;
+    const sReq = Z3.Bool.const('law_requires_dpia__value');
+    law('law_requires_dpia', sReq.eq(req), `DPIA required for high-risk processing = ${req}`);
+    const onRecord = byType('DPIA_RECORD').some((d) => d.metadata.dpiaRecordExists === true);
+    const sRecord = Z3.Bool.const('repo__dpia_on_record');
+    for (const f of byType('LLM_INFERENCE_CALL')) {
+      const inst = findingInstance('dpia', 'node-ai-engine', f);
+      checks.push({
+        instance: inst,
+        facts: [{ name: `ast_repo_dpia_on_record_${onRecord}`, expr: sRecord.eq(onRecord), display: `DPIA on record = ${onRecord}` }],
+        invariants: [
+          {
+            name: `inv_${inst.key}_dpia_on_record`,
+            expr: Z3.Implies(sReq, sRecord.eq(true)),
+            explanation: `Automated decision-making in '${f.functionName}' has no data protection impact assessment on record.`,
+            remediation: 'Write the DPIA and reference it with DPIA_REFERENCE = "<path in the repository>" (a DPIA is a document; it cannot be generated)',
+            repair: null,
+          },
+        ],
+      });
+    }
+    return { laws, checks, watch, emptyMeaning: 'No high-risk (automated decision-making) processing was found.', emptyNeedsReview: true };
+  }
+
+  if (clause.category === 'DATA_MINIMISATION') {
+    const req = p.forbidUnusedPiiFields ?? true;
+    const sReq = Z3.Bool.const('law_forbids_unused_pii__value');
+    law('law_forbids_unused_pii', sReq.eq(req), `unused PII fields forbidden = ${req}`);
+    for (const f of byType('PII_COLLECTION_MODEL')) {
+      const inst = findingInstance('model', 'node-fastapi-endpoint', f);
+      const unused = f.metadata.unusedPiiFields || [];
+      const n = Z3.Int.const(`${inst.key}__unused_pii_fields`);
+      checks.push({
+        instance: inst,
+        facts: [{ name: `ast_${inst.key}_unused_${unused.length}`, expr: n.eq(unused.length), display: `${f.functionName}.unused_pii_fields = ${unused.length}` }],
+        invariants: [
+          {
+            name: `inv_${inst.key}_minimised`,
+            expr: Z3.Implies(sReq, n.eq(0)),
+            explanation: `'${f.functionName}' collects PII it never uses: ${unused.join(', ')}.`,
+            remediation: `Remove ${unused.join(', ')} from ${f.functionName}`,
+            repair: { z3Variable: `${inst.key}__unused_pii_fields`, repairAction: 'REMOVE_UNUSED_PII_FIELD', currentValue: unused.length, requiredValue: 0 },
+          },
+        ],
+      });
+    }
+    return { laws, checks, watch, emptyMeaning: 'No models that collect personal data were found.', emptyNeedsReview: true };
+  }
+
+  if (clause.category === 'PURPOSE_LIMITATION') {
+    const allowed = (p.allowedProcessingPurposes || []).slice();
+    const entries = byType('PII_ENTRYPOINT');
+    const universe = [...new Set([...allowed, ...entries.map((f) => f.metadata.declaredPurpose).filter((x): x is string => !!x)])].sort();
+    const permitted = universe.map((u) => Z3.Bool.const(`law_purpose_permitted__${sanitize(u)}`));
+    if (allowed.length) {
+      law('law_permitted_purposes', Z3.And(...universe.map((u, i) => permitted[i].eq(allowed.includes(u)))), `permitted purposes = {${allowed.join(', ')}}`);
+    }
+    for (const f of entries) {
+      const inst = findingInstance('purpose', 'node-fastapi-endpoint', f);
+      const declared = f.metadata.declaredPurpose ?? null;
+      const has = Z3.Bool.const(`${inst.key}__purpose_declared`);
+      const idx = Z3.Int.const(`${inst.key}__purpose_index`);
+      const facts = [{ name: `ast_${inst.key}_declared_${declared != null}`, expr: has.eq(declared != null), display: `${f.functionName}.purpose_declared = ${declared != null}` }];
+      if (declared != null) facts.push({ name: `ast_${inst.key}_purpose_${sanitize(declared)}`, expr: idx.eq(universe.indexOf(declared)), display: `${f.functionName}.purpose = ${declared}` });
+      const invariants: Invariant[] = [
+        {
+          name: `inv_${inst.key}_purpose_declared`,
+          expr: has.eq(true),
+          explanation: `'${f.functionName}' processes personal data without a declared purpose.`,
+          remediation: allowed.length === 1 ? `Declare PROCESSING_PURPOSE = "${allowed[0]}"` : 'Declare PROCESSING_PURPOSE = "<permitted purpose>"',
+          repair: allowed.length === 1 ? { z3Variable: `${inst.key}__purpose_declared`, repairAction: 'PIN_PROCESSING_PURPOSE', currentValue: null, requiredValue: allowed[0] } : null,
+        },
+      ];
+      if (allowed.length && declared != null) {
+        invariants.push({
+          name: `inv_${inst.key}_purpose_permitted`,
+          expr: Z3.Or(...universe.map((_, i) => Z3.And(idx.eq(i), permitted[i]))),
+          explanation: `'${f.functionName}' processes personal data for '${declared}', which is not a permitted purpose (${allowed.join(', ')}).`,
+          remediation: allowed.length === 1 ? `Set PROCESSING_PURPOSE to "${allowed[0]}"` : 'Change the processing or the declared purpose (needs a decision)',
+          repair: allowed.length === 1 ? { z3Variable: `${inst.key}__purpose_index`, repairAction: 'PIN_PROCESSING_PURPOSE', currentValue: declared, requiredValue: allowed[0] } : null,
+        });
+      }
+      checks.push({ instance: inst, facts, invariants });
+    }
+    return { laws, checks, watch, emptyMeaning: 'No request handlers that process personal data were found.', emptyNeedsReview: true };
+  }
 
   if (clause.category === 'RETENTION_AND_TENANT_KMS' || clause.category === 'ENCRYPTION_AT_REST') {
     const retention = clause.category === 'RETENTION_AND_TENANT_KMS';
@@ -295,7 +452,9 @@ function planClause(
             {
               name: `inv_${inst.key}_tenant_kms_envelope`,
               expr: Z3.Implies(sKms, kms.eq(true)),
-              explanation: `'${f.functionName}' encrypts PII with a shared key instead of a tenant-isolated KMS envelope.`,
+              explanation: f.metadata.encryptsPii
+                ? `'${f.functionName}' encrypts PII with a shared key instead of a tenant-isolated KMS envelope.`
+                : `'${f.functionName}' processes PII without a tenant-isolated KMS envelope (no encryption call found).`,
               remediation: 'Call encrypt_with_tenant_kms(..., tenant_id=...) and enable the tenant KMS flag',
               repair: {
                 z3Variable: `${inst.key}__tenant_kms`,
@@ -381,9 +540,18 @@ function planClause(
       const inst = findingInstance('log', 'node-fastapi-endpoint', f);
       const leaks = Z3.Bool.const(`${inst.key}__logs_plaintext_pii`);
       const fields = (f.metadata.leakedFields || []).join(', ');
+      // Path-sensitive: a leak on a branch no input can reach is not a violation.
+      const verdict = behaviour.get(f.id);
+      const reachable = verdict ? verdict.violated : true;
       checks.push({
         instance: inst,
-        facts: [{ name: `ast_${inst.key}_logs_pii_true`, expr: leaks.eq(true), display: `${f.functionName} logs tainted PII (${fields})` }],
+        facts: [
+          {
+            name: `ast_${inst.key}_logs_pii_${reachable}`,
+            expr: leaks.eq(reachable),
+            display: `${f.functionName} logs tainted PII (${fields})${verdict ? (reachable ? ` on a reachable path (${describeWitness(verdict)})` : ' only on unreachable paths') : ''}`,
+          },
+        ],
         invariants: [
           {
             name: `inv_${inst.key}_no_plaintext_pii`,
@@ -587,6 +755,33 @@ function planClause(
   return { laws, checks, watch, emptyMeaning: 'No cloud-region egress constants were found.', emptyNeedsReview: true };
 }
 
+/**
+ * Behavioural invariants (AI decisions, egress): Z3 searched the function's symbolic paths
+ * for a violating input. The verdict enters the proof as a fact so the unsat core names it.
+ */
+function addBehaviourInvariants(Z3: Z3Any, clause: LegalClause, plan: ClausePlan, behaviour: Map<string, BehaviourVerdict>): void {
+  if (clause.category !== 'AI_HUMAN_IN_THE_LOOP' && clause.category !== 'CROSS_BORDER_TRANSFER') return;
+  for (const check of plan.checks) {
+    const f = check.instance.finding;
+    const verdict = f && behaviour.get(f.id);
+    if (!verdict) continue;
+    const k = check.instance.key;
+    const flag = Z3.Bool.const(`${k}__behaviour_violates`);
+    check.facts.push({
+      name: `sym_${k}_violates_${verdict.violated}`,
+      expr: flag.eq(verdict.violated),
+      display: `symbolic execution of ${verdict.property}: ${verdict.violated ? describeWitness(verdict) : 'proven for every input'}`,
+    });
+    check.invariants.push({
+      name: `inv_${k}_behaviour`,
+      expr: flag.eq(false),
+      explanation: `Symbolic execution of '${f!.functionName}' refutes "${verdict.property}" — ${describeWitness(verdict)}.`,
+      remediation: 'Fix the decision logic so the property holds for every input',
+      repair: null,
+    });
+  }
+}
+
 function reviewReasonsFor(clause: LegalClause): string[] {
   const reasons: string[] = [];
   const prov = clause.deontic.extractionProvenance;
@@ -633,7 +828,9 @@ export async function verifyRepositoryAgainstClauses(
 
   for (const clause of clauses) {
     const t0 = performance.now();
-    const plan = planClause(Z3, clause, sqlTables, astFindings);
+    const behaviour = await behaviourVerdicts(Z3, clause, astFindings);
+    const plan = planClause(Z3, clause, sqlTables, astFindings, behaviour);
+    addBehaviourInvariants(Z3, clause, plan, behaviour);
     const solver = new Z3.Solver();
     solver.set('timeout', SOLVER_TIMEOUT_MS);
 

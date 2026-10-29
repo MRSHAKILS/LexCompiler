@@ -10,7 +10,7 @@ import {
   sha256Hex,
 } from '../compiler/legalCompiler.js';
 import { verifyRepositoryAgainstClauses } from '../prover/z3Engine.js';
-import { executeHybridRagQuery } from '../rag/hybridRagEngine.js';
+import { executeStoreBackedRagQuery } from '../rag/hybridRagEngine.js';
 import { synthesizeRemediationPullRequest } from '../remediation/prSynthesizer.js';
 import type {
   LegalClause,
@@ -340,7 +340,7 @@ export async function executeMcpTool(
       const { sqlTables, astFindings } = await repo();
       const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
       const topK = typeof args.topK === 'number' ? args.topK : 4;
-      return { ...executeHybridRagQuery(String(args.query), clauses, sqlTables, astFindings, verification.proofs, topK) };
+      return { ...(await executeStoreBackedRagQuery(String(args.query), clauses, sqlTables, astFindings, verification.proofs, topK)) };
     }
     case 'synthesize_and_verify_remediation_pr': {
       const { sqlTables, astFindings, enrichedFiles } = await repo();
