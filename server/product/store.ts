@@ -82,6 +82,8 @@ export interface RuleVersion {
   scope: RuleScope;
   answers: Record<string, unknown> | null;
   effectiveFrom: string | null;
+  /** The rule card as Legal saw it (values, their sources, questions, AI suggestion). */
+  card: Record<string, unknown> | null;
   createdBy: string;
   createdAt: string;
   approvedBy: string | null;
@@ -108,7 +110,7 @@ export interface RuleInEffect {
   scope: RuleScope;
 }
 
-export type ScanTrigger = 'pull_request' | 'push' | 'manual' | 'rerun' | 'baseline' | 'connect';
+export type ScanTrigger = 'pull_request' | 'push' | 'manual' | 'rerun' | 'baseline' | 'connect' | 'rule_approved';
 export type ScanStatus = 'queued' | 'in_progress' | 'completed' | 'failed';
 export interface ScanRecord {
   id: string;
@@ -148,6 +150,19 @@ const str = (v: unknown) => (v == null ? null : String(v));
 const newId = () => crypto.randomUUID();
 
 /** Every product table, behind one class so callers never write SQL. */
+/** A document without its text. */
+export interface DocumentSummary {
+  id: string;
+  title: string;
+  kind: string;
+  counterpartyId: string | null;
+  language: string | null;
+  fileSha256: string;
+  fileName: string | null;
+  fileFormat: string;
+  uploadedAt: string;
+}
+
 export class ProductStore {
   constructor(readonly db: Db) {}
 
@@ -482,12 +497,17 @@ export class ProductStore {
     text: string;
     uploadedBy: string;
     supersedesId?: string | null;
+    /** The uploaded file; without one, the text is the document and its hash is the text's. */
+    file?: { name: string; format: string; data: Buffer; sha256: string };
   }): { id: string; fileSha256: string } {
     const id = newId();
-    const fileSha256 = sha256Hex(input.text);
+    const fileSha256 = input.file?.sha256 ?? sha256Hex(input.text);
+    if (input.counterpartyId && !this.db.prepare('SELECT 1 FROM counterparties WHERE id = ? AND workspace_id = ?').get(input.counterpartyId, input.workspaceId)) {
+      throw new StoreError('unknown counterparty', 404);
+    }
     this.db
       .prepare(
-        'INSERT INTO documents (id, workspace_id, counterparty_id, kind, title, language, file_sha256, text, supersedes_id, uploaded_by, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO documents (id, workspace_id, counterparty_id, kind, title, language, file_sha256, text, supersedes_id, uploaded_by, uploaded_at, file_name, file_format, file_blob) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .run(
         id,
@@ -500,29 +520,54 @@ export class ProductStore {
         input.text,
         input.supersedesId ?? null,
         input.uploadedBy,
-        nowIso()
+        nowIso(),
+        input.file?.name.slice(0, 200) ?? null,
+        input.file?.format ?? 'text',
+        input.file?.data ?? null
       );
     return { id, fileSha256 };
   }
 
-  listDocuments(workspaceId: string): Array<{ id: string; title: string; kind: string; counterpartyId: string | null; fileSha256: string; uploadedAt: string }> {
+  listDocuments(workspaceId: string): DocumentSummary[] {
     return (
       this.db
-        .prepare('SELECT id, title, kind, counterparty_id, file_sha256, uploaded_at FROM documents WHERE workspace_id = ? ORDER BY uploaded_at DESC')
+        .prepare('SELECT id, title, kind, counterparty_id, language, file_sha256, file_name, file_format, uploaded_at FROM documents WHERE workspace_id = ? ORDER BY uploaded_at DESC')
         .all(workspaceId) as Row[]
     ).map((r) => ({
       id: String(r.id),
       title: String(r.title),
       kind: String(r.kind),
       counterpartyId: str(r.counterparty_id),
+      language: str(r.language),
       fileSha256: String(r.file_sha256),
+      fileName: str(r.file_name),
+      fileFormat: str(r.file_format) ?? 'text',
       uploadedAt: String(r.uploaded_at),
     }));
   }
 
-  getDocument(workspaceId: string, id: string): { id: string; title: string; text: string; counterpartyId: string | null; kind: string } | undefined {
+  getDocument(workspaceId: string, id: string): (DocumentSummary & { text: string }) | undefined {
     const r = this.db.prepare('SELECT * FROM documents WHERE id = ? AND workspace_id = ?').get(id, workspaceId) as Row | undefined;
-    return r ? { id: String(r.id), title: String(r.title), text: String(r.text), counterpartyId: str(r.counterparty_id), kind: String(r.kind) } : undefined;
+    if (!r) return undefined;
+    return {
+      id: String(r.id),
+      title: String(r.title),
+      kind: String(r.kind),
+      counterpartyId: str(r.counterparty_id),
+      language: str(r.language),
+      fileSha256: String(r.file_sha256),
+      fileName: str(r.file_name),
+      fileFormat: str(r.file_format) ?? 'text',
+      uploadedAt: String(r.uploaded_at),
+      text: String(r.text),
+    };
+  }
+
+  /** The uploaded file as it was, or null for pasted text. */
+  getDocumentFile(workspaceId: string, id: string): { name: string; format: string; data: Buffer } | null {
+    const r = this.db.prepare('SELECT file_name, file_format, file_blob FROM documents WHERE id = ? AND workspace_id = ?').get(id, workspaceId) as Row | undefined;
+    if (!r || r.file_blob == null) return null;
+    return { name: String(r.file_name ?? 'document'), format: String(r.file_format ?? 'text'), data: Buffer.from(r.file_blob as Uint8Array) };
   }
 
   // ---------------------------------------------------------------- rules
@@ -540,6 +585,7 @@ export class ProductStore {
       scope: JSON.parse(String(r.scope_json)) as RuleScope,
       answers: r.answers_json ? (JSON.parse(String(r.answers_json)) as Record<string, unknown>) : null,
       effectiveFrom: str(r.effective_from),
+      card: r.card_json ? (JSON.parse(String(r.card_json)) as Record<string, unknown>) : null,
       createdBy: String(r.created_by),
       createdAt: String(r.created_at),
       approvedBy: str(r.approved_by),
@@ -566,6 +612,7 @@ export class ProductStore {
     clause: LegalClause;
     documentId?: string | null;
     scope?: RuleScope;
+    card?: Record<string, unknown> | null;
     createdBy: string;
   }): { rule: Rule; version: RuleVersion } {
     const versionId = transaction(this.db, () => {
@@ -589,8 +636,8 @@ export class ProductStore {
       const id = newId();
       this.db
         .prepare(
-          `INSERT INTO rule_versions (id, rule_id, version, status, document_id, source_text, clause_json, clause_sha256, scope_json, created_by, created_at)
-           VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO rule_versions (id, rule_id, version, status, document_id, source_text, clause_json, clause_sha256, scope_json, card_json, created_by, created_at)
+           VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           id,
@@ -601,6 +648,7 @@ export class ProductStore {
           clauseJson,
           sha256Hex(clauseJson),
           JSON.stringify(input.scope ?? { all: true }),
+          input.card ? JSON.stringify(input.card) : null,
           input.createdBy,
           nowIso()
         );
@@ -881,6 +929,23 @@ export class ProductStore {
       .prepare('INSERT OR IGNORE INTO webhook_deliveries (delivery_id, event, action, received_at) VALUES (?, ?, ?, ?)')
       .run(deliveryId, event, action, nowIso());
     return Number(r.changes) === 1;
+  }
+
+  /** Repositories a rule applies to: all of the workspace's, or those in its counterparties' scope. */
+  reposInScope(workspaceId: string, scope: RuleScope): Repo[] {
+    const repos = this.listRepos(workspaceId);
+    if (scope.all || !scope.counterpartyIds?.length) return repos;
+    return repos.filter((r) => this.ruleScopeGlobs(scope, r.id).length > 0);
+  }
+
+  /** The latest completed scan of a repository's default branch (not a pull request), with its facts. */
+  latestBranchScan(repoId: string): { id: string; commitSha: string; facts: { sqlTables: unknown[]; astFindings: unknown[] } } | null {
+    const r = this.db
+      .prepare("SELECT id, commit_sha, facts_json FROM scans WHERE repo_id = ? AND status = 'completed' AND pr_number IS NULL AND facts_json IS NOT NULL ORDER BY finished_at DESC LIMIT 1")
+      .get(repoId) as Row | undefined;
+    if (!r) return null;
+    const facts = JSON.parse(String(r.facts_json)) as { sqlTables?: unknown[]; astFindings?: unknown[] };
+    return { id: String(r.id), commitSha: String(r.commit_sha), facts: { sqlTables: facts.sqlTables ?? [], astFindings: facts.astFindings ?? [] } };
   }
 
   /**

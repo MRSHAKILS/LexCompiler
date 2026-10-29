@@ -23,12 +23,13 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | #36 | Phase 2a, part 2: AI gateway, AI setting per workspace, call log, extraction eval |
 | MRSHAKILS/LexCompiler #3 | Bangla and test-repository RAG eval sets |
 | MRSHAKILS/LexCompiler #4, #5 | Windows test fixes (4 Vitest workers); RAG: stemmed BM25 with identifier parts; graph seeds and HyDE only from evidenced categories |
+| MRSHAKILS/LexCompiler #6 | Phase 3: the lawyer's workspace at `/legal` (documents, clauses, rule cards, approval rescans `main`) |
 
 | Phase | Status |
 |---|---|
 | 0–2 | Done, tested live on GitHub |
 | 2a AI foundation | Done. RAG eval now has a Bangla set and a set for the test repo (see Evals) |
-| 3 Lawyer's workspace | Next. The rule API exists; the screens don't |
+| 3 Lawyer's workspace | Done and tested locally (`/legal`). The GitHub part of the guide's test needs this machine's App credentials (see Open questions) |
 | 4 Fixes and exceptions | Not started. The `exceptions` table exists, nothing writes to it |
 | 4a MCP for coding assistants | Not started. The six demo MCP servers work |
 | 5 Evidence and auditor | Not started. The `evidence`, `shares` and `share_views` tables exist, nothing writes to them |
@@ -37,7 +38,13 @@ This file says where the work stands, how to run it, and what to do next. The fu
 ## What works today
 
 - **GitHub checks.** The App "LexCompiler d16d" (slug `lexcompiler-d16d`) is installed on https://github.com/shahriar-ahmed-seam/finhealth-core-platform and linked to the workspace "FinHealth AI", which has R-1 to R-4 approved. Its PR #1 is red on purpose: "1 new finding (R-1)" at `api/loan_applications.py:20`. It is the test case for the exception flow in Phase 4. A ruleset blocks merging it.
-- **Rules API** (Phase 1, no screens yet): `POST /api/workspaces/<id>/rules` creates a draft, `POST .../rule-versions/<versionId>/approve` and `.../reject` decide it (Legal only), `GET .../rules-in-effect` lists what scans use.
+- **Lawyer's workspace** at `/legal` (`src/components/legal/LegalWorkspace.tsx`). Upload a PDF, DOCX or text; every clause is listed, normative ones marked; a clause opens a rule card; approve or reject drafts.
+  - `POST /api/workspaces/<id>/documents` takes `text`, or `fileName` with `contentBase64` (up to 3 MB). The original file and its SHA-256 are kept (`GET .../documents/<docId>/file`). A Bangla upload in the old Bijoy encoding is refused with a request for Unicode text.
+  - `POST .../rule-card` previews a card without saving: category (with a flag when the wording names none), plain reading, highlights with offsets, values with their source (parser, model, Legal, or an open question), questions, SMT-LIB2 and Rego, and the impact on each in-scope repo's last scan of `main`.
+  - `POST .../rules` now takes `values` (Legal's numbers, compiled with `compileLegalProseWithOverrides`) and `scope`, and stores the card with the version (`card_json`, migration 4).
+  - Approval is refused while a value is an open question, and queues a scan of the default branch of every GitHub repo in scope (`enqueueBranchScan`, trigger `rule_approved`).
+  - With AI on, the gateway suggests the numeric value and `checkExtraction` decides whether the card shows it ("Suggested by <model>") or asks.
+- **Rules API** (Phase 1): `POST /api/workspaces/<id>/rules` creates a draft, `POST .../rule-versions/<versionId>/approve` and `.../reject` decide it (Legal only), `GET .../rules-in-effect` lists what scans use.
 - **AI gateway** (`server/ai/gateway.ts`), the only code that calls a model:
   - A workspace's AI is `off` until the owner sets `local` or `cloud` with `PUT /api/workspaces/<id>/ai`, which also sets a daily token budget.
   - Every call is logged in `ai_calls` with the prompt's SHA-256, not its text (`GET /api/workspaces/<id>/ai/calls`).
@@ -101,16 +108,15 @@ Dates are from the schedule in the product guide, section 7.
    - Pick the cloud model provider, put its key in `.env`, and run `npm run eval:extract -- --model cloud`.
    - Decide whether to restore PR #15's files (below).
 2. ~~**Finish 2a.**~~ Done: `dataset.bn.json` and `dataset.finhealth.json`. The collection-model miss (q11, fh02) is fixed: BM25 stems words and splits identifiers, and a question with no category evidence no longer gets the retention clause's graph seeds and HyDE text. Both models are now in the top 5, at ranks 3 and 4.
-3. **Phase 3, the lawyer's workspace** (Nov 9–22). Guide: Phase 3 and 5.4.
-   - Upload PDF, DOCX or text (`pdfjs-dist`, `mammoth`), split clauses, mark normative ones.
-   - Rule card on the existing rules API: highlighted source, category, values, scope, effective date, questions. Fill values with `checkParserOnly` and, when the workspace has AI on, with the gateway and `checkExtraction`.
-   - On approval, queue a scan of `main` for every repo in scope (`enqueueScan` in `server/github/webhooks.ts`). Approval doesn't do this yet.
+3. ~~**Phase 3, the lawyer's workspace.**~~ Done (#6). Left for later: the library screen (templates are served by `GET /api/library/templates` but have no screen yet), similar-rule links (guide 5.4 item 6), an LLM rephrasing of the plain reading, and the evidence record on approval (Phase 5).
 4. **Phase 4, fixes and exceptions** (Nov 23–29). The webhook ignores `check_run.requested_action` today (`server/github/webhooks.ts`). Exceptions need an API, a Legal inbox, a re-run after approval, and an expiry job. `classifyFindings` already applies approved exceptions.
 5. **Phase 4a, the `/mcp` endpoint** (Nov 30–Dec 6): tokens and the six tools in guide 5.8. Then fill in the client test table in 5.9.
 6. **Phase 5, evidence and the auditor** (Dec 7–13): `appendEvidence`, share links, `verify.mjs`. The guide has the code.
 7. **Phases 6 and 7** (Dec 14–19), then a freeze from Dec 20 to 25.
 
 ## Open questions for the owner
+
+- **GitHub App credentials on the Windows machine.** `data/github-app.json` (the "LexCompiler d16d" App) and the smee channel are on the machine that ran Phases 0–2, not on this one. Without them, the GitHub halves of the Phase 3 and Phase 4 tests (rescan of `main` after approval; "Request exception" on finhealth-core-platform PR #1) can't run here. Copy `data/github-app.json` over, or register a new App at `/github/register`.
 
 - **PR #15.** GitHub shows it as merged, but a force push to `main` at 12:40 UTC on October 28 removed it. Missing from `main`: `docs/WHITEPAPER.md`, `docs/SUBMISSION_GUIDE_425PTS.md`, 4 screenshots in `docs/assets/`, and a change to `server/compiler/legalCompiler.ts` that now conflicts. It is still on the local branch `feat/bangla-localization-and-docs`.
 - **Old branches.** 9 local branches whose GitHub copies are gone, plus `revert-26-claude/compassionate-hypatia-3mjhsk` on GitHub. All are fully in `main` except the PR #15 branch.

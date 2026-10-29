@@ -11,7 +11,7 @@ import { GitHubApp, githubUrls } from './github/client.js';
 import { loadGitHubAppCredentials } from './github/credentials.js';
 import { createBrowserAuth, createGitHubApiRouter, createGitHubRoutes } from './github/routes.js';
 import { createScanJobHandler } from './github/scanJob.js';
-import { createWebhookHandler } from './github/webhooks.js';
+import { createWebhookHandler, enqueueScan } from './github/webhooks.js';
 import { JobQueue } from './jobs/queue.js';
 import path from 'node:path';
 import cors from 'cors';
@@ -138,7 +138,17 @@ setInterval(() => productStore.purgeExpiredSessions(), 60 * 60 * 1000).unref();
 // Resolve the build id once at startup (one git call), not on the first scan request.
 lexcompilerVersion();
 app.use('/api', createApiGuard(securityConfig, oidcProvider ? createAuthenticator(oidcProvider, securityConfig.apiToken) : undefined));
-app.use('/api', createProductRouter(productStore, oidcProvider, { reposRoot: process.env.LEXCOMPILER_PROJECT_REPOS_ROOT || path.join(process.cwd(), 'repos') }));
+app.use(
+  '/api',
+  createProductRouter(productStore, oidcProvider, {
+    reposRoot: process.env.LEXCOMPILER_PROJECT_REPOS_ROOT || path.join(process.cwd(), 'repos'),
+    // An approved rule rescans the default branch of each GitHub repository in its scope.
+    enqueueBranchScan: (repo, version) =>
+      repo.githubRepoId !== null && repo.installationId !== null
+        ? enqueueScan({ queue: jobQueue }, { githubRepoId: repo.githubRepoId, installationId: repo.installationId, kind: 'push', trigger: 'rule_approved' }, `rule:${version.id}:${repo.id}`)
+        : null,
+  })
+);
 app.use('/api', createGitHubApiRouter(getGitHubApp));
 
 /**

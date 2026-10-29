@@ -310,4 +310,18 @@ CREATE TABLE ai_calls (
 CREATE INDEX ai_calls_workspace_time ON ai_calls(workspace_id, created_at);
 `,
   },
+  {
+    id: 4,
+    name: 'original files of uploaded documents, rule card values',
+    sql: `
+-- The uploaded file as it was, so evidence can point at the exact bytes Legal approved from.
+ALTER TABLE documents ADD COLUMN file_name TEXT;
+ALTER TABLE documents ADD COLUMN file_format TEXT;
+ALTER TABLE documents ADD COLUMN file_blob BLOB;
+
+-- What the rule card showed and what Legal changed: suggested values, the model that suggested
+-- them (with the prompt hash, never the prompt), and the values Legal set by hand.
+ALTER TABLE rule_versions ADD COLUMN card_json TEXT;
+`,
+  },
 ];
