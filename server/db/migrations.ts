@@ -267,4 +267,12 @@ CREATE TABLE webhook_deliveries (
 );
 `,
   },
+  {
+    id: 2,
+    name: 'scans remember the job that ran them',
+    sql: `
+ALTER TABLE scans ADD COLUMN job_id TEXT;
+CREATE INDEX scans_job ON scans(job_id);
+`,
+  },
 ];

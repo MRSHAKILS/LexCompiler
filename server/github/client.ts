@@ -35,17 +35,46 @@ export interface GitHubRepoSummary {
   defaultBranch: string;
 }
 
+export interface GitHubAppOptions {
+  /** Waits before each retry of a safe-to-repeat call. Default: 0.5 s, 2 s, 5 s. */
+  retryDelaysMs?: number[];
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** Responses worth retrying: rate limiting and GitHub's transient server errors. */
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
 /** A GitHub App: authenticates as the app (JWT) and as its installations (one-hour tokens). */
 export class GitHubApp {
   private readonly key: crypto.KeyObject;
   private readonly tokens = new Map<number, { token: string; expiresAt: number }>();
+  private readonly retryDelaysMs: number[];
 
   constructor(
     readonly credentials: GitHubAppCredentials,
     readonly urls: GitHubUrls = githubUrls(),
-    private readonly fetchImpl: typeof fetch = fetch
+    private readonly fetchImpl: typeof fetch = fetch,
+    options: GitHubAppOptions = {}
   ) {
     this.key = crypto.createPrivateKey(credentials.privateKeyPem);
+    this.retryDelaysMs = options.retryDelaysMs ?? [500, 2000, 5000];
+  }
+
+  /**
+   * Runs `attempt` again after network errors and retryable statuses. Only for calls that are safe
+   * to repeat: GETs, PATCHes that set the same values, and token requests. Creating a check run is
+   * not retried here; a lost response would leave a duplicate run.
+   */
+  private async withRetries<T>(attempt: () => Promise<T>): Promise<T> {
+    for (let i = 0; ; i++) {
+      try {
+        return await attempt();
+      } catch (err) {
+        const retryable = !(err instanceof GitHubApiError) || RETRYABLE_STATUS.has(err.status);
+        if (!retryable || i >= this.retryDelaysMs.length) throw err;
+        await sleep(this.retryDelaysMs[i]);
+      }
+    }
   }
 
   /** A JWT that authenticates as the app itself. GitHub accepts at most 10 minutes. */
@@ -59,7 +88,12 @@ export class GitHubApp {
       .sign(this.key);
   }
 
-  private async call<T>(token: string, method: string, route: string, body?: unknown): Promise<T> {
+  private async call<T>(token: string, method: string, route: string, body?: unknown, options: { retry?: boolean } = {}): Promise<T> {
+    const retry = options.retry ?? (method === 'GET' || method === 'PATCH');
+    return retry ? this.withRetries(() => this.callOnce<T>(token, method, route, body)) : this.callOnce<T>(token, method, route, body);
+  }
+
+  private async callOnce<T>(token: string, method: string, route: string, body?: unknown): Promise<T> {
     const res = await this.fetchImpl(`${this.urls.apiUrl}${route}`, {
       method,
       headers: { ...API_HEADERS, Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
@@ -74,7 +108,8 @@ export class GitHubApp {
   async installationToken(installationId: number): Promise<string> {
     const cached = this.tokens.get(installationId);
     if (cached && cached.expiresAt - Date.now() > 5 * 60 * 1000) return cached.token;
-    const data = await this.call<{ token: string; expires_at?: string }>(await this.appJwt(), 'POST', `/app/installations/${installationId}/access_tokens`);
+    // Asking for a token twice is harmless, so this POST is retried.
+    const data = await this.call<{ token: string; expires_at?: string }>(await this.appJwt(), 'POST', `/app/installations/${installationId}/access_tokens`, undefined, { retry: true });
     this.tokens.set(installationId, { token: data.token, expiresAt: Date.parse(data.expires_at || '') || Date.now() + 55 * 60 * 1000 });
     return data.token;
   }
@@ -84,8 +119,12 @@ export class GitHubApp {
     return this.call<T>(await this.installationToken(installationId), method, route, body);
   }
 
-  /** Downloads `owner/repo` at `sha` as a gzipped tarball (in memory), refusing archives over 200 MiB. */
+  /** Downloads `owner/repo` at `sha` as a gzipped tarball (in memory), refusing archives over 200 MiB. Retried as a whole, including a connection lost mid-download. */
   async downloadTarball(installationId: number, fullName: string, sha: string): Promise<Buffer> {
+    return this.withRetries(() => this.downloadTarballOnce(installationId, fullName, sha));
+  }
+
+  private async downloadTarballOnce(installationId: number, fullName: string, sha: string): Promise<Buffer> {
     const token = await this.installationToken(installationId);
     const res = await this.fetchImpl(`${this.urls.apiUrl}/repos/${fullName}/tarball/${encodeURIComponent(sha)}`, {
       headers: { ...API_HEADERS, Authorization: `Bearer ${token}` },

@@ -29,6 +29,8 @@ const SECRET = 'webhook-secret';
 const BASE = 'b'.repeat(40);
 const HEAD1 = '1'.repeat(40);
 const HEAD2 = '2'.repeat(40);
+const HEAD3 = '3'.repeat(40);
+const HEAD4 = '4'.repeat(40);
 
 const PRIVACY = [
   'import hashlib',
@@ -97,6 +99,8 @@ async function targz(files: Record<string, string>, root: string, extra?: (dir: 
 /** A fake GitHub: REST API, OAuth and archives, recording what LexCompiler sends. */
 async function startFakeGitHub(publicKeyPem: string) {
   const archives = new Map<string, Buffer>();
+  /** Connections to drop before an archive is served, to simulate a flaky network. */
+  const dropTarball = new Map<string, number>();
   const tarballRequests: string[] = [];
   const checkRuns: Array<{ id: number; create: Record<string, unknown>; patches: Array<Record<string, unknown>> }> = [];
   const appKey = await importSPKI(publicKeyPem, 'RS256');
@@ -122,6 +126,12 @@ async function startFakeGitHub(publicKeyPem: string) {
         if (url.pathname.startsWith('/repos/') && auth !== `Bearer inst-${INSTALLATION}`) return json(401, { message: 'Bad credentials' });
         if ((g = m(/^\/repos\/acme\/core-platform\/tarball\/(\w+)$/))) {
           tarballRequests.push(g[1]);
+          const drops = dropTarball.get(g[1]) ?? 0;
+          if (drops > 0) {
+            dropTarball.set(g[1], drops - 1);
+            req.socket.destroy();
+            return;
+          }
           const a = archives.get(g[1]);
           if (!a) return json(404, {});
           res.writeHead(200, { 'Content-Type': 'application/x-gzip', 'Content-Length': a.length });
@@ -153,7 +163,7 @@ async function startFakeGitHub(publicKeyPem: string) {
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return { server, base, archives, tarballRequests, checkRuns };
+  return { server, base, archives, dropTarball, tarballRequests, checkRuns };
 }
 
 let fake: Awaited<ReturnType<typeof startFakeGitHub>>;
@@ -162,6 +172,7 @@ let lex: string;
 let store: ProductStore;
 let queue: JobQueue;
 let workspaceId: string;
+let getApp: () => GitHubApp;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexc-github-'));
 
 beforeAll(async () => {
@@ -170,6 +181,8 @@ beforeAll(async () => {
   fake.archives.set(BASE, await targz({ ...fixture, 'api/privacy.py': PRIVACY }, `acme-core-platform-${BASE.slice(0, 7)}`));
   fake.archives.set(HEAD1, await targz({ ...fixture, 'api/privacy.py': PRIVACY, 'api/loan_applications.py': LOANS }, `acme-core-platform-${HEAD1.slice(0, 7)}`));
   fake.archives.set(HEAD2, await targz({ ...fixture, 'api/privacy.py': PRIVACY, 'api/loan_applications.py': LOANS_FIXED }, `acme-core-platform-${HEAD2.slice(0, 7)}`));
+  fake.archives.set(HEAD3, fake.archives.get(HEAD2)!);
+  fake.archives.set(HEAD4, fake.archives.get(HEAD2)!);
 
   const db = openDatabase(path.join(dataDir, 'lexcompiler.db'));
   store = new ProductStore(db);
@@ -195,9 +208,11 @@ beforeAll(async () => {
       clientSecret: 'client-secret',
       source: 'file',
     },
-    urls
+    urls,
+    fetch,
+    { retryDelaysMs: [0, 0, 0] }
   );
-  const getApp = () => githubApp;
+  getApp = () => githubApp;
   const publicUrl = 'http://lexc.test';
   queue = new JobQueue(db, { scan: createScanJobHandler({ store, getApp, publicUrl }) }, { maxAttempts: 1 });
   const auth: BrowserAuth = {
@@ -363,6 +378,36 @@ describe('GitHub App', () => {
     expect(page.status).toBe(200);
     expect(await page.text()).toContain('api/loan_applications.py:20');
     expect((await browse(url.pathname, 'stranger')).status).toBe(404);
+  });
+
+  it('retries a dropped download inside one attempt', async () => {
+    fake.dropTarball.set(HEAD4, 1);
+    const before = fake.tarballRequests.length;
+    expect(queue.enqueue('scan', { githubRepoId: REPO_ID, installationId: INSTALLATION, kind: 'pull_request', trigger: 'pull_request', headSha: HEAD4, baseSha: BASE, prNumber: 7 })).not.toBeNull();
+    expect(await queue.drain()).toBe(1);
+    expect(fake.tarballRequests.slice(before)).toEqual([HEAD4, HEAD4]);
+    const runs = fake.checkRuns.filter((r) => r.create.head_sha === HEAD4);
+    expect(runs).toHaveLength(1);
+    expect(finalPatch(runs[0])).toMatchObject({ conclusion: 'failure', output: { title: '1 new finding (R-1)' } });
+  });
+
+  it('keeps one check run when a job fails and retries', async () => {
+    // Four drops outlast the client's retries, so attempt 1 fails; attempt 2 gets the archive.
+    fake.dropTarball.set(HEAD3, 4);
+    const retrying = new JobQueue(store.db, { scan: createScanJobHandler({ store, getApp, publicUrl: 'http://lexc.test' }) }, { maxAttempts: 2, backoffMs: () => 0 });
+    retrying.enqueue('scan', { githubRepoId: REPO_ID, installationId: INSTALLATION, kind: 'pull_request', trigger: 'pull_request', headSha: HEAD3, baseSha: BASE, prNumber: 6 });
+    expect(await retrying.drain()).toBe(2);
+    const runs = fake.checkRuns.filter((r) => r.create.head_sha === HEAD3);
+    expect(runs).toHaveLength(1);
+    const [retryNote, reopened, final] = runs[0].patches as Array<{ status?: string; conclusion?: string; output?: { title: string } }>;
+    expect(retryNote.status).toBeUndefined();
+    expect(retryNote.output?.title).toMatch(/^Retrying/);
+    expect(reopened.status).toBe('in_progress');
+    expect(final).toMatchObject({ status: 'completed', conclusion: 'failure', output: { title: '1 new finding (R-1)' } });
+    const scans = store.db.prepare('SELECT status, check_run_id, job_id FROM scans WHERE commit_sha = ? ORDER BY created_at').all(HEAD3) as Array<{ status: string; check_run_id: number; job_id: string }>;
+    expect(scans.map((x) => x.status)).toEqual(['failed', 'completed']);
+    expect(new Set(scans.map((x) => x.check_run_id)).size).toBe(1);
+    expect(new Set(scans.map((x) => x.job_id)).size).toBe(1);
   });
 
   it('maps scan summaries to check conclusions', () => {
