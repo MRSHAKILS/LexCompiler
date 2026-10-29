@@ -9,8 +9,9 @@ import { SignJWT, exportJWK, generateKeyPair } from 'jose';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { INITIAL_REPO_FILES } from './analyzer/repoBaseline.js';
 import { OidcProvider } from './auth/oidc.js';
-import { ProjectStore } from './projects/projectStore.js';
-import { createAccessRouter, createAuthenticator } from './projects/router.js';
+import { openDatabase } from './db/index.js';
+import { createAuthenticator, createProductRouter } from './product/router.js';
+import { databaseSessionStore, ProductStore } from './product/store.js';
 import { createApiGuard, resolveServerSecurityConfig } from './security.js';
 
 /** Minimal OpenID provider: discovery, JWKS, and a token endpoint that enforces PKCE. */
@@ -46,7 +47,7 @@ async function startIdp() {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const issuer = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const token = (sub: string, roles: string[] = [], extra: Record<string, unknown> = {}, key = privateKey) =>
-    new SignJWT({ roles, email: `${sub}@example.test`, ...extra })
+    new SignJWT({ roles, email: `${sub}@example.test`, email_verified: true, ...extra })
       .setProtectedHeader({ alg: 'RS256', kid: 'k1' })
       .setIssuer(issuer)
       .setSubject(sub)
@@ -61,6 +62,7 @@ let idp: Awaited<ReturnType<typeof startIdp>>;
 let api: http.Server;
 let base: string;
 let oidc: OidcProvider;
+let store: ProductStore;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexc-access-'));
 const reposRoot = path.join(dataDir, 'repos');
 
@@ -68,14 +70,18 @@ beforeAll(async () => {
   idp = await startIdp();
   const env = { LEXCOMPILER_OIDC_ISSUER: idp.issuer, LEXCOMPILER_OIDC_CLIENT_ID: 'lexcompiler', LEXCOMPILER_DEFAULT_PROJECT_ROLE: 'viewer' };
   const config = resolveServerSecurityConfig(env);
-  oidc = new OidcProvider({ issuer: idp.issuer, clientId: 'lexcompiler', redirectUri: 'http://127.0.0.1/api/auth/callback', audience: ['lexcompiler'], rolesClaim: 'roles', adminRole: 'lexcompiler-admin', scopes: 'openid', secureCookies: false });
+  store = new ProductStore(openDatabase(path.join(dataDir, 'lexcompiler.db')));
+  oidc = new OidcProvider(
+    { issuer: idp.issuer, clientId: 'lexcompiler', redirectUri: 'http://127.0.0.1/api/auth/callback', audience: ['lexcompiler'], rolesClaim: 'roles', adminRole: 'lexcompiler-admin', scopes: 'openid', secureCookies: false },
+    databaseSessionStore(store)
+  );
   // A project repository: a copy of the fixture's API module.
   fs.mkdirSync(path.join(reposRoot, 'clinic', 'api'), { recursive: true });
   fs.writeFileSync(path.join(reposRoot, 'clinic', 'api', 'intake.py'), INITIAL_REPO_FILES['api/fastapi_intake.py'].content);
   const app = express();
   app.use(express.json());
   app.use('/api', createApiGuard(config, createAuthenticator(oidc, null)));
-  app.use('/api', createAccessRouter(new ProjectStore(dataDir, reposRoot), oidc));
+  app.use('/api', createProductRouter(store, oidc, { reposRoot }));
   app.get('/api/state', (_req, res) => res.json({ ok: true }));
   app.post('/api/clauses/compile', (_req, res) => res.json({ ok: true }));
   api = app.listen(0, '127.0.0.1');
@@ -117,7 +123,7 @@ describe('OIDC sign-in', () => {
     const cookie = oidc.sessionCookie(sessionId).split(';')[0];
     expect(await (await call('/auth/me', undefined, { headers: { cookie } })).json()).toMatchObject({ sub: 'bob' });
     // Cookie sessions need the client header on writes (CSRF).
-    expect((await call('/projects', undefined, { method: 'POST', headers: { cookie }, body: '{}' })).status).toBe(403);
+    expect((await call('/workspaces', undefined, { method: 'POST', headers: { cookie }, body: '{}' })).status).toBe(403);
   });
 
   it('applies the default-project role to single-repository endpoints', async () => {
@@ -128,31 +134,88 @@ describe('OIDC sign-in', () => {
   });
 });
 
-describe('projects', () => {
-  it('isolates projects by membership and enforces roles', async () => {
+describe('workspaces', () => {
+  const json = async (res: Response) => ({ status: res.status, body: await res.json() });
+  it('isolates workspaces and enforces roles', async () => {
     const alice = await idp.token('alice');
     const dave = await idp.token('dave');
-    expect((await call('/projects', alice, { method: 'POST', body: JSON.stringify({ name: 'Escape', repoPath: '../../etc' }) })).status).toBe(400);
-    const created = await (await call('/projects', alice, { method: 'POST', body: JSON.stringify({ name: 'Clinic', repoPath: 'clinic' }) })).json();
-    expect(created.members).toEqual([{ sub: 'alice', role: 'owner' }]);
-    const id = created.id;
+    const nusrat = await idp.token('nusrat');
+    const erin = await idp.token('erin');
+    const created = await json(await call('/workspaces', alice, { method: 'POST', body: JSON.stringify({ name: 'FinHealth AI' }) }));
+    expect(created).toMatchObject({ status: 201, body: { name: 'FinHealth AI', role: 'owner' } });
+    const ws = created.body.id as string;
+    await call('/workspaces', dave, { method: 'POST', body: JSON.stringify({ name: 'Other Co' }) });
 
-    expect((await (await call('/projects', dave)).json()).map((p: { id: string }) => p.id)).not.toContain(id);
-    expect((await call(`/projects/${id}/clauses`, dave)).status).toBe(403);
+    // Another workspace's member sees nothing, and gets 404 rather than 403.
+    expect((await (await call('/workspaces', dave)).json()).map((w: { id: string }) => w.id)).not.toContain(ws);
+    for (const p of ['', '/rules', '/members', '/repos', '/scans']) expect((await call(`/workspaces/${ws}${p}`, dave)).status).toBe(404);
 
-    expect((await call(`/projects/${id}/members`, alice, { method: 'PUT', body: JSON.stringify({ members: [{ sub: 'alice', role: 'owner' }, { sub: 'dave', role: 'viewer' }] }) })).status).toBe(200);
-    expect((await call(`/projects/${id}/clauses`, dave)).status).toBe(200);
-    expect((await call(`/projects/${id}/clauses`, dave, { method: 'POST', body: JSON.stringify({ rawLegalText: 'Processing requires consent.' }) })).status).toBe(403);
-    // Owners cannot remove the last owner.
-    expect((await call(`/projects/${id}/members`, alice, { method: 'PUT', body: JSON.stringify({ members: [{ sub: 'dave', role: 'viewer' }] }) })).status).toBe(400);
+    // Invitations become memberships at first sign-in (token emails are <sub>@example.test).
+    expect((await call(`/workspaces/${ws}/members`, alice, { method: 'POST', body: JSON.stringify({ email: 'nusrat@example.test', role: 'legal' }) })).status).toBe(201);
+    expect((await call(`/workspaces/${ws}/members`, alice, { method: 'POST', body: JSON.stringify({ email: 'erin@example.test', role: 'engineer' }) })).status).toBe(201);
+    expect((await call(`/workspaces/${ws}/members`, erin, { method: 'POST', body: JSON.stringify({ email: 'x@example.test', role: 'owner' }) })).status).toBe(404);
+    // An unverified email claim must not pick up someone else's invitation.
+    const impostor = await idp.token('mallory', [], { email: 'nusrat@example.test', email_verified: false });
+    expect((await (await call('/auth/me', impostor)).json()).workspaces).toEqual([]);
+    expect((await call(`/workspaces/${ws}`, impostor)).status).toBe(404);
+    const me = await (await call('/auth/me', nusrat)).json();
+    expect(me.workspaces).toEqual([expect.objectContaining({ id: ws, role: 'legal' })]);
+    await call('/auth/me', erin);
 
-    const clause = await (await call(`/projects/${id}/clauses`, alice, { method: 'POST', body: JSON.stringify({ rawLegalText: 'Personal data shall be processed only with consent or another lawful basis.', clauseId: 'CONSENT-1' }) })).json();
-    expect(clause.category).toBe('CONSENT_LAWFUL_BASIS');
+    // Only Legal drafts and approves rules; the owner who merges code cannot.
+    const text = 'Personal data shall be processed only with consent or another lawful basis.';
+    expect((await call(`/workspaces/${ws}/rules`, nusrat, { method: 'POST', body: JSON.stringify({ rawLegalText: text, category: 'NOPE' }) })).status).toBe(400);
+    expect((await call(`/workspaces/${ws}/rules`, nusrat, { method: 'POST', body: JSON.stringify({ rawLegalText: text, documentId: 'missing' }) })).status).toBe(404);
+    expect((await call(`/workspaces/${ws}/rules`, alice, { method: 'POST', body: JSON.stringify({ rawLegalText: text }) })).status).toBe(403);
+    const draft = await json(await call(`/workspaces/${ws}/rules`, nusrat, { method: 'POST', body: JSON.stringify({ rawLegalText: text, title: 'Lawful basis' }) }));
+    expect(draft).toMatchObject({ status: 201, body: { rule: { key: 'R-1' }, version: { version: 1, status: 'draft' } } });
+    expect(draft.body.version.clause).toMatchObject({ id: 'R-1', category: 'CONSENT_LAWFUL_BASIS' });
+    const versionId = draft.body.version.id as string;
+    expect((await call(`/workspaces/${ws}/rules-in-effect`, erin).then((r) => r.json())).length).toBe(0);
+    expect((await call(`/workspaces/${ws}/rule-versions/${versionId}/approve`, erin, { method: 'POST', body: '{}' })).status).toBe(403);
+    expect((await call(`/workspaces/${ws}/rule-versions/${versionId}/approve`, alice, { method: 'POST', body: '{}' })).status).toBe(403);
+    expect(await json(await call(`/workspaces/${ws}/rule-versions/${versionId}/approve`, nusrat, { method: 'POST', body: '{}' }))).toMatchObject({ status: 200, body: { status: 'approved' } });
+    expect((await call(`/workspaces/${ws}/rule-versions/${versionId}/approve`, nusrat, { method: 'POST', body: '{}' })).status).toBe(409);
+    expect((await call(`/workspaces/${ws}/rules-in-effect`, erin).then((r) => r.json())).map((r: { ruleKey: string }) => r.ruleKey)).toEqual(['R-1']);
 
-    const scan = await (await call(`/projects/${id}/scan`, dave, { method: 'POST' })).json();
-    expect(scan.filesScanned).toBe(1);
-    expect(scan.clauses.find((c: { clauseId: string }) => c.clauseId === 'CONSENT-1').status).toBe('UNSAT_VIOLATION');
-    const scans = await (await call(`/projects/${id}/scans`, dave)).json();
-    expect(scans[0]).toMatchObject({ scanId: scan.scanId, by: 'dave' });
+    // The last owner can't be demoted.
+    const members = (await (await call(`/workspaces/${ws}/members`, alice)).json()).members as Array<{ userId: string; sub: string }>;
+    const aliceId = members.find((m) => m.sub === 'alice')!.userId;
+    expect((await call(`/workspaces/${ws}/members/${aliceId}`, alice, { method: 'PUT', body: JSON.stringify({ role: 'viewer' }) })).status).toBe(400);
+
+    // Local folders: administrators only, and only inside the repositories root.
+    const root = await idp.token('root', ['lexcompiler-admin']);
+    const clinic = JSON.stringify({ name: 'Clinic', localPath: 'clinic' });
+    expect((await call(`/workspaces/${ws}/repos`, alice, { method: 'POST', body: clinic })).status).toBe(403);
+    expect((await call(`/workspaces/${ws}/repos`, root, { method: 'POST', body: JSON.stringify({ name: 'Escape', localPath: '../../etc' }) })).status).toBe(400);
+    const repo = await json(await call(`/workspaces/${ws}/repos`, root, { method: 'POST', body: clinic }));
+    expect(repo.status).toBe(201);
+
+    // A scan uses the approved rule versions and records them.
+    const scan = await json(await call(`/workspaces/${ws}/repos/${repo.body.id}/scan`, erin, { method: 'POST' }));
+    expect(scan).toMatchObject({ status: 200, body: { status: 'completed', filesScanned: 1, ruleVersions: [expect.objectContaining({ ruleKey: 'R-1', versionId })] } });
+    expect(scan.body.lexcompilerVersion).toMatch(/^(git:|pkg:)/);
+    expect(scan.body.findings.every((f: { ruleKey: string; state: string }) => f.ruleKey === 'R-1' && f.state === 'existing')).toBe(true);
+    expect((await call(`/workspaces/${ws}/scans/${scan.body.id}`, dave)).status).toBe(404);
+    expect((await (await call(`/workspaces/${ws}/scans`, erin)).json())[0]).toMatchObject({ id: scan.body.id, conclusion: scan.body.conclusion });
+  });
+});
+
+describe('sessions', () => {
+  it('survive a restart and store only a hash of the session id', () => {
+    const file = path.join(dataDir, 'sessions.db');
+    const first = new ProductStore(openDatabase(file));
+    const id = first.createSession({ sub: 'arif', globalRole: 'member', via: 'oidc-session' }, 60_000);
+    first.db.close();
+    // A new process opens the same database.
+    const second = new ProductStore(openDatabase(file));
+    expect(second.sessionPrincipal(id)).toMatchObject({ sub: 'arif', via: 'oidc-session' });
+    const stored = second.db.prepare('SELECT id_sha256 FROM sessions').all() as Array<{ id_sha256: string }>;
+    expect(stored.map((r) => r.id_sha256)).not.toContain(id);
+    const expired = second.createSession({ sub: 'old', globalRole: 'member', via: 'oidc-session' }, -1);
+    expect(second.sessionPrincipal(expired)).toBeNull();
+    second.deleteSession(id);
+    expect(second.sessionPrincipal(id)).toBeNull();
+    second.db.close();
   });
 });
