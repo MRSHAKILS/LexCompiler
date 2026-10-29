@@ -2,7 +2,8 @@ import { performance } from 'node:perf_hooks';
 import { handleMcpMessage } from '../mcp/mcpSuite.js';
 import { recordLlmUsage } from '../optimization/neuralCompression.js';
 import type { LegalClause } from '../../shared/types.js';
-import { chat, type ChatMessage, type LlmConfig, type LlmUsage, type ToolSpec } from './llmClient.js';
+import { getAiGateway } from '../ai/gateway.js';
+import type { ChatMessage, LlmConfig, LlmUsage, ToolSpec } from './llmClient.js';
 
 /** Structured result every agent must return. */
 export const AGENT_OUTPUT_SCHEMA = {
@@ -84,7 +85,8 @@ export async function runAgent(params: {
   const toolCalls: AgentRun['toolCalls'] = [];
   let corrected = false;
   for (let turn = 1; turn <= (params.maxTurns ?? 6); turn++) {
-    const res = await chat(params.llm, messages, tools, { jsonSchema: AGENT_OUTPUT_SCHEMA });
+    // Logged in ai_calls like every other model call.
+    const res = await getAiGateway().chatLogged(params.llm, messages, tools, { jsonSchema: AGENT_OUTPUT_SCHEMA }, { workspaceId: null, task: params.agentId });
     for (const k of Object.keys(usage) as Array<keyof LlmUsage>) usage[k] += res.usage[k];
     recordLlmUsage(res.usage);
     if (res.toolCalls.length) {

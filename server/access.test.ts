@@ -197,6 +197,16 @@ describe('workspaces', () => {
     expect(scan.body.lexcompilerVersion).toMatch(/^(git:|pkg:)/);
     expect(scan.body.findings.every((f: { ruleKey: string; state: string }) => f.ruleKey === 'R-1' && f.state === 'existing')).toBe(true);
     expect((await call(`/workspaces/${ws}/scans/${scan.body.id}`, dave)).status).toBe(404);
+    // AI is off until the owner turns it on; only the owner can change it.
+    expect(await json(await call(`/workspaces/${ws}/ai`, erin))).toMatchObject({ status: 200, body: { mode: 'off', tokensUsedToday: 0 } });
+    expect((await call(`/workspaces/${ws}/ai`, nusrat, { method: 'PUT', body: JSON.stringify({ mode: 'cloud' }) })).status).toBe(403);
+    expect((await call(`/workspaces/${ws}/ai`, alice, { method: 'PUT', body: JSON.stringify({ mode: 'everything' }) })).status).toBe(400);
+    expect(await json(await call(`/workspaces/${ws}/ai`, alice, { method: 'PUT', body: JSON.stringify({ mode: 'local', dailyTokenBudget: 5000 }) }))).toMatchObject({
+      status: 200,
+      body: { mode: 'local', dailyTokenBudget: 5000, models: { local: expect.stringContaining('qwen2.5-coder:0.5b') } },
+    });
+    expect((await call(`/workspaces/${ws}/ai/calls`, dave)).status).toBe(404);
+    expect(await (await call(`/workspaces/${ws}/ai/calls`, erin)).json()).toEqual([]);
     expect((await (await call(`/workspaces/${ws}/scans`, erin)).json())[0]).toMatchObject({ id: scan.body.id, conclusion: scan.body.conclusion });
   });
 });

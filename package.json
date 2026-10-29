@@ -20,6 +20,7 @@
     "setup:sandbox": "tsx server/cli/setup-sandbox.ts",
     "build:sql-grammar": "tsx server/cli/build-sql-grammar.ts",
     "eval:rag": "tsx server/cli-eval-rag.ts",
+    "eval:extract": "tsx server/cli-eval-extract.ts",
     "seed:demo": "tsx server/cli/seed-demo.ts"
   },
   "dependencies": {

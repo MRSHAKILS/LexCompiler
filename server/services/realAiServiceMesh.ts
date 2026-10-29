@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { performance } from 'node:perf_hooks';
 import { sha256Hex } from '../util/hash.js';
 import { z3SolverVersion } from '../util/versions.js';
+import { getAiGateway } from '../ai/gateway.js';
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_HOST || 'http://localhost:11434';
 const DATA_DIR = path.resolve(process.env.LEXCOMPILER_DATA_DIR || path.join(process.cwd(), 'data'));
@@ -270,138 +271,58 @@ export async function computeRealNeuralEmbedding(text: string): Promise<{
 }
 
 /**
- * Executes real LLM inference on the local Ollama daemon (`qwen2.5-coder:0.5b` or `dolphin3:latest`)
- * or a configured Cloud Frontier provider (OpenAI / Anthropic / Gemini).
+ * A model call for the demo screens (no workspace), through the AI gateway: logged in ai_calls,
+ * off when LEXCOMPILER_DEMO_AI_MODE=off. `model` names a local Ollama model; "cloud" (or a
+ * cloudProvider) uses the configured LEXCOMPILER_LLM_* model. Keys never come from the request:
+ * `cloudApiKey` is ignored and only kept so older clients don't break.
  */
 export async function runRealLlmInference(params: {
   model?: string;
   prompt: string;
   systemPrompt?: string;
   maxTokens?: number;
+  /** Ignored: keys live only on the server. */
   cloudApiKey?: string;
   cloudProvider?: 'openai' | 'anthropic' | 'gemini';
   timeoutMs?: number;
   jsonSchema?: Record<string, unknown>;
   temperature?: number;
+  /** What the call is for, recorded in ai_calls. */
+  task?: string;
 }): Promise<RealLlmGenerationResult> {
-  const t0 = performance.now();
-  const modelToUse = params.model || 'qwen2.5-coder:0.5b';
-  const maxTokens = params.maxTokens || 140;
-  const temperature = params.temperature ?? 0.2;
-
-  // Cloud mode: prefer the server's own OPENAI_API_KEY so the browser never has to send a key.
-  const serverKey = process.env.OPENAI_API_KEY;
-  if (serverKey && params.cloudProvider === 'openai') params = { ...params, cloudApiKey: serverKey };
-  if (params.cloudApiKey && params.cloudProvider === 'openai') {
-    try {
-      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${params.cloudApiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [
-            ...(params.systemPrompt
-              ? [{ role: 'system', content: params.systemPrompt }]
-              : []),
-            { role: 'user', content: params.prompt },
-          ],
-          max_tokens: maxTokens,
-          temperature,
-          ...(params.jsonSchema ? { response_format: { type: 'json_object' } } : {}),
-        }),
-      });
-      if (resp.ok) {
-        const data = (await resp.json()) as {
-          usage?: { prompt_tokens?: number; completion_tokens?: number };
-          choices?: Array<{ message?: { content?: string } }>;
-        };
-        const dur = Math.round((performance.now() - t0) * 10) / 10;
-        const compTok = data.usage?.completion_tokens ?? 0;
-        return {
-          available: true,
-          model: 'gpt-4o-mini',
-          provider: 'OpenAI Cloud API',
-          role: 'Cloud Frontier Synthesis',
-          promptTokens: data.usage?.prompt_tokens ?? 0,
-          completionTokens: compTok,
-          totalDurationMs: dur,
-          tokensPerSecond: dur > 0 ? Math.round((compTok / (dur / 1000)) * 10) / 10 : 0,
-          responseText: data.choices?.[0]?.message?.content || '',
-          timestamp: new Date().toISOString(),
-        };
-      }
-    } catch {
-      // fall through to local Ollama
-    }
+  const cloud = Boolean(params.cloudProvider) || /^cloud(:|$)/.test(params.model || '');
+  const r = await getAiGateway().complete({
+    workspaceId: null,
+    task: params.task || 'demo',
+    system: params.systemPrompt,
+    prompt: params.prompt,
+    schema: params.jsonSchema,
+    maxTokens: params.maxTokens || 140,
+    timeoutMs: params.timeoutMs ?? 18_000,
+    mode: cloud ? 'cloud' : 'local',
+    localModel: cloud ? undefined : params.model || undefined,
+  });
+  const answered = !r.refused && r.error === undefined;
+  if (!answered) {
+    const reason = r.refused === 'ai_off' ? 'AI is off (LEXCOMPILER_DEMO_AI_MODE=off)' : r.refused === 'no_model' ? 'no cloud model is configured (LEXCOMPILER_LLM_MODEL or OPENAI_API_KEY)' : r.error || r.refused || 'no answer';
+    return unavailableLlmResult(r.model || params.model || (cloud ? 'cloud' : 'qwen2.5-coder:0.5b'), r.latencyMs, reason);
   }
-
-  // Default: Call REAL local Ollama LLM (`qwen2.5-coder:0.5b` or `dolphin3:latest`)
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 18000);
-    const fullPrompt = params.systemPrompt
-      ? `${params.systemPrompt}\n\n${params.prompt}`
-      : params.prompt;
-
-    const resp = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: modelToUse,
-        prompt: fullPrompt,
-        stream: false,
-        ...(params.jsonSchema ? { format: params.jsonSchema } : {}),
-        options: {
-          num_predict: maxTokens,
-          temperature,
-        },
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-
-    if (resp.ok) {
-      const data = (await resp.json()) as {
-        model?: string;
-        response?: string;
-        prompt_eval_count?: number;
-        eval_count?: number;
-        eval_duration?: number;
-        total_duration?: number;
-      };
-      const evalCount = data.eval_count ?? 0;
-      const evalDurationSec = (data.eval_duration ?? 0) / 1e9;
-      const tokPerSec = evalDurationSec > 0 ? Math.round((evalCount / evalDurationSec) * 10) / 10 : 0;
-      const totalMs =
-        data.total_duration != null
-          ? Math.round((data.total_duration / 1e6) * 10) / 10
-          : Math.round(performance.now() - t0);
-
-      return {
-        available: true,
-        model: data.model || modelToUse,
-        provider: 'Ollama Local Sovereign Runtime (:11434)',
-        role: modelToUse.includes('qwen')
-          ? 'Polyglot AST & Code Remediation Specialist'
-          : 'General Counsel Deontic Legal Reasoner',
-        promptTokens: data.prompt_eval_count ?? 0,
-        completionTokens: evalCount,
-        totalDurationMs: totalMs,
-        tokensPerSecond: tokPerSec,
-        responseText: (data.response || '').trim(),
-        timestamp: new Date().toISOString(),
-      };
-    }
-    return unavailableLlmResult(modelToUse, t0, `Ollama returned HTTP ${resp.status}`);
-  } catch (err) {
-    return unavailableLlmResult(modelToUse, t0, err instanceof Error ? err.message : String(err));
-  }
+  const seconds = r.latencyMs / 1000;
+  return {
+    available: true,
+    model: r.model,
+    provider: r.mode === 'local' ? `Ollama (${r.endpointHost})` : r.endpointHost,
+    role: params.task || 'demo',
+    promptTokens: r.usage.promptTokens,
+    completionTokens: r.usage.completionTokens,
+    totalDurationMs: r.latencyMs,
+    tokensPerSecond: seconds > 0 ? Math.round((r.usage.completionTokens / seconds) * 10) / 10 : 0,
+    responseText: r.text.trim(),
+    timestamp: new Date().toISOString(),
+  };
 }
 
-function unavailableLlmResult(model: string, t0: number, reason: string): RealLlmGenerationResult {
+function unavailableLlmResult(model: string, latencyMs: number, reason: string): RealLlmGenerationResult {
   return {
     available: false,
     model,
@@ -409,7 +330,7 @@ function unavailableLlmResult(model: string, t0: number, reason: string): RealLl
     role: 'No LLM response',
     promptTokens: 0,
     completionTokens: 0,
-    totalDurationMs: Math.round(performance.now() - t0),
+    totalDurationMs: latencyMs,
     tokensPerSecond: 0,
     responseText: `(LLM unavailable: ${reason})`,
     timestamp: new Date().toISOString(),

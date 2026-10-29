@@ -1,7 +1,6 @@
 import {
   FRAMEWORK_DISPLAY_NAMES,
   compileLegalProseToFormalPolicy,
-  compileLegalProseToFormalPolicyAsync,
   getInitialClauses,
   inferRuleCategoryFromProse,
 } from '../compiler/legalCompiler.js';
@@ -54,11 +53,13 @@ export function isRuleCategory(value: unknown): value is RuleCategory {
   return typeof value === 'string' && Object.hasOwn(CATEGORY_SET, value);
 }
 
-/** Compiles legal text into a clause (with the LLM fallback when the parser finds no bound). */
+/**
+ * Compiles legal text into a rule draft with the deterministic parser only. A model never fills
+ * in a workspace's rule values here: AI drafting (product guide 5.4) proposes values separately,
+ * and only values the parser confirms are shown to Legal.
+ */
 export async function compileClause(input: ClauseInput): Promise<LegalClause> {
-  const category = input.category ?? inferRuleCategoryFromProse(input.text);
-  const compiled = await compileLegalProseToFormalPolicyAsync(input.text, category, input.key, input.citation || input.key);
-  return assemble(input, category, compiled);
+  return compileClauseSync(input);
 }
 
 /** Deterministic compile, no LLM: for seeding and tests. */

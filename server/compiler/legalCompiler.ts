@@ -108,6 +108,7 @@ export function normalizeFractionalDurations(lower: string): string {
   const word = Object.keys(NUMBER_WORDS).join('|');
   const value = (w: string) => (/^\d/.test(w) ? parseFloat(w) : (NUMBER_WORDS[w] ?? NaN));
   return lower
+    .replace(new RegExp(`\\((\\d+(?:\\.\\d+)?)\\)\\s*(?=(?:${UNIT_WORDS})\\b)`, 'g'), '$1 ')
     .replace(new RegExp(`\\bhalf\\s+an?\\s+(${HALVABLE_UNITS})\\b`, 'g'), '0.5 $1')
     .replace(new RegExp(`\\b(\\d+(?:\\.\\d+)?|${word})\\s+and\\s+a\\s+half\\s+(${HALVABLE_UNITS})\\b`, 'g'), (m, n: string, unit: string) =>
       Number.isFinite(value(n)) ? `${value(n) + 0.5} ${unit}` : m
@@ -159,15 +160,7 @@ export function extractTemporalHoursFromProse(lower: string): {
   evidence: string[];
   reviewNotes: string[];
 } {
-  const text = normalizeFractionalDurations(normalizeNumberWords(normalizeFractionalDurations(lower)));
-  const found: Array<{ hours: number; text: string; label: string }> = [];
-  for (const unit of TEMPORAL_UNITS) {
-    for (const m of text.matchAll(unit.re)) {
-      const n = parseFloat(m[1]);
-      if (!Number.isFinite(n) || n <= 0) continue;
-      found.push({ hours: Math.round(unit.toHours(n) * 1000) / 1000, text: m[0].trim(), label: unit.label });
-    }
-  }
+  const found = findTemporalDurations(lower);
   if (found.length === 0) {
     return { hours: 720, hit: false, evidence: [], reviewNotes: [] };
   }
@@ -181,6 +174,35 @@ export function extractTemporalHoursFromProse(lower: string): {
         ]
       : [];
   return { hours: chosen.hours, hit: true, evidence: [`${chosen.label}:${chosen.text}`], reviewNotes };
+}
+
+/** Every duration in the text, in hours, with the words it came from (input: lower-cased, Bangla digits as ASCII). */
+export function findTemporalDurations(lower: string): Array<{ hours: number; text: string; label: string }> {
+  const text = normalizeFractionalDurations(normalizeNumberWords(normalizeFractionalDurations(lower)));
+  const found: Array<{ hours: number; text: string; label: string }> = [];
+  for (const unit of TEMPORAL_UNITS) {
+    for (const m of text.matchAll(unit.re)) {
+      const n = parseFloat(m[1]);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      found.push({ hours: Math.round(unit.toHours(n) * 1000) / 1000, text: m[0].trim(), label: unit.label });
+    }
+  }
+  return found;
+}
+
+/** Every confidence threshold in the text (0..1): decimals after a confidence word, and percentages. */
+export function findConfidenceThresholds(lower: string): Array<{ value: number; text: string }> {
+  const thresholds: Array<{ value: number; text: string }> = [];
+  for (const m of lower.matchAll(
+    /(?:threshold|confidence|score|below|minimum|at least|আত্মবিশ্বাস|স্কোর|কমপক্ষে)[^0-9]{0,40}?(0\.\d+)/g
+  )) {
+    thresholds.push({ value: parseFloat(m[1]), text: m[1] });
+  }
+  for (const m of normalizeNumberWords(lower).matchAll(/(\d{1,3}(?:\.\d+)?)\s*(?:%|শতাংশ|percent)/g)) {
+    const pct = parseFloat(m[1]);
+    if (pct > 0 && pct <= 100) thresholds.push({ value: pct / 100, text: m[0] });
+  }
+  return thresholds;
 }
 
 /** Display names for clauses created from free text or the regulatory feed. */
@@ -327,16 +349,7 @@ export function extractDeonticBoundsFromProse(
 
   // Confidence: every decimal after a confidence keyword and every percentage; the
   // strictest (highest) gate wins.
-  const thresholds: Array<{ value: number; text: string }> = [];
-  for (const m of lower.matchAll(
-    /(?:threshold|confidence|score|below|minimum|at least|আত্মবিশ্বাস|স্কোর|কমপক্ষে)[^0-9]{0,40}?(0\.\d+)/g
-  )) {
-    thresholds.push({ value: parseFloat(m[1]), text: m[1] });
-  }
-  for (const m of normalizeNumberWords(lower).matchAll(/(\d{1,3}(?:\.\d+)?)\s*(?:%|শতাংশ|percent)/g)) {
-    const pct = parseFloat(m[1]);
-    if (pct > 0 && pct <= 100) thresholds.push({ value: pct / 100, text: m[0] });
-  }
+  const thresholds = findConfidenceThresholds(lower);
   let minAiConfidenceThreshold = 0.7;
   const confidenceHit = thresholds.length > 0;
   if (confidenceHit) {
@@ -497,6 +510,7 @@ export async function extractDeonticBoundsWithLlmFallback(
       maxTokens: 220,
       temperature: 0,
       timeoutMs: 8000,
+      task: 'compiler-fallback',
     });
     if (!llm.available) {
       return {

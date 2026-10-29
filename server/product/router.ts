@@ -3,6 +3,7 @@ import path from 'node:path';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { readRepositoryFilesAt } from '../analyzer/repoBaseline.js';
+import { AiGateway, localModelConfig, modelForTask } from '../ai/gateway.js';
 import { OidcProvider, type Principal } from '../auth/oidc.js';
 import { tokensMatch, type Authenticator } from '../security.js';
 import { lexcompilerVersion } from '../util/versions.js';
@@ -40,12 +41,15 @@ const handle = (fn: Handler) => async (req: Request, res: Response) => {
 export interface ProductRouterOptions {
   /** Local repositories must live inside this directory. */
   reposRoot: string;
+  /** Model calls; defaults to a gateway on the store's database. */
+  ai?: AiGateway;
 }
 
 /** Sign-in endpoints and the workspace API (members, repositories, rules, scans). */
 export function createProductRouter(store: ProductStore, oidc: OidcProvider | null, options: ProductRouterOptions) {
   const r = express.Router();
   const reposRoot = path.resolve(options.reposRoot);
+  const ai = options.ai ?? new AiGateway(store.db);
 
   /** The signed-in person as a user row, created on first use. */
   const userOf = (res: Response): User => {
@@ -156,6 +160,33 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
       res.json({ removed: req.params.userId });
     })
   );
+
+  // ---------------------------------------------------------------- AI setting (off by default)
+
+  const aiStatus = (workspaceId: string) => {
+    const settings = ai.settings(workspaceId);
+    const cloud = modelForTask('drafting', 'cloud');
+    return {
+      ...settings,
+      tokensUsedToday: ai.tokensUsedToday(workspaceId),
+      // The models each mode would use, so the owner sees where contract text goes.
+      models: { local: localModelConfig().label, cloud: cloud ? cloud.label : null },
+    };
+  };
+  r.get('/workspaces/:workspaceId/ai', need('view'), (req, res) => res.json(aiStatus(wid(req))));
+  r.put(
+    '/workspaces/:workspaceId/ai',
+    need('manageWorkspace'),
+    handle((req, res) => {
+      try {
+        ai.setSettings(wid(req), { mode: req.body?.mode, dailyTokenBudget: req.body?.dailyTokenBudget }, userOf(res).id);
+      } catch (err) {
+        throw new StoreError((err as Error).message);
+      }
+      res.json(aiStatus(wid(req)));
+    })
+  );
+  r.get('/workspaces/:workspaceId/ai/calls', need('view'), (req, res) => res.json(ai.listCalls(wid(req), Number(req.query.limit) || 50)));
 
   // ---------------------------------------------------------------- repositories and counterparties
 
