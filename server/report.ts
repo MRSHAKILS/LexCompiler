@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { analyzeFullRepositoryAsync } from './analyzer/astAnalyzer.js';
 import { readTargetRepoFiles } from './analyzer/repoBaseline.js';
 import { runTreeSitterQueries } from './analyzer/treeSitter.js';
@@ -40,7 +41,7 @@ export async function buildComplianceReport(
     sha256Hex(enrichedFiles.map((f) => `${f.path}\n${f.content}`).join('\n'))
   );
   const commitHash = `${identity.commitHash}${identity.dirty ? '-dirty' : ''}`;
-  const scanId = `SCAN-${Date.now().toString().slice(-6)}`;
+  const scanId = `SCAN-${crypto.randomUUID()}`;
 
   if (options.recordToLedger) {
     recordScanToPersistentSqlite({

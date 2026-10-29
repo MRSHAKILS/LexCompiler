@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { runAgent } from './agentRuntime.js';
 import { llmConfigFor } from './llmClient.js';
 import { performance } from 'node:perf_hooks';
@@ -226,7 +227,7 @@ export async function buildMultiAgentExecutionReport(
   const totalLatencyMs = Math.round((performance.now() - t0) * 10) / 10;
 
   return {
-    runId: `AGENT-RUN-${Date.now().toString().slice(-5)}`,
+    runId: `AGENT-RUN-${crypto.randomUUID()}`,
     triggeredAt: new Date().toISOString(),
     orchestrationPattern:
       'LangGraph Supervisor State-Graph + CrewAI Role Delegation + DSPy Compiled Signatures + Pre-PR Z3 Formal Verification Gate',

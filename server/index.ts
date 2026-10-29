@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { externalClient, probeExternalMcpServers } from './mcp/externalClients.js';
 import { getAttestationSigner, revocations, revoke, trustedKeys } from './enterprise/attestationSigner.js';
 import { verifyTimestamp } from './enterprise/timestamp.js';
@@ -544,7 +545,7 @@ app.post('/api/clauses/compile', async (req, res) => {
         compiled: compiledResult.compiled,
       };
     } else {
-      const newId = clauseId || `CLAUSE-CUSTOM-${Date.now().toString().slice(-4)}`;
+      const newId = clauseId || `CLAUSE-CUSTOM-${crypto.randomUUID().slice(0, 8)}`;
       const newCat: RuleCategory = category || inferRuleCategoryFromProse(rawLegalText);
       const newCit = citation || 'Custom DPA Amendment §4.2';
       const knownFramework =
