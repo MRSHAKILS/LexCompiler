@@ -28,10 +28,10 @@ describe('retrieval evaluation', () => {
     for (const q of loadEvalDataset()) for (const id of Object.keys(q.relevant)) expect(all).toContain(id);
     const report = await evaluateRag(async (q, k) => executeHybridRagQuery(q, clauses, a.sqlTables, a.astFindings, v.proofs, k));
     expect(report.questions).toBe(16);
-    // Measured on the fixture: MRR 0.656, nDCG@5 0.542, hit rate 0.938.
-    expect(report.aggregate.mrr).toBeGreaterThanOrEqual(0.6);
-    expect(report.aggregate.ndcgAtK).toBeGreaterThanOrEqual(0.5);
-    expect(report.aggregate.hitRate).toBeGreaterThanOrEqual(0.9);
+    // Measured on the fixture: MRR 0.88, nDCG@5 0.795, hit rate 1.0 (0.786, 0.64, 0.938 before stemmed BM25).
+    expect(report.aggregate.mrr).toBeGreaterThanOrEqual(0.85);
+    expect(report.aggregate.ndcgAtK).toBeGreaterThanOrEqual(0.75);
+    expect(report.aggregate.hitRate).toBe(1);
   });
 
   it('Bangla questions over the Bangla clause set stay above the regression floor', async () => {
@@ -43,9 +43,9 @@ describe('retrieval evaluation', () => {
     for (const q of dataset) for (const id of Object.keys(q.relevant)) expect(all).toContain(id);
     const report = await evaluateRag(async (q, k) => executeHybridRagQuery(q, clauses, a.sqlTables, a.astFindings, v.proofs, k), { dataset });
     expect(report.questions).toBe(10);
-    // Measured: MRR 0.95, nDCG@5 0.597, hit rate 1.0.
-    expect(report.aggregate.mrr).toBeGreaterThanOrEqual(0.85);
-    expect(report.aggregate.ndcgAtK).toBeGreaterThanOrEqual(0.55);
+    // Measured: MRR 0.95, nDCG@5 0.755, hit rate 1.0 (nDCG@5 0.597 before stemmed BM25).
+    expect(report.aggregate.mrr).toBeGreaterThanOrEqual(0.9);
+    expect(report.aggregate.ndcgAtK).toBeGreaterThanOrEqual(0.7);
     expect(report.aggregate.hitRate).toBe(1);
   });
 
