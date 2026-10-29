@@ -14,6 +14,8 @@ export interface WebhookDeps {
   store: ProductStore;
   getApp: () => GitHubApp | null;
   queue: JobQueue;
+  /** Deliveries arrive through a relay that re-stringifies JSON (smee.io); see verifyWebhookSignature. */
+  relayReencoded?: boolean;
 }
 
 /**
@@ -28,7 +30,7 @@ export function createWebhookHandler(deps: WebhookDeps) {
       return;
     }
     const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-    if (!verifyWebhookSignature(app.credentials.webhookSecret, raw, req.header('x-hub-signature-256'))) {
+    if (!verifyWebhookSignature(app.credentials.webhookSecret, raw, req.header('x-hub-signature-256'), { relayReencoded: deps.relayReencoded })) {
       res.status(401).json({ error: 'Invalid webhook signature.' });
       return;
     }

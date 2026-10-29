@@ -248,6 +248,19 @@ describe('GitHub App', () => {
     expect(verifyWebhookSignature('s', body, 'sha256=00')).toBe(false);
   });
 
+  it('accepts a body a relay re-stringified only when the signature still matches', () => {
+    // GitHub escapes <, > and & in its JSON; smee forwards JSON.stringify(JSON.parse(body)).
+    const fromGitHub = Buffer.from('{"title":"Retention \\u0026 keys \\u003cR-1\\u003e","n":1}');
+    const signature = `sha256=${crypto.createHmac('sha256', 's').update(fromGitHub).digest('hex')}`;
+    const relayed = Buffer.from(JSON.stringify(JSON.parse(fromGitHub.toString())));
+    expect(relayed.toString()).toBe('{"title":"Retention & keys <R-1>","n":1}');
+    expect(verifyWebhookSignature('s', relayed, signature)).toBe(false);
+    expect(verifyWebhookSignature('s', relayed, signature, { relayReencoded: true })).toBe(true);
+    expect(verifyWebhookSignature('other', relayed, signature, { relayReencoded: true })).toBe(false);
+    const tampered = Buffer.from('{"title":"Retention & keys <R-9>","n":1}');
+    expect(verifyWebhookSignature('s', tampered, signature, { relayReencoded: true })).toBe(false);
+  });
+
   it('reads only source files from a repository archive, in memory', async () => {
     const archive = await targz({ 'api/app.py': 'x = 1\n', 'node_modules/pkg/evil.py': 'x = 2\n', '.github/hidden.py': 'x = 3\n', 'types.d.ts': 'export {}\n', 'README.md': '# hi' }, 'acme-repo-abc1234', (root) => {
       fs.symlinkSync('/etc/passwd', path.join(root, 'api', 'link.py'));

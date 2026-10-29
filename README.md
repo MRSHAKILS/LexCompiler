@@ -229,8 +229,8 @@ LexCompiler runs as a GitHub App. On every pull request it adds a check run name
    ```bash
    npx smee-client --url https://smee.io/<channel> --target http://127.0.0.1:3001/api/github/webhooks
    ```
-   Smee re-encodes each JSON body before forwarding it, so a delivery whose body contains `<`, `>` or `&` (a pull request description with an HTML comment, for example) fails the signature check with `401`. LexCompiler never skips that check. If it happens, use a tunnel that forwards the raw bytes, such as `cloudflared tunnel --url http://localhost:3001`.
-2. Start LexCompiler with `LEXCOMPILER_GITHUB_WEBHOOK_URL=https://smee.io/<channel>` and `LEXCOMPILER_PUBLIC_URL=http://localhost:3001`.
+   Smee parses and re-stringifies each body, which changes GitHub's escaping of `<`, `>` and `&`. Set `LEXCOMPILER_GITHUB_WEBHOOK_RELAY=smee` and LexCompiler restores that escaping before checking the signature. The HMAC still has to match, so nothing GitHub didn't sign gets through. A tunnel that forwards the raw bytes, such as `cloudflared tunnel --url http://localhost:3001`, needs no setting.
+2. Start LexCompiler with `LEXCOMPILER_GITHUB_WEBHOOK_URL=https://smee.io/<channel>`, `LEXCOMPILER_GITHUB_WEBHOOK_RELAY=smee` and `LEXCOMPILER_PUBLIC_URL=http://localhost:3001`.
 3. As an administrator, open `http://localhost:3001/github/register` and click **Create the GitHub App on GitHub**.
    - GitHub creates a private app from a manifest. It requests Checks: write, Pull requests: write, Contents: read and Metadata: read, and subscribes to pull request, push, check run and check suite events.
    - The app id, private key, webhook secret and OAuth client credentials come back once and are saved to `data/github-app.json` with mode 0600.
@@ -329,6 +329,7 @@ The workflow uploads the findings to GitHub code scanning and fails the job when
 | `LEXCOMPILER_PUBLIC_URL` | `http://localhost:<PORT>` | Address people use to reach LexCompiler; used in links from GitHub check runs and as the GitHub App's callback URLs |
 | `LEXCOMPILER_GITHUB_WEBHOOK_URL` | `<public URL>/api/github/webhooks` | Webhook URL put in the GitHub App manifest (a relay such as smee.io when testing locally) |
 | `LEXCOMPILER_GITHUB_APP_ID`, `LEXCOMPILER_GITHUB_APP_PRIVATE_KEY_PATH` (or `LEXCOMPILER_GITHUB_APP_PRIVATE_KEY`), `LEXCOMPILER_GITHUB_WEBHOOK_SECRET`, `LEXCOMPILER_GITHUB_APP_SLUG`, `LEXCOMPILER_GITHUB_CLIENT_ID`, `LEXCOMPILER_GITHUB_CLIENT_SECRET` | unset | GitHub App credentials from the environment; otherwise `data/github-app.json` written by `/github/register` |
+| `LEXCOMPILER_GITHUB_WEBHOOK_RELAY` | unset | `smee` when deliveries come through smee.io, which re-stringifies JSON (signatures are still checked) |
 | `LEXCOMPILER_GITHUB_APP_FILE` | `data/github-app.json` | Where the manifest flow saves the app's credentials |
 | `GITHUB_API_URL`, `LEXCOMPILER_GITHUB_WEB_URL` | `https://api.github.com`, `https://github.com` | GitHub endpoints (GitHub Enterprise Server) |
 | `LEXCOMPILER_GITHUB_TOKEN`, `LEXCOMPILER_GITHUB_REPO`, `LEXCOMPILER_GITHUB_BASE`, `LEXCOMPILER_GITHUB_PATH_PREFIX` | unset | GitHub pull-request integration |

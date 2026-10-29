@@ -129,7 +129,7 @@ const jobQueue = new JobQueue(
 );
 // The webhook needs the raw body to check GitHub's signature, so it is registered before
 // express.json() and the /api guard (GitHub sends no browser headers).
-app.post('/api/github/webhooks', express.raw({ type: () => true, limit: '25mb' }), createWebhookHandler({ store: productStore, getApp: getGitHubApp, queue: jobQueue }));
+app.post('/api/github/webhooks', express.raw({ type: () => true, limit: '25mb' }), createWebhookHandler({ store: productStore, getApp: getGitHubApp, queue: jobQueue, relayReencoded: process.env.LEXCOMPILER_GITHUB_WEBHOOK_RELAY === 'smee' }));
 app.use(express.json({ limit: '5mb' }));
 const oidcProvider = oidcConfig ? new OidcProvider(oidcConfig, databaseSessionStore(productStore)) : null;
 // Expired sessions are also dropped when read; this keeps the table small.

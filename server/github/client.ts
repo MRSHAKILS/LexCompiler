@@ -204,10 +204,30 @@ export async function convertAppManifest(
   };
 }
 
-/** Checks GitHub's `X-Hub-Signature-256` header (HMAC-SHA256 of the raw body) in constant time. */
-export function verifyWebhookSignature(secret: string, rawBody: Buffer, header: string | undefined): boolean {
-  if (!header || !header.startsWith('sha256=')) return false;
-  const expected = Buffer.from(crypto.createHmac('sha256', secret).update(rawBody).digest('hex'), 'utf8');
+function signatureMatches(secret: string, body: Buffer, header: string): boolean {
+  const expected = Buffer.from(crypto.createHmac('sha256', secret).update(body).digest('hex'), 'utf8');
   const provided = Buffer.from(header.slice('sha256='.length), 'utf8');
   return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+}
+
+/**
+ * GitHub serialises webhook JSON with <, >, &, U+2028 and U+2029 escaped as \uXXXX. Relays that
+ * parse and re-stringify the body (smee.io) write those characters literally. This restores
+ * GitHub's bytes; it changes no JSON value, because these characters only occur inside strings.
+ */
+export function restoreGitHubJsonEscapes(json: string): string {
+  return json.replace(/[<>&\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+/**
+ * Checks GitHub's `X-Hub-Signature-256` header (HMAC-SHA256 of the body) in constant time.
+ * With `relayReencoded`, a body a relay re-stringified is also checked after restoring GitHub's
+ * escaping. The HMAC still has to match, so this accepts nothing GitHub didn't sign.
+ */
+export function verifyWebhookSignature(secret: string, rawBody: Buffer, header: string | undefined, options: { relayReencoded?: boolean } = {}): boolean {
+  if (!header || !header.startsWith('sha256=')) return false;
+  if (signatureMatches(secret, rawBody, header)) return true;
+  if (!options.relayReencoded) return false;
+  const restored = Buffer.from(restoreGitHubJsonEscapes(rawBody.toString('utf8')), 'utf8');
+  return !restored.equals(rawBody) && signatureMatches(secret, restored, header);
 }
