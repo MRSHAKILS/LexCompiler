@@ -1,4 +1,5 @@
 import { fetchLiveRegulatoryFeed } from '../compiler/legalCompiler.js';
+import { backupDataDir } from '../db/backup.js';
 import type { LiveRegulatoryFeedItem } from '../../shared/types.js';
 import { runNightlyScans, type NightlyDeps } from './repoScan.js';
 import type { ProductStore } from './store.js';
@@ -33,8 +34,16 @@ const DAY = 24 * 60 * 60 * 1000;
  * Runs each daily job when it is due (once a day, kept across restarts in scheduler_runs).
  * Call it on start-up and then hourly.
  */
-export async function runDueJobs(deps: NightlyDeps & { fetchFeed?: () => Promise<LiveRegulatoryFeedItem[]> }, now: Date = new Date()): Promise<string[]> {
+export async function runDueJobs(
+  deps: NightlyDeps & { fetchFeed?: () => Promise<LiveRegulatoryFeedItem[]>; backup?: { dataDir: string; backupDir: string; keep?: number } },
+  now: Date = new Date()
+): Promise<string[]> {
   const done: string[] = [];
+  // The backup runs first, so a failing scan can't skip it (Phase 7: back up data/ daily).
+  if (deps.backup && deps.store.claimScheduledRun('backup', DAY, now)) {
+    const b = backupDataDir(deps.store.db, deps.backup.dataDir, deps.backup.backupDir, { now, keep: deps.backup.keep });
+    done.push(`backup: ${b.files.length} files in ${b.folder}`);
+  }
   if (deps.store.claimScheduledRun('regulatory-feed', DAY, now)) {
     done.push(`feed: ${await refreshRegulatoryFeed(deps.store, deps.fetchFeed)} new items`);
   }

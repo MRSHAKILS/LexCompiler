@@ -28,6 +28,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | MRSHAKILS/LexCompiler #8 | Phase 4a: the workspace MCP endpoint `POST /mcp` (personal access tokens, six tools, 2026-07-28 and 2025-06-18), the `/settings` page |
 | MRSHAKILS/LexCompiler #9 | Phase 5: the signed evidence log, share links for auditors (`/share/<token>`), the evidence pack with `verify.mjs`, public keys under `/.well-known` |
 | MRSHAKILS/LexCompiler #10 | Phase 6: rules proven only on their scope's paths, future effective dates ("Coming up", PR warnings), the regulation feed with "Draft rule change", daily jobs |
+| MRSHAKILS/LexCompiler #11 | Phase 7 preparation: proxy trust, HTTPS only, rate limits, daily backups, `deploy/` (Caddy + compose), `docs/DEPLOY.md` |
 
 | Phase | Status |
 |---|---|
@@ -38,7 +39,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | 4a MCP for coding assistants | Done; tested in-process and live over HTTP (guide 5.9 results). Claude Code connects but its CLI here isn't signed in; Cursor and VS Code not tried; OAuth not started |
 | 5 Evidence and auditor | Done and tested (the pack verifies; the three tamper cases are caught). Not done: RFC 3161 timestamps of each day's last header, per-workspace keys |
 | 6 Contract and regulation changes | Done and tested (scenes 5 and 6 through the API on the fixture, and the PR warning against a fake GitHub). The live GitHub run needs the App credentials. "Open fix PR" (scene 5 step 4) is Phase 4's fix PRs, not started |
-| 7 Online for outside testers | Not started |
+| 7 Online for outside testers | Code and configuration ready (#11, `docs/DEPLOY.md`); not deployed. Needs a tunnel or a VPS with a domain, and the GitHub App credentials. The Docker image wasn't rebuilt here (Docker Desktop was off) |
 
 ## What works today
 
@@ -156,7 +157,11 @@ Dates are from the schedule in the product guide, section 7.
    - Optional: RFC 3161 timestamps of each day's last header (`timestamp.ts`), and one key per workspace instead of the server's key.
    - `verify.mjs` can't see records removed from before the first or after the last header of a period. Cross-check the numbers with the check runs on GitHub.
 7. **Phase 6.** Done (#10). Per-tenant settings inside code (a TTL per tenant) are a later analyzer feature; until then the fix is the strictest value.
-8. **Phase 7** (Dec 14–19), then a freeze from Dec 20 to 25.
+8. **Phase 7.** Ready to deploy (#11). Still to do, with the owner:
+   - Pick the tunnel or a VPS and a domain; follow `docs/DEPLOY.md`, including its checklist.
+   - Build the Docker image once (`docker compose -f deploy/docker-compose.prod.yml … up -d --build`) and run the checklist against it.
+   - Point the GitHub App's webhook and the Keycloak redirect at the public URL.
+   Then the freeze from Dec 20 to 25.
 
 ## Open questions for the owner
 

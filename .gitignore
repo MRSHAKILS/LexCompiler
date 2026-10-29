@@ -14,3 +14,5 @@ repos/
 mcp-servers.json
 __pycache__/
 *.py[cod]
+# Production settings hold secrets (docs/DEPLOY.md)
+.env.production
