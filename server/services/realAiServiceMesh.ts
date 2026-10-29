@@ -3,6 +3,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { performance } from 'node:perf_hooks';
 import { sha256Hex } from '../util/hash.js';
+import { z3SolverVersion } from '../util/versions.js';
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_HOST || 'http://localhost:11434';
 const DATA_DIR = path.resolve(process.env.LEXCOMPILER_DATA_DIR || path.join(process.cwd(), 'data'));
@@ -460,11 +461,11 @@ export async function getLiveServiceMeshTelemetry(): Promise<{
       serviceId: 'svc-z3-prover',
       name: 'Microsoft Z3 SMT Theorem Prover',
       category: 'THEOREM_PROVER',
-      endpointOrPath: 'z3-solver v4.13.4 (Native/WASM)',
+      endpointOrPath: `z3-solver ${z3SolverVersion()} (WebAssembly)`,
       status: 'ONLINE',
       latencyMs: 3.4,
       telemetrySummary: 'QF_LIA & QF_UF Formal Theories · Unsat Core Extraction Ready',
-      details: { logic: ['QF_LIA', 'QF_UF'], version: '4.13.4' },
+      details: { logic: ['QF_LIA', 'QF_UF'], version: z3SolverVersion() },
     },
     {
       serviceId: 'svc-sqlite-vector-db',

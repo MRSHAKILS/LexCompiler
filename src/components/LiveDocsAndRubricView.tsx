@@ -18,7 +18,7 @@ const ARCHITECTURE_PILLARS = [
     category: 'Stage 1 & 2 · Formal Compilation',
     title: 'Modal Deontic Logic to SMT-LIB2 & OPA Rego Synthesis',
     badge: 'QF_LIA / QF_UF',
-    tags: ['Deontic O(φ) / F(φ)', 'Microsoft Z3 v4.13.4', 'OPA Rego Policy-as-Code', 'English + বাংলা'],
+    tags: ['Deontic O(φ) / F(φ)', 'Microsoft Z3', 'OPA Rego Policy-as-Code', 'English + বাংলা'],
     specification:
       'Compiles unstructured statutory and contractual prose (GDPR Art. 17/32, HIPAA §164.312(b), EU AI Act Art. 14, Bangladesh Bank ICT Security Guideline v4.0) into First-Order Predicate Logic, named SMT-LIB2 assertions for minimal Unsat Core extraction, and Open Policy Agent deny[msg] rules.',
   },

@@ -2,7 +2,7 @@
 
 **Neuro-Symbolic Law-to-AST Compiler, SMT/Z3 Formal Verifier, and Autonomous Pull Request Enforcer**
 
-`Domain: JusticeSphere AI / ComplianceOS / GovernanceIQ` | `Engine: Microsoft Z3 v4.13.4 + OPA Rego + Polyglot AST` | `Protocol: MCP JSON-RPC 2.0 (2025-03-26)`
+`Domain: JusticeSphere AI / ComplianceOS / GovernanceIQ` | `Engine: Microsoft Z3 (z3-solver) + OPA Rego + Polyglot AST` | `Protocol: MCP JSON-RPC 2.0 (2025-03-26)`
 
 ---
 
@@ -46,7 +46,7 @@ flowchart TB
     end
 
     subgraph L4["4. Formal Verification, Multi-LLM & Hybrid RAG Mesh"]
-        Z3["Microsoft Z3 Theorem Prover v4.13.4 (check-sat, get-unsat-core, get-model)"]
+        Z3["Microsoft Z3 Theorem Prover via z3-solver (check-sat, get-unsat-core, get-model)"]
         RAG["Contextual + Graph RAG (all-minilm 384-d Neural Embeddings + BM25 RRF + Neo4j Cypher)"]
         LLM["Local Ollama Multi-LLM Daemon (:11434) (qwen2.5-coder:0.5b + dolphin3:latest 8B)"]
         LEDGER["Persistent SQLite3 Compliance & Vector Ledger (lexcompiler_enterprise.db)"]

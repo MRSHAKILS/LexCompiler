@@ -18,6 +18,7 @@ import type {
   SQLTableSchema,
   TargetRepoFile,
 } from '../../shared/types.js';
+import { z3SolverVersion } from '../util/versions.js';
 
 interface AgentStepSpec {
   agentId: string;
@@ -116,7 +117,7 @@ export async function buildMultiAgentExecutionReport(
       agentId: 'agent-z3-formal-critic',
       agentName: 'Neuro-Symbolic Z3 Theorem Prover & Critic Agent',
       frameworkUsed: 'Pydantic-AI',
-      llmModel: 'DeepSeek-R1 (Formal Reasoning) + Microsoft Z3 v4.13.4',
+      llmModel: `DeepSeek-R1 (Formal Reasoning) + Microsoft Z3 ${z3SolverVersion()}`,
       runtime: 'Cloud-Frontier',
       mcpServerCalled: 'lex-z3-prover-mcp',
       mcpToolCalled: 'prove_repository_compliance_z3',

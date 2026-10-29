@@ -7,6 +7,7 @@ import { synthesizeRemediationPullRequest } from './remediation/prSynthesizer.js
 import { resolveRepositoryIdentity } from './sandbox/realWorldSandbox.js';
 import { recordScanToPersistentSqlite } from './services/realAiServiceMesh.js';
 import type { FullComplianceScanReport, LegalClause } from '../shared/types.js';
+import { z3EngineLabel } from './util/versions.js';
 
 /**
  * Scans the target repository against `clauses`: AST analysis, Z3 proofs, the remediation PR,
@@ -67,7 +68,7 @@ export async function buildComplianceReport(
     repositoryName: identity.name,
     repositoryBranch: identity.branch,
     commitHash,
-    z3EngineVersion: 'Microsoft Z3 v4.13.4 (WASM/Native SMT-LIB2)',
+    z3EngineVersion: z3EngineLabel(),
     activeAmendmentLabel,
     totalClausesEvaluated: clauses.length,
     compliantClausesCount,
