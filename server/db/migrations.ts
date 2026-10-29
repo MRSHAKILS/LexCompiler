@@ -341,4 +341,42 @@ CREATE INDEX exceptions_workspace_status ON exceptions(workspace_id, status);
 CREATE INDEX scans_check_run ON scans(check_run_id);
 `,
   },
+  {
+    id: 6,
+    name: 'personal access tokens and the MCP call log',
+    sql: `
+-- Personal access tokens for the MCP endpoint. One user, one workspace, the user's role.
+-- Only the token's SHA-256 is stored.
+CREATE TABLE api_tokens (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  token_sha256 TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT
+);
+CREATE INDEX api_tokens_owner ON api_tokens(workspace_id, user_id);
+
+-- One row per MCP request. File paths and fingerprints only; sent code is never stored.
+CREATE TABLE mcp_calls (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  token_id TEXT REFERENCES api_tokens(id) ON DELETE SET NULL,
+  method TEXT NOT NULL,
+  tool TEXT,
+  repo TEXT,
+  outcome TEXT NOT NULL CHECK (outcome IN ('ok','tool_error','error','denied','rate_limited')),
+  duration_ms INTEGER NOT NULL,
+  detail_json TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX mcp_calls_workspace_time ON mcp_calls(workspace_id, created_at);
+
+-- The end date an assistant (or engineer) asked for; Legal sets expires_at when approving.
+ALTER TABLE exceptions ADD COLUMN requested_until TEXT;
+`,
+  },
 ];

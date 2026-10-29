@@ -1368,6 +1368,16 @@ With today's demo server, ask for `prove_repository_compliance_z3` instead of `c
 
 After Phase 4a, repeat with the HTTP configuration and ask "Check my changes before I commit". `check_changes` should report R-1 at line 20 as new, as the check run on PR #1 does. Then ask for an exception: it should appear in Nusrat's inbox, and the assistant should have no way to approve it.
 
+**HTTP results (Phase 4a, Windows 11, October 30).** A scratch server on port 3012 had the FinHealth workspace with the built-in rules approved and `main` of finhealth-core-platform as its repository. The token was Tanvir's (engineer).
+
+| Client | Version | Connected | Tool called | Named line 20 | Notes |
+|---|---|---|---|---|---|
+| Claude Code | 2.1.201 | Yes: `initialize`, `tools/list` and `prompts/list` succeeded with `${LEXCOMPILER_TOKEN}` from `.mcp.json` | Not yet | Not yet | The CLI on this machine isn't signed in, so `claude -p` stopped before the model ran. Sign in and run the prompt again |
+| Cursor | installed | Not tried | | | GUI; use the configuration from `/settings` |
+| VS Code with Copilot | installed | Not tried | | | GUI |
+| Kiro, Codex, Antigravity, Claude Desktop | not installed | | | | |
+| Plain HTTP script (2026-07-28) | — | Yes | `check_changes`, `suggest_fix`, `request_exception` | Yes | 1 new finding (R-1, `api/loan_applications.py:20`), 6 existing, as on PR #1; `check_changes` took 1.5 s. `suggest_fix` answered "no verified fix" for R-1. The request reached Nusrat's inbox as "from a coding assistant"; `approve_exception` doesn't exist. The call log held paths and fingerprints, no code |
+
 ### 5.10 Showing the AI to judges
 
 Once the scenes in section 6 work, this path through the AI features takes about 6 minutes:

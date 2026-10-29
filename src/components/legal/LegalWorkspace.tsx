@@ -87,7 +87,8 @@ interface ExceptionRequest {
   message: string | null;
   reason: string;
   requestedBy: string;
-  requestedFrom: 'github' | 'dashboard';
+  requestedFrom: 'github' | 'dashboard' | 'assistant';
+  requestedUntil?: string | null;
   prNumber: number | null;
 }
 interface Inbox {
@@ -98,9 +99,9 @@ interface Inbox {
 /** One exception request: Legal approves with a reason and an end date, or rejects. */
 function ExceptionRequestCard({ request, busy, onDecide }: { request: ExceptionRequest; busy: boolean; onDecide: (approve: boolean, note: string, expiresAt: string) => void }) {
   const [note, setNote] = useState('');
-  const [until, setUntil] = useState('');
+  const [until, setUntil] = useState(request.requestedUntil ? request.requestedUntil.slice(0, 10) : '');
   const where = request.filePath ? `${request.filePath}:${request.startLine ?? 1}` : request.pathGlob ?? '';
-  const by = request.requestedBy.startsWith('github:') ? `@${request.requestedBy.slice(7)} on GitHub` : 'the dashboard';
+  const by = request.requestedBy.startsWith('github:') ? `@${request.requestedBy.slice(7)} on GitHub` : request.requestedFrom === 'assistant' ? 'a coding assistant' : 'the dashboard';
   return (
     <li className="rounded border border-zinc-800 p-2 text-sm space-y-2" aria-label={`Exception request for ${request.ruleKey} at ${where}`}>
       <p>

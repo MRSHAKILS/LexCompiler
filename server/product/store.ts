@@ -164,6 +164,8 @@ export interface DocumentSummary {
 }
 
 export type ExceptionStatus = 'requested' | 'approved' | 'rejected' | 'expired' | 'revoked';
+/** Where a request came from: the check run's button, the dashboard, or a coding assistant over MCP. */
+export type ExceptionSource = 'github' | 'dashboard' | 'assistant';
 /** A request to waive findings of one rule: one fingerprint, or every finding under a path glob. */
 export interface ExceptionRecord {
   id: string;
@@ -177,8 +179,10 @@ export interface ExceptionRecord {
   reason: string;
   /** A user id, or "github:<login>" for a request made with the check run's button. */
   requestedBy: string;
-  requestedFrom: 'github' | 'dashboard';
+  requestedFrom: ExceptionSource;
   requestedAt: string;
+  /** The end date the requester asked for; Legal sets the real one when approving. */
+  requestedUntil: string | null;
   status: ExceptionStatus;
   decidedBy: string | null;
   decidedAt: string | null;
@@ -191,6 +195,42 @@ export interface ExceptionRecord {
   filePath: string | null;
   startLine: number | null;
   message: string | null;
+}
+
+/** Personal access tokens for the MCP endpoint (product guide, Phase 4a). Only the SHA-256 is stored. */
+export const API_TOKEN_PREFIX = 'lexc_pat_';
+export const API_TOKEN_DEFAULT_DAYS = 90;
+export interface ApiTokenRecord {
+  id: string;
+  workspaceId: string;
+  userId: string;
+  name: string;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+/** Who a token acts as: one user in one workspace, with that user's current role. */
+export interface TokenPrincipal {
+  tokenId: string;
+  workspaceId: string;
+  userId: string;
+  userSub: string;
+  role: WorkspaceRole;
+}
+export type McpCallOutcome = 'ok' | 'tool_error' | 'error' | 'denied' | 'rate_limited';
+export interface McpCallRecord {
+  id: string;
+  workspaceId: string;
+  tokenId: string | null;
+  method: string;
+  tool: string | null;
+  repo: string | null;
+  outcome: McpCallOutcome;
+  durationMs: number;
+  /** File paths and fingerprints only; sent code is never stored. */
+  detail: Record<string, unknown> | null;
+  createdAt: string;
 }
 
 export class ProductStore {
@@ -897,7 +937,36 @@ export class ProductStore {
          WHERE f.scan_id = ? ORDER BY f.file_path, f.start_line, f.rule_key`
       )
       .all(scanId) as Row[];
-    return rows.map((r) => ({
+    return rows.map((r) => this.findingFrom(r));
+  }
+
+  /**
+   * The most recent stored finding in a workspace, by fingerprint or by rule, file and a line
+   * inside it. Used by the MCP tools for findings of PR checks and branch scans.
+   */
+  findStoredFinding(
+    workspaceId: string,
+    query: { fingerprint: string } | { ruleKey: string; filePath: string; line: number }
+  ): (StoredFinding & { repoId: string; scan: { id: string; commitSha: string; prNumber: number | null; baseSha: string | null } }) | undefined {
+    const where = 'fingerprint' in query ? 'f.fingerprint = ?' : 'f.rule_key = ? AND f.file_path = ? AND f.start_line <= ? AND f.end_line >= ?';
+    const args = 'fingerprint' in query ? [query.fingerprint] : [query.ruleKey, query.filePath, query.line, query.line];
+    const r = this.db
+      .prepare(
+        `SELECT f.*, v.rule_id, s.repo_id, s.commit_sha, s.pr_number, s.base_sha FROM findings f
+         JOIN rule_versions v ON v.id = f.rule_version_id JOIN scans s ON s.id = f.scan_id JOIN repos p ON p.id = s.repo_id
+         WHERE p.workspace_id = ? AND ${where} ORDER BY s.finished_at DESC LIMIT 1`
+      )
+      .get(workspaceId, ...args) as Row | undefined;
+    if (!r) return undefined;
+    return {
+      ...this.findingFrom(r),
+      repoId: String(r.repo_id),
+      scan: { id: String(r.scan_id), commitSha: String(r.commit_sha), prNumber: r.pr_number == null ? null : Number(r.pr_number), baseSha: str(r.base_sha) },
+    };
+  }
+
+  private findingFrom(r: Row): StoredFinding {
+    return {
       id: String(r.id),
       scanId: String(r.scan_id),
       ruleId: String(r.rule_id),
@@ -912,7 +981,7 @@ export class ProductStore {
       snippet: String(r.snippet ?? ''),
       state: r.state as StoredFinding['state'],
       exceptionId: str(r.exception_id),
-    }));
+    };
   }
 
   /** The latest completed scan of a commit against the same rule set, for reuse. */
@@ -952,8 +1021,9 @@ export class ProductStore {
       pathGlob: str(r.path_glob),
       reason: String(r.reason),
       requestedBy: String(r.requested_by),
-      requestedFrom: (str(r.requested_from) ?? 'dashboard') as 'github' | 'dashboard',
+      requestedFrom: (str(r.requested_from) ?? 'dashboard') as ExceptionSource,
       requestedAt: String(r.requested_at),
+      requestedUntil: str(r.requested_until),
       status: r.status as ExceptionStatus,
       decidedBy: str(r.decided_by),
       decidedAt: str(r.decided_at),
@@ -983,7 +1053,8 @@ export class ProductStore {
     pathGlob?: string | null;
     reason: string;
     requestedBy: string;
-    requestedFrom: 'github' | 'dashboard';
+    requestedFrom: ExceptionSource;
+    requestedUntil?: string | null;
     scan?: { id: string; prNumber: number | null; headSha: string; baseSha: string | null } | null;
     finding?: { filePath: string; startLine: number; message: string } | null;
   }): { exception: ExceptionRecord; created: boolean } {
@@ -1005,8 +1076,8 @@ export class ProductStore {
     this.db
       .prepare(
         `INSERT INTO exceptions (id, workspace_id, rule_id, repo_id, fingerprint, path_glob, reason, requested_by, requested_from, requested_at, status,
-           scan_id, pr_number, head_sha, base_sha, file_path, start_line, message)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?, ?, ?, ?)`
+           scan_id, pr_number, head_sha, base_sha, file_path, start_line, message, requested_until)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -1025,7 +1096,8 @@ export class ProductStore {
         input.scan?.baseSha ?? null,
         input.finding?.filePath ?? null,
         input.finding?.startLine ?? null,
-        input.finding?.message.slice(0, 2000) ?? null
+        input.finding?.message.slice(0, 2000) ?? null,
+        input.requestedUntil ?? null
       );
     return { exception: this.getException(input.workspaceId, id)!, created: true };
   }
@@ -1090,6 +1162,101 @@ export class ProductStore {
       .prepare('SELECT s.*, p.full_name FROM scans s JOIN repos p ON p.id = s.repo_id WHERE s.check_run_id = ? ORDER BY s.created_at DESC LIMIT 1')
       .get(checkRunId) as Row | undefined;
     return r ? this.scanFrom(r) : undefined;
+  }
+
+  // ---------------------------------------------------------------- API tokens and MCP calls (Phase 4a)
+
+  private tokenFrom(r: Row): ApiTokenRecord {
+    return {
+      id: String(r.id),
+      workspaceId: String(r.workspace_id),
+      userId: String(r.user_id),
+      name: String(r.name),
+      createdAt: String(r.created_at),
+      expiresAt: String(r.expires_at),
+      lastUsedAt: str(r.last_used_at),
+      revokedAt: str(r.revoked_at),
+    };
+  }
+
+  /**
+   * Creates a personal access token for a member of the workspace. The token is returned once;
+   * only its SHA-256 is stored.
+   */
+  createApiToken(workspaceId: string, userId: string, name: string, days: number = API_TOKEN_DEFAULT_DAYS): { token: string; record: ApiTokenRecord } {
+    if (!this.roleOf(workspaceId, userId)) throw new StoreError('workspace not found', 404);
+    const label = name.trim().slice(0, 100);
+    if (!label) throw new StoreError('a token needs a name');
+    if (!Number.isInteger(days) || days < 1 || days > 366) throw new StoreError('a token lasts between 1 and 366 days');
+    const token = API_TOKEN_PREFIX + crypto.randomBytes(32).toString('base64url');
+    const id = newId();
+    const now = new Date();
+    this.db
+      .prepare('INSERT INTO api_tokens (id, workspace_id, user_id, name, token_sha256, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(id, workspaceId, userId, label, sha256Hex(token), now.toISOString(), new Date(now.getTime() + days * 24 * 3600 * 1000).toISOString());
+    return { token, record: this.tokenFrom(this.db.prepare('SELECT * FROM api_tokens WHERE id = ?').get(id) as Row) };
+  }
+
+  /** A user's tokens in a workspace, newest first. */
+  listApiTokens(workspaceId: string, userId: string): ApiTokenRecord[] {
+    return (this.db.prepare('SELECT * FROM api_tokens WHERE workspace_id = ? AND user_id = ? ORDER BY created_at DESC').all(workspaceId, userId) as Row[]).map((r) => this.tokenFrom(r));
+  }
+
+  /** Revokes one of the user's own tokens. */
+  revokeApiToken(workspaceId: string, userId: string, tokenId: string): ApiTokenRecord {
+    const r = this.db.prepare('SELECT * FROM api_tokens WHERE id = ? AND workspace_id = ? AND user_id = ?').get(tokenId, workspaceId, userId) as Row | undefined;
+    if (!r) throw new StoreError('unknown token', 404);
+    if (!r.revoked_at) this.db.prepare('UPDATE api_tokens SET revoked_at = ? WHERE id = ?').run(nowIso(), tokenId);
+    return this.tokenFrom(this.db.prepare('SELECT * FROM api_tokens WHERE id = ?').get(tokenId) as Row);
+  }
+
+  /**
+   * The user and workspace a token acts for, or null when it is unknown, revoked, expired, or its
+   * user is no longer a member. Records the use.
+   */
+  tokenPrincipal(token: string, at: Date = new Date()): TokenPrincipal | null {
+    if (!token.startsWith(API_TOKEN_PREFIX)) return null;
+    const r = this.db
+      .prepare('SELECT t.*, u.oidc_sub FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_sha256 = ?')
+      .get(sha256Hex(token)) as Row | undefined;
+    if (!r || r.revoked_at || String(r.expires_at) <= at.toISOString()) return null;
+    const role = this.roleOf(String(r.workspace_id), String(r.user_id));
+    if (!role) return null;
+    this.db.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?').run(at.toISOString(), String(r.id));
+    return { tokenId: String(r.id), workspaceId: String(r.workspace_id), userId: String(r.user_id), userSub: String(r.oidc_sub), role };
+  }
+
+  recordMcpCall(input: Omit<McpCallRecord, 'id' | 'createdAt'>): void {
+    this.db
+      .prepare('INSERT INTO mcp_calls (id, workspace_id, token_id, method, tool, repo, outcome, duration_ms, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(
+        newId(),
+        input.workspaceId,
+        input.tokenId,
+        input.method.slice(0, 100),
+        input.tool?.slice(0, 100) ?? null,
+        input.repo?.slice(0, 300) ?? null,
+        input.outcome,
+        Math.round(input.durationMs),
+        input.detail ? JSON.stringify(input.detail).slice(0, 20000) : null,
+        nowIso()
+      );
+  }
+
+  listMcpCalls(workspaceId: string, limit = 50): McpCallRecord[] {
+    const rows = this.db.prepare('SELECT * FROM mcp_calls WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?').all(workspaceId, Math.min(Math.max(limit, 1), 500)) as Row[];
+    return rows.map((r) => ({
+      id: String(r.id),
+      workspaceId: String(r.workspace_id),
+      tokenId: str(r.token_id),
+      method: String(r.method),
+      tool: str(r.tool),
+      repo: str(r.repo),
+      outcome: r.outcome as McpCallOutcome,
+      durationMs: Number(r.duration_ms),
+      detail: r.detail_json ? (JSON.parse(String(r.detail_json)) as Record<string, unknown>) : null,
+      createdAt: String(r.created_at),
+    }));
   }
 
   // ---------------------------------------------------------------- GitHub
