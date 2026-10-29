@@ -30,6 +30,7 @@ export type EvidenceType =
   | 'scan.completed'
   | 'rule.approved'
   | 'rule.retired'
+  | 'rule.rescheduled'
   | 'exception.approved'
   | 'exception.rejected'
   | 'exception.expired'

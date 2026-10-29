@@ -68,6 +68,20 @@ export class EvidenceRecorder {
     });
   }
 
+  /** An approved version's effective date moved (before it took effect). */
+  async ruleRescheduled(workspaceId: string, version: RuleVersion, userId: string) {
+    const rule = this.store.getRule(workspaceId, version.ruleId);
+    return this.log.append(workspaceId, 'rule.rescheduled', {
+      ruleIds: [version.ruleId],
+      repoIds: [],
+      ruleKey: rule?.key ?? null,
+      versionId: version.id,
+      version: version.version,
+      effectiveFrom: version.effectiveFrom,
+      changedBy: this.who(userId),
+    });
+  }
+
   async ruleRetired(workspaceId: string, rule: Rule, userId: string) {
     return this.log.append(workspaceId, 'rule.retired', { ruleIds: [rule.id], repoIds: [], ruleKey: rule.key, title: rule.title, retiredAt: rule.retiredAt, retiredBy: this.who(userId) });
   }

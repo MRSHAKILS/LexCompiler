@@ -1,5 +1,7 @@
 import type { JobHandler } from '../jobs/queue.js';
-import { classifyFindings, globMatch, scanFiles, type RawFinding } from '../product/scanner.js';
+import { storeComingUp, upcomingFindings } from '../product/repoScan.js';
+import { classifyFindings, scanFilesScoped, type RawFinding } from '../product/scanner.js';
+import type { TargetRepoFile } from '../../shared/types.js';
 import { rulesetSha256, type ProductStore, type Repo, type RuleInEffect, type ScanTrigger } from '../product/store.js';
 import { summarizeFindings } from '../product/summary.js';
 import { lexcompilerVersion } from '../util/versions.js';
@@ -31,6 +33,7 @@ export interface ScanJobDeps {
 }
 
 interface CommitScan {
+  files: TargetRepoFile[];
   findings: RawFinding[];
   undecidedRuleKeys: string[];
   filesScanned: number;
@@ -139,6 +142,9 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
         const baseline = await mergeBase(app, installationId, route, p.baseSha, headSha);
         base = await baselineFindings(deps.store, app, installationId, repo, baseline, rules, globs, version);
       }
+      // Approved versions that take effect later: warnings now, and "Coming up" for the default branch.
+      const upcoming = await upcomingFindings(deps.store, repo, head.files);
+      if (p.kind === 'push') await storeComingUp(deps.store, repo, headSha, head.files);
       const exceptions = deps.store.activeExceptions(repo.workspaceId, repo.id);
       const findings = classifyFindings(head.findings, base, exceptions);
       const summary = summarizeFindings(findings, head.undecidedRuleKeys);
@@ -159,6 +165,7 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
         lexcompilerVersion: version,
         waiverLine: waiverLine(findings, new Map(exceptions.map((e) => [e.id, e.expiresAt ?? null]))),
         evidence: evidence ?? null,
+        upcoming: upcoming.rules.map((r) => ({ ruleKey: r.ruleKey, version: r.version, effectiveFrom: r.effectiveFrom ?? '', findings: upcoming.findings.filter((f) => f.ruleKey === r.ruleKey) })),
       });
       const [first = [], ...rest] = chunk(output.annotations, 50);
       await app.request(installationId, 'PATCH', `${route}/check-runs/${run.id}`, {
@@ -210,10 +217,9 @@ async function scanCommit(
   globs: Map<string, string[]>
 ): Promise<CommitScan> {
   const sources = await readTarballSources(await app.downloadTarball(installationId, repo.fullName, sha));
-  const result = await scanFiles(sources.files, rules);
-  // A rule scoped to a counterparty only counts in that counterparty's paths.
-  const findings = result.findings.filter((f) => (globs.get(f.ruleKey) ?? ['**']).some((g) => globMatch(g, f.filePath)));
-  return { findings, undecidedRuleKeys: result.undecidedRuleKeys, filesScanned: result.filesScanned, truncated: sources.truncatedAtLimit, facts: result.facts };
+  // A rule scoped to a counterparty is proven only on that counterparty's paths.
+  const result = await scanFilesScoped(sources.files, rules, globs);
+  return { files: sources.files, findings: result.findings, undecidedRuleKeys: result.undecidedRuleKeys, filesScanned: result.filesScanned, truncated: sources.truncatedAtLimit, facts: result.facts };
 }
 
 /** The commit the pull request branched from, so fixes made on the base branch later don't count as new. */

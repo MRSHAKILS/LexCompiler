@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import { FileText, Scale, Upload } from 'lucide-react';
 import { SharesPanel } from './SharesPanel';
+import { ChangesPanel } from './ChangesPanel';
+import { EffectiveDateControl, RescopeControl } from './RuleControls';
 
 /**
  * The lawyer's workspace (product guide, Phase 3): upload a contract or regulation, see its
@@ -71,6 +73,7 @@ interface RuleVersion {
   approvedAt: string | null;
   effectiveFrom: string | null;
   createdAt: string;
+  scope?: { all?: boolean; counterpartyIds?: string[] };
 }
 interface Rule {
   id: string;
@@ -338,6 +341,18 @@ export function LegalWorkspace() {
       setMessage({ kind: 'ok', text: action === 'approve' ? `Approved. ${n === 1 ? '1 repository' : `${n} repositories`} queued for a scan of main.` : 'Rejected.' });
     });
 
+  const moveEffective = (v: RuleVersion, date: string) =>
+    run(async () => {
+      const r = await api<{ inEffect: boolean; effectiveFrom: string }>(`${base}/rule-versions/${v.id}/effective`, { effectiveFrom: date });
+      await refresh();
+      setMessage({ kind: 'ok', text: r.inEffect ? 'In effect now. Default branches in scope are rescanned.' : `Moved to ${r.effectiveFrom.slice(0, 10)}.` });
+    });
+  const rescope = (rule: Rule, scope: { all: true } | { counterpartyIds: string[] }) =>
+    run(async () => {
+      const r = await api<{ version: { version: number } }>(`${base}/rules/${rule.id}/rescope`, scope);
+      await refresh();
+      setMessage({ kind: 'ok', text: `${rule.key} v${r.version.version} drafted with the new scope, waiting for approval.` });
+    });
   const decideException = (request: ExceptionRequest, approve: boolean, note: string, expiresAt: string) =>
     run(async () => {
       const r = await api<{ rerunJobId: string | null }>(`${base}/exceptions/${request.id}/${approve ? 'approve' : 'reject'}`, approve ? { note, expiresAt } : { note });
@@ -462,7 +477,9 @@ export function LegalWorkspace() {
                 >
                   <span className="font-mono text-xs text-amber-300 mr-2">{c.number ?? '—'}</span>
                   {c.normative ? <span className="text-xs text-emerald-400 mr-2">normative</span> : <span className="text-xs text-zinc-400 mr-2">skipped</span>}
-                  <span className="block mt-1 line-clamp-3">{c.text}</span>
+                  <span className="block mt-1 line-clamp-3" lang={/[ঀ-৿]/.test(c.text) ? 'bn' : undefined}>
+                    {c.text}
+                  </span>
                 </button>
               </li>
             ))}
@@ -662,6 +679,16 @@ export function LegalWorkspace() {
                           {v.status === 'draft' ? 'waiting for approval' : v.status}
                         </span>
                         {v.approvedAt && <span className="text-zinc-400">{new Date(v.approvedAt).toLocaleString()}</span>}
+                        {v.status === 'approved' && v.effectiveFrom && v.effectiveFrom > new Date().toISOString() && (
+                          canEdit ? (
+                            <EffectiveDateControl ruleKey={r.key} version={v.version} effectiveFrom={v.effectiveFrom} busy={busy} onMove={(date) => void moveEffective(v, date)} />
+                          ) : (
+                            <span className="text-amber-300">takes effect {v.effectiveFrom.slice(0, 10)}</span>
+                          )
+                        )}
+                        {v.scope?.counterpartyIds?.length ? (
+                          <span className="text-zinc-400">for {v.scope.counterpartyIds.map((id) => counterparties.find((c) => c.id === id)?.name ?? id).join(', ')}</span>
+                        ) : null}
                         {v.status === 'draft' && canEdit && (
                           <>
                             <button type="button" disabled={busy} onClick={() => void decide(v, 'approve')} className="rounded bg-emerald-700 hover:bg-emerald-800 text-white px-2 py-0.5">
@@ -675,6 +702,11 @@ export function LegalWorkspace() {
                       </li>
                     ))}
                   </ul>
+                  {canEdit && r.versions.some((v) => v.status === 'approved') && (
+                    <div className="mt-1">
+                      <RescopeControl ruleKey={r.key} counterparties={counterparties} busy={busy} onRescope={(scope) => void rescope(r, scope)} />
+                    </div>
+                  )}
                 </li>
               ))}
               {rules.length === 0 && <li className="text-sm text-zinc-400">No rules yet.</li>}
@@ -682,6 +714,8 @@ export function LegalWorkspace() {
           </section>
 
           {ws && ['owner', 'legal', 'admin'].includes(ws.role) && <SharesPanel key={workspaceId} base={base} rules={rules} counterparties={counterparties} />}
+
+          {workspaceId && <ChangesPanel key={`changes-${workspaceId}`} base={base} canEdit={Boolean(canEdit)} onChanged={refresh} />}
         </section>
       </div>
     </div>

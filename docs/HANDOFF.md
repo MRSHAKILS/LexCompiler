@@ -27,6 +27,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | MRSHAKILS/LexCompiler #7 | Phase 4: exceptions ("Request exception" on the check, API, Legal inbox, re-run after a decision, expiry job) |
 | MRSHAKILS/LexCompiler #8 | Phase 4a: the workspace MCP endpoint `POST /mcp` (personal access tokens, six tools, 2026-07-28 and 2025-06-18), the `/settings` page |
 | MRSHAKILS/LexCompiler #9 | Phase 5: the signed evidence log, share links for auditors (`/share/<token>`), the evidence pack with `verify.mjs`, public keys under `/.well-known` |
+| MRSHAKILS/LexCompiler #10 | Phase 6: rules proven only on their scope's paths, future effective dates ("Coming up", PR warnings), the regulation feed with "Draft rule change", daily jobs |
 
 | Phase | Status |
 |---|---|
@@ -36,7 +37,8 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | 4 Fixes and exceptions | Exceptions done and tested against a fake GitHub; the live test on finhealth-core-platform PR #1 needs the App credentials. Fix PRs and suggested changes (guide items 1–2) are not started |
 | 4a MCP for coding assistants | Done; tested in-process and live over HTTP (guide 5.9 results). Claude Code connects but its CLI here isn't signed in; Cursor and VS Code not tried; OAuth not started |
 | 5 Evidence and auditor | Done and tested (the pack verifies; the three tamper cases are caught). Not done: RFC 3161 timestamps of each day's last header, per-workspace keys |
-| 6, 7 | Not started |
+| 6 Contract and regulation changes | Done and tested (scenes 5 and 6 through the API on the fixture, and the PR warning against a fake GitHub). The live GitHub run needs the App credentials. "Open fix PR" (scene 5 step 4) is Phase 4's fix PRs, not started |
+| 7 Online for outside testers | Not started |
 
 ## What works today
 
@@ -66,6 +68,12 @@ This file says where the work stands, how to run it, and what to do next. The fu
   - The auditor's page `/share/<token>` needs no account: summary, rule history with approvers, checks over time with their evidence numbers, findings of the latest default-branch check (no code), exceptions, the pack, and "Verify signatures in this browser" (Web Crypto). Data: `GET /api/share/<token>` and `…/pack.zip`, outside the `/api` guard, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`.
   - The pack: `headers.jsonl` (every header of the period), `bodies.jsonl` (only the bodies about the shared rules and repositories), `rules/`, `exceptions.json`, `sarif/`, `keys.json`, `verify.mjs`, `report.html`, `README.txt`. Zipped by `server/evidence/zip.ts` (Node's zlib; no fflate dependency).
   - Public keys: `GET /.well-known/lexcompiler/<workspaceId>/keys.json` (every key that signed the workspace's records, with validity dates). Auditors should take them from the company's own site, not from LexCompiler.
+- **Contract and regulation changes** (Phase 6):
+  - Scope by path: `POST /api/workspaces/<id>/counterparties/<cpId>/scope` with `{ scope: [{ repoId, pathGlob }] }` (Legal). A rule scoped to counterparties is proven only on the files in their paths (`scanFilesScoped` in `server/product/scanner.ts`, used by the GitHub job, local scans and the MCP tools), so shared code must meet the stricter rule. `POST …/rules/<ruleId>/rescope` drafts a new version with another scope. The local-repo scan now applies scopes too (it ignored them before).
+  - Effective dates: an approved version dated later doesn't fail anything. PR checks list its findings as warnings ("Coming up" section, "R-3 v2 will fail from 1 January 2027" in the title when nothing is new). `GET …/coming-up` lists what each upcoming version finds on each default branch (`coming_up` table, refreshed by default-branch scans, the nightly job, approval of a future version, and `POST …/coming-up/refresh`). `POST …/rule-versions/<versionId>/effective` with `{ effectiveFrom }` moves the date (Legal; today or earlier puts it in effect and rescans), and writes a `rule.rescheduled` evidence record.
+  - Regulation feed: a daily job stores new Federal Register and EUR-Lex items (`feed_items`, migration 8). `GET …/feed`, `POST …/feed/refresh`, and `POST …/feed/<itemId>/draft` ("Draft rule change") makes a regulation document linked to the item (`documents.feed_item_id`, `source_url`) and a draft citing it; change notices are refused (no text to compile). The Legal inbox's `feedDrafts` lists undrafted items of the last 30 days.
+  - Daily jobs (`server/product/feed.ts`): the feed, and a scan of every default branch (local folders in-process, GitHub through the job queue with trigger `scheduled`), each with an evidence record. Checked hourly, run once a day, remembered across restarts (`scheduler_runs`). `LEXCOMPILER_SCHEDULER=off` turns them off.
+  - `/legal`: a "Changes" panel ("Coming up", the feed, each counterparty's paths), "Move date" on future versions, "Change scope" per rule, and `lang="bn"` on Bangla clause text (the card's plain reading is English).
 - **Rules API** (Phase 1): `POST /api/workspaces/<id>/rules` creates a draft, `POST .../rule-versions/<versionId>/approve` and `.../reject` decide it (Legal only), `GET .../rules-in-effect` lists what scans use.
 - **AI gateway** (`server/ai/gateway.ts`), the only code that calls a model:
   - A workspace's AI is `off` until the owner sets `local` or `cloud` with `PUT /api/workspaces/<id>/ai`, which also sets a daily token budget.
@@ -147,7 +155,8 @@ Dates are from the schedule in the product guide, section 7.
    - The guide's Phase 5 test on GitHub (step 5: the hash in PR #1's check run). It needs the App credentials on this machine; the fake-GitHub test checks the same thing.
    - Optional: RFC 3161 timestamps of each day's last header (`timestamp.ts`), and one key per workspace instead of the server's key.
    - `verify.mjs` can't see records removed from before the first or after the last header of a period. Cross-check the numbers with the check runs on GitHub.
-7. **Phases 6 and 7** (Dec 14–19), then a freeze from Dec 20 to 25.
+7. **Phase 6.** Done (#10). Per-tenant settings inside code (a TTL per tenant) are a later analyzer feature; until then the fix is the strictest value.
+8. **Phase 7** (Dec 14–19), then a freeze from Dec 20 to 25.
 
 ## Open questions for the owner
 

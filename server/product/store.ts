@@ -108,9 +108,41 @@ export interface RuleInEffect {
   clause: LegalClause;
   clauseSha256: string;
   scope: RuleScope;
+  /** When this version takes (or took) effect. */
+  effectiveFrom?: string;
 }
 
-export type ScanTrigger = 'pull_request' | 'push' | 'manual' | 'rerun' | 'baseline' | 'connect' | 'rule_approved';
+/** A regulation feed item (Phase 6), with whether this workspace drafted a rule from it. */
+export interface FeedItem {
+  id: string;
+  source: 'EUR_LEX' | 'FEDERAL_REGISTER';
+  documentNumber: string;
+  title: string;
+  publicationDate: string | null;
+  agency: string | null;
+  excerpt: string;
+  url: string | null;
+  kind: 'TEXT' | 'CHANGE_NOTICE';
+  illustrative: boolean;
+  firstSeenAt: string;
+  /** The document this workspace made from the item, if any. */
+  documentId?: string | null;
+}
+
+/** What an approved, not-yet-effective version finds on a repository's default branch. */
+export interface ComingUp {
+  repoId: string;
+  repoName: string;
+  versionId: string;
+  ruleKey: string;
+  version: number;
+  effectiveFrom: string;
+  commitSha: string;
+  computedAt: string;
+  findings: Array<{ filePath: string; startLine: number; message: string; fingerprint: string }>;
+}
+
+export type ScanTrigger = 'pull_request' | 'push' | 'manual' | 'rerun' | 'baseline' | 'connect' | 'rule_approved' | 'scheduled';
 export type ScanStatus = 'queued' | 'in_progress' | 'completed' | 'failed';
 export interface ScanRecord {
   id: string;
@@ -832,9 +864,50 @@ export class ProductStore {
       if (seen.has(ruleId)) continue;
       seen.add(ruleId);
       const v = this.versionFrom(r);
-      out.push({ ruleId, ruleKey: String(r.rule_key), versionId: v.id, version: v.version, clause: v.clause, clauseSha256: v.clauseSha256, scope: v.scope });
+      out.push({ ruleId, ruleKey: String(r.rule_key), versionId: v.id, version: v.version, clause: v.clause, clauseSha256: v.clauseSha256, scope: v.scope, effectiveFrom: v.effectiveFrom ?? v.approvedAt ?? undefined });
     }
     return out.sort((a, b) => Number(a.ruleKey.slice(2)) - Number(b.ruleKey.slice(2)));
+  }
+
+  /**
+   * Approved versions that take effect after `at` (the next one per rule). They don't fail pull
+   * requests yet: checks show their findings as warnings, and "Coming up" lists them.
+   */
+  upcomingRules(workspaceId: string, at: string = nowIso()): RuleInEffect[] {
+    const rows = this.db
+      .prepare(
+        `SELECT r.id AS rule_id, r.key AS rule_key, v.* FROM rules r
+         JOIN rule_versions v ON v.rule_id = r.id
+         WHERE r.workspace_id = ? AND v.status = 'approved' AND COALESCE(v.effective_from, v.approved_at) > ? AND r.retired_at IS NULL
+         ORDER BY r.id, COALESCE(v.effective_from, v.approved_at), v.version`
+      )
+      .all(workspaceId, at) as Row[];
+    const seen = new Set<string>();
+    const out: RuleInEffect[] = [];
+    for (const r of rows) {
+      const ruleId = String(r.rule_id);
+      if (seen.has(ruleId)) continue;
+      seen.add(ruleId);
+      const v = this.versionFrom(r);
+      out.push({ ruleId, ruleKey: String(r.rule_key), versionId: v.id, version: v.version, clause: v.clause, clauseSha256: v.clauseSha256, scope: v.scope, effectiveFrom: v.effectiveFrom ?? undefined });
+    }
+    return out.sort((a, b) => Number(a.ruleKey.slice(2)) - Number(b.ruleKey.slice(2)));
+  }
+
+  /**
+   * Moves the effective date of an approved version that hasn't taken effect yet (Legal). A date
+   * today or earlier makes it take effect now.
+   */
+  setEffectiveFrom(workspaceId: string, versionId: string, effectiveFrom: string, now: Date = new Date()): RuleVersion {
+    const v = this.getRuleVersion(workspaceId, versionId);
+    if (!v) throw new StoreError('unknown rule version', 404);
+    if (v.status !== 'approved') throw new StoreError('only approved versions have an effective date', 409);
+    if ((v.effectiveFrom ?? v.approvedAt ?? '') <= now.toISOString()) throw new StoreError('this version is already in effect', 409);
+    const at = new Date(effectiveFrom);
+    if (Number.isNaN(at.getTime())) throw new StoreError('effectiveFrom must be a date');
+    const value = at.getTime() <= now.getTime() ? now.toISOString() : at.toISOString();
+    this.db.prepare('UPDATE rule_versions SET effective_from = ? WHERE id = ?').run(value, versionId);
+    return this.getRuleVersion(workspaceId, versionId)!;
   }
 
   // ---------------------------------------------------------------- scans and findings
@@ -1215,6 +1288,99 @@ export class ProductStore {
       )
       .all(...repoIds, from, to) as Row[];
     return rows.map((r) => this.scanFrom(r));
+  }
+
+  // ---------------------------------------------------------------- coming up, regulation feed, schedules (Phase 6)
+
+  /** Replaces what one upcoming version finds on one repository's default branch. */
+  setComingUp(input: { workspaceId: string; repoId: string; versionId: string; commitSha: string; findings: ComingUp['findings'] }): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO coming_up (workspace_id, repo_id, version_id, commit_sha, computed_at, findings_json) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(input.workspaceId, input.repoId, input.versionId, input.commitSha, nowIso(), JSON.stringify(input.findings));
+  }
+
+  /** Coming-up results for versions that are still upcoming; stale rows of versions now in effect are dropped. */
+  listComingUp(workspaceId: string, at: string = nowIso()): ComingUp[] {
+    const upcoming = new Map(this.upcomingRules(workspaceId, at).map((r) => [r.versionId, r]));
+    const rows = this.db
+      .prepare('SELECT c.*, p.full_name FROM coming_up c JOIN repos p ON p.id = c.repo_id WHERE c.workspace_id = ? ORDER BY p.full_name')
+      .all(workspaceId) as Row[];
+    return rows
+      .filter((r) => upcoming.has(String(r.version_id)))
+      .map((r) => {
+        const rule = upcoming.get(String(r.version_id))!;
+        return {
+          repoId: String(r.repo_id),
+          repoName: String(r.full_name),
+          versionId: rule.versionId,
+          ruleKey: rule.ruleKey,
+          version: rule.version,
+          effectiveFrom: rule.effectiveFrom ?? '',
+          commitSha: String(r.commit_sha),
+          computedAt: String(r.computed_at),
+          findings: JSON.parse(String(r.findings_json)) as ComingUp['findings'],
+        };
+      })
+      .sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom) || a.ruleKey.localeCompare(b.ruleKey) || a.repoName.localeCompare(b.repoName));
+  }
+
+  /** Stores feed items not seen before; returns how many were new. */
+  addFeedItems(items: Array<Omit<FeedItem, 'firstSeenAt' | 'documentId'>>): number {
+    let added = 0;
+    const insert = this.db.prepare(
+      'INSERT OR IGNORE INTO feed_items (id, source, document_number, title, publication_date, agency, excerpt, url, kind, illustrative, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    transaction(this.db, () => {
+      for (const i of items) {
+        added += Number(insert.run(i.id, i.source, i.documentNumber, i.title.slice(0, 1000), i.publicationDate, i.agency, i.excerpt.slice(0, 20000), i.url, i.kind, i.illustrative ? 1 : 0, nowIso()).changes);
+      }
+    });
+    return added;
+  }
+
+  private feedItemFrom(r: Row): FeedItem {
+    return {
+      id: String(r.id),
+      source: r.source as FeedItem['source'],
+      documentNumber: String(r.document_number),
+      title: String(r.title),
+      publicationDate: str(r.publication_date),
+      agency: str(r.agency),
+      excerpt: String(r.excerpt),
+      url: str(r.url),
+      kind: r.kind as FeedItem['kind'],
+      illustrative: Number(r.illustrative) === 1,
+      firstSeenAt: String(r.first_seen_at),
+      documentId: str(r.document_id),
+    };
+  }
+
+  /** Feed items, newest first, with the document this workspace made from each (if any). */
+  listFeedItems(workspaceId: string, limit = 100): FeedItem[] {
+    const rows = this.db
+      .prepare(
+        `SELECT f.*, (SELECT d.id FROM documents d WHERE d.feed_item_id = f.id AND d.workspace_id = ? ORDER BY d.uploaded_at DESC LIMIT 1) AS document_id
+         FROM feed_items f ORDER BY COALESCE(f.publication_date, f.first_seen_at) DESC, f.id LIMIT ?`
+      )
+      .all(workspaceId, Math.min(Math.max(limit, 1), 500)) as Row[];
+    return rows.map((r) => this.feedItemFrom(r));
+  }
+
+  getFeedItem(workspaceId: string, id: string): FeedItem | undefined {
+    return this.listFeedItems(workspaceId, 500).find((i) => i.id === id);
+  }
+
+  /** Links a document to the feed item it was made from. */
+  linkDocumentToFeedItem(workspaceId: string, documentId: string, feedItemId: string, sourceUrl: string | null): void {
+    this.db.prepare('UPDATE documents SET feed_item_id = ?, source_url = ? WHERE id = ? AND workspace_id = ?').run(feedItemId, sourceUrl, documentId, workspaceId);
+  }
+
+  /** Whether a scheduled job is due (never ran, or last ran at least `everyMs` ago); marks it as run when due. */
+  claimScheduledRun(name: string, everyMs: number, now: Date = new Date()): boolean {
+    const r = this.db.prepare('SELECT last_run_at FROM scheduler_runs WHERE name = ?').get(name) as Row | undefined;
+    if (r && now.getTime() - Date.parse(String(r.last_run_at)) < everyMs) return false;
+    this.db.prepare('INSERT OR REPLACE INTO scheduler_runs (name, last_run_at) VALUES (?, ?)').run(name, now.toISOString());
+    return true;
   }
 
   // ---------------------------------------------------------------- share links (Phase 5)
