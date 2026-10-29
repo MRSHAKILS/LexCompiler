@@ -21,6 +21,8 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | #34 | Product guide section 5: AI, RAG, MCP and setup for coding assistants |
 | #35 | Phase 2a, part 1: RAG embeddings fixed, duration parser fixed, model labels that match what ran |
 | #36 | Phase 2a, part 2: AI gateway, AI setting per workspace, call log, extraction eval |
+| MRSHAKILS/LexCompiler #3 | Bangla and test-repository RAG eval sets |
+| MRSHAKILS/LexCompiler #4, #5 | Windows test fixes (4 Vitest workers); RAG: stemmed BM25 with identifier parts; graph seeds and HyDE only from evidenced categories |
 
 | Phase | Status |
 |---|---|
@@ -85,10 +87,10 @@ On `main` after #36: 184 tests pass (2 skipped), lint has 0 errors and 11 old wa
 npm run eval:extract                       # parser only, no model
 npm run eval:extract -- --model local      # LEXCOMPILER_LOCAL_LLM_MODEL on Ollama
 npm run eval:extract -- --model cloud      # needs LEXCOMPILER_LLM_MODEL (or OPENAI_API_KEY)
-npm run eval:rag                           # 16 questions on the bundled fixture
-npm run eval:rag -- --dataset bn           # 10 Bangla questions, Bangla clause set (MRR 0.95, nDCG@5 0.60)
+npm run eval:rag                           # 16 questions on the bundled fixture (MRR 0.88, nDCG@5 0.80)
+npm run eval:rag -- --dataset bn           # 10 Bangla questions, Bangla clause set (MRR 0.95, nDCG@5 0.76)
 LEXCOMPILER_TARGET_REPO=<finhealth-core-platform clone on feat/loan-applications> \
-  npm run eval:rag -- --dataset finhealth  # 8 questions (MRR 0.66, nDCG@5 0.45; fh02 'loan applicant fields' misses)
+  npm run eval:rag -- --dataset finhealth  # 8 questions (MRR 0.82, nDCG@5 0.69, hit rate 1.0)
 ```
 
 ## Next steps, in order
@@ -98,7 +100,7 @@ Dates are from the schedule in the product guide, section 7.
 1. **Owner decisions** (blocking AI drafting):
    - Pick the cloud model provider, put its key in `.env`, and run `npm run eval:extract -- --model cloud`.
    - Decide whether to restore PR #15's files (below).
-2. ~~**Finish 2a.**~~ Done: `dataset.bn.json` and `dataset.finhealth.json`. Retrieval misses the loan applicant model for "what personal data does the model collect" (fh02); improve chunk text for `PII_COLLECTION_MODEL` before Phase 3 relies on it.
+2. ~~**Finish 2a.**~~ Done: `dataset.bn.json` and `dataset.finhealth.json`. The collection-model miss (q11, fh02) is fixed: BM25 stems words and splits identifiers, and a question with no category evidence no longer gets the retention clause's graph seeds and HyDE text. Both models are now in the top 5, at ranks 3 and 4.
 3. **Phase 3, the lawyer's workspace** (Nov 9–22). Guide: Phase 3 and 5.4.
    - Upload PDF, DOCX or text (`pdfjs-dist`, `mammoth`), split clauses, mark normative ones.
    - Rule card on the existing rules API: highlighted source, category, values, scope, effective date, questions. Fill values with `checkParserOnly` and, when the workspace has AI on, with the gateway and `checkExtraction`.
