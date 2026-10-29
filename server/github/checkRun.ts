@@ -91,7 +91,9 @@ export function renderCheckOutput(input: {
   if (input.truncated) lines.push('', '_This repository has more source files than one scan reads; some files were not checked._');
   lines.push(
     '',
-    `<sub>${plural(input.filesScanned, 'source file')} scanned · rules ${input.rules.map((r) => `${r.ruleKey} v${r.version}`).join(', ')} · LexCompiler ${input.lexcompilerVersion}</sub>`
+    // Plain Markdown, no HTML: GitHub echoes this summary in check_run webhooks, and relays that
+    // re-encode JSON (smee) break the signature of bodies containing <, > or &.
+    `_${plural(input.filesScanned, 'source file')} scanned · rules ${input.rules.map((r) => `${r.ruleKey} v${r.version}`).join(', ')} · LexCompiler ${input.lexcompilerVersion}_`
   );
 
   const annotations = [...input.findings]

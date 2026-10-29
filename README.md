@@ -229,6 +229,7 @@ LexCompiler runs as a GitHub App. On every pull request it adds a check run name
    ```bash
    npx smee-client --url https://smee.io/<channel> --target http://127.0.0.1:3001/api/github/webhooks
    ```
+   Smee re-encodes each JSON body before forwarding it, so a delivery whose body contains `<`, `>` or `&` (a pull request description with an HTML comment, for example) fails the signature check with `401`. LexCompiler never skips that check. If it happens, use a tunnel that forwards the raw bytes, such as `cloudflared tunnel --url http://localhost:3001`.
 2. Start LexCompiler with `LEXCOMPILER_GITHUB_WEBHOOK_URL=https://smee.io/<channel>` and `LEXCOMPILER_PUBLIC_URL=http://localhost:3001`.
 3. As an administrator, open `http://localhost:3001/github/register` and click **Create the GitHub App on GitHub**.
    - GitHub creates a private app from a manifest. It requests Checks: write, Pull requests: write, Contents: read and Metadata: read, and subscribes to pull request, push, check run and check suite events.
