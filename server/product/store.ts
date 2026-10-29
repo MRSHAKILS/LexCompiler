@@ -730,12 +730,13 @@ export class ProductStore {
     prNumber?: number | null;
     rules: RuleInEffect[];
     lexcompilerVersion: string;
+    jobId?: string | null;
   }): ScanRecord {
     const id = newId();
     this.db
       .prepare(
-        `INSERT INTO scans (id, repo_id, commit_sha, base_sha, trigger, pr_number, rules_sha256, rule_versions_json, lexcompiler_version, status, created_at, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`
+        `INSERT INTO scans (id, repo_id, commit_sha, base_sha, trigger, pr_number, rules_sha256, rule_versions_json, lexcompiler_version, status, created_at, started_at, job_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?, ?)`
       )
       .run(
         id,
@@ -748,9 +749,18 @@ export class ProductStore {
         JSON.stringify(input.rules.map((r) => ({ ruleKey: r.ruleKey, versionId: r.versionId, version: r.version, clauseSha256: r.clauseSha256 }))),
         input.lexcompilerVersion,
         nowIso(),
-        nowIso()
+        nowIso(),
+        input.jobId ?? null
       );
     return this.getScanById(id)!;
+  }
+
+  /** The check run an earlier attempt of this job created, so a retry updates it instead of adding another. */
+  previousCheckRunForJob(jobId: string): number | null {
+    const r = this.db
+      .prepare('SELECT check_run_id FROM scans WHERE job_id = ? AND check_run_id IS NOT NULL ORDER BY created_at DESC LIMIT 1')
+      .get(jobId) as Row | undefined;
+    return r ? Number(r.check_run_id) : null;
   }
 
   setScanCheckRun(scanId: string, checkRunId: number): void {

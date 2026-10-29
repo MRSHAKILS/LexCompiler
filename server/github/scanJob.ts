@@ -4,7 +4,7 @@ import { rulesetSha256, type ProductStore, type Repo, type RuleInEffect, type Sc
 import { summarizeFindings } from '../product/summary.js';
 import { lexcompilerVersion } from '../util/versions.js';
 import { CHECK_NAME, checkConclusion, chunk, renderCheckOutput, type CheckKind } from './checkRun.js';
-import type { GitHubApp } from './client.js';
+import { GitHubApiError, type GitHubApp } from './client.js';
 import { readTarballSources } from './tarball.js';
 
 export interface ScanJobPayload {
@@ -96,19 +96,35 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
       prNumber: p.prNumber ?? null,
       rules,
       lexcompilerVersion: version,
+      jobId: ctx.jobId,
     });
     const detailsUrl = `${deps.publicUrl}/scans/${scan.id}`;
     let checkRunId: number | null = null;
     let stored = false;
     try {
-      const run = await app.request<{ id: number }>(installationId, 'POST', `${route}/check-runs`, {
+      const progress = {
+        details_url: detailsUrl,
+        external_id: scan.id,
+        output: { title: `Checking ${rules.length} rules`, summary: `Parsing the code and proving ${rules.map((r) => r.ruleKey).join(', ')} with Z3.` },
+      };
+      // A retry updates the run its first attempt created (still in progress), so a commit never
+      // collects one run per attempt or keeps a run that stays "in progress" forever.
+      const reuse = ctx.attempt > 1 ? deps.store.previousCheckRunForJob(ctx.jobId) : null;
+      let run: { id: number } | null = null;
+      if (reuse !== null) {
+        try {
+          await app.request(installationId, 'PATCH', `${route}/check-runs/${reuse}`, { status: 'in_progress', ...progress });
+          run = { id: reuse };
+        } catch (err) {
+          if (!(err instanceof GitHubApiError) || ![404, 422].includes(err.status)) throw err;
+        }
+      }
+      run ??= await app.request<{ id: number }>(installationId, 'POST', `${route}/check-runs`, {
         name: CHECK_NAME,
         head_sha: headSha,
         status: 'in_progress',
         started_at: nowIso(),
-        details_url: detailsUrl,
-        external_id: scan.id,
-        output: { title: `Checking ${rules.length} rules`, summary: `Parsing the code and proving ${rules.map((r) => r.ruleKey).join(', ')} with Z3.` },
+        ...progress,
       });
       checkRunId = run.id;
       deps.store.setScanCheckRun(scan.id, run.id);
@@ -151,17 +167,23 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
       const message = err instanceof Error ? err.message : String(err);
       if (!stored) deps.store.failScan(scan.id, message);
       if (checkRunId !== null) {
+        // Before the last attempt the run stays in progress (only its text changes); the retry
+        // finishes it. After the last attempt it fails, and "Re-run" starts over.
         const retrying = ctx.attempt < ctx.maxAttempts;
         await app
-          .request(installationId, 'PATCH', `${route}/check-runs/${checkRunId}`, {
-            status: 'completed',
-            conclusion: 'failure',
-            completed_at: nowIso(),
-            output: {
-              title: 'LexCompiler could not finish this scan',
-              summary: `${message.slice(0, 2000)}\n\n${retrying ? `It will retry automatically (attempt ${ctx.attempt} of ${ctx.maxAttempts}).` : 'Use "Re-run" to try again.'}`,
-            },
-          })
+          .request(
+            installationId,
+            'PATCH',
+            `${route}/check-runs/${checkRunId}`,
+            retrying
+              ? { output: { title: 'Retrying: the last attempt could not finish', summary: `${message.slice(0, 2000)}\n\nLexCompiler retries automatically (attempt ${ctx.attempt} of ${ctx.maxAttempts} failed).` } }
+              : {
+                  status: 'completed',
+                  conclusion: 'failure',
+                  completed_at: nowIso(),
+                  output: { title: 'LexCompiler could not finish this scan', summary: `${message.slice(0, 2000)}\n\nUse "Re-run" to try again.` },
+                }
+          )
           .catch(() => undefined);
       }
       throw err;
