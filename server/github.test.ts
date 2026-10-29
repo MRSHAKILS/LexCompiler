@@ -14,6 +14,7 @@ import { getInitialClauses } from './compiler/legalCompiler.js';
 import { openDatabase } from './db/index.js';
 import { checkConclusion } from './github/checkRun.js';
 import { GitHubApp, verifyWebhookSignature } from './github/client.js';
+import { createCommentJobHandler, rerunCheckForException } from './github/exceptions.js';
 import { createGitHubRoutes, type BrowserAuth } from './github/routes.js';
 import { createScanJobHandler } from './github/scanJob.js';
 import { readTarballSources } from './github/tarball.js';
@@ -117,6 +118,7 @@ async function startFakeGitHub(publicKeyPem: string) {
   const dropTarball = new Map<string, number>();
   const tarballRequests: string[] = [];
   const checkRuns: Array<{ id: number; create: Record<string, unknown>; patches: Array<Record<string, unknown>> }> = [];
+  const comments: Array<{ issue: number; body: string }> = [];
   const appKey = await importSPKI(publicKeyPem, 'RS256');
   const server = http.createServer((req, res) => {
     let raw = '';
@@ -162,6 +164,10 @@ async function startFakeGitHub(publicKeyPem: string) {
           checkRuns[Number(g[1]) - 1].patches.push(body);
           return json(200, { id: Number(g[1]) });
         }
+        if ((g = m(/^\/repos\/acme\/core-platform\/issues\/(\d+)\/comments$/)) && req.method === 'POST') {
+          comments.push({ issue: Number(g[1]), body: String(body.body) });
+          return json(201, { id: comments.length });
+        }
         if (url.pathname === '/installation/repositories') return json(200, { repositories: [{ id: REPO_ID, full_name: FULL_NAME, default_branch: 'main' }] });
         if (url.pathname === '/login/oauth/access_token' && req.method === 'POST') {
           return body.code === 'good-code' && body.client_secret === 'client-secret' ? json(200, { access_token: 'user-token' }) : json(200, { error: 'bad_verification_code' });
@@ -177,7 +183,7 @@ async function startFakeGitHub(publicKeyPem: string) {
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return { server, base, archives, dropTarball, tarballRequests, checkRuns };
+  return { server, base, archives, dropTarball, tarballRequests, checkRuns, comments };
 }
 
 let fake: Awaited<ReturnType<typeof startFakeGitHub>>;
@@ -228,7 +234,7 @@ beforeAll(async () => {
   );
   getApp = () => githubApp;
   const publicUrl = 'http://lexc.test';
-  queue = new JobQueue(db, { scan: createScanJobHandler({ store, getApp, publicUrl }) }, { maxAttempts: 1 });
+  queue = new JobQueue(db, { scan: createScanJobHandler({ store, getApp, publicUrl }), github_comment: createCommentJobHandler({ getApp }) }, { maxAttempts: 1 });
   const auth: BrowserAuth = {
     async principal(req) {
       const sub = req.header('x-test-user');
@@ -382,6 +388,54 @@ describe('GitHub App', () => {
     expect(await queue.drain()).toBe(1);
     expect(fake.checkRuns.length).toBe(runs + 1);
     expect(finalPatch().output.title).toBe('1 new finding (R-1)');
+  });
+
+  it('requests an exception from the check run button; approval turns the check green until it expires', async () => {
+    // PR #5 at HEAD2 still fails for R-1 on line 20 and offers the button.
+    const failing = lastRun();
+    expect(finalPatch(failing)).toMatchObject({ conclusion: 'failure', actions: [{ label: 'Request exception', identifier: 'request_exception' }] });
+    const click = () =>
+      deliver('check_run', {
+        action: 'requested_action',
+        repository,
+        sender: { login: 'tanvir' },
+        requested_action: { identifier: 'request_exception' },
+        check_run: { id: failing.id, app: { id: Number(APP_ID) }, head_sha: HEAD2, pull_requests: [{ number: 5, base: { sha: BASE } }] },
+      });
+    expect((await click()).body.result).toBe('exception requested for 1 finding');
+    expect(await queue.drain()).toBe(1);
+    expect(fake.comments.at(-1)).toEqual({ issue: 5, body: expect.stringContaining('Exception requested by @tanvir — waiting for Legal') });
+    expect(fake.comments.at(-1)!.body).toContain('**R-1** `api/loan_applications.py:20`');
+    // A second click adds nothing.
+    expect((await click()).body.result).toBe('exception already requested');
+    expect(await queue.drain()).toBe(0);
+
+    const [request] = store.listExceptions(workspaceId, { status: 'requested' });
+    expect(request).toMatchObject({ ruleKey: 'R-1', requestedBy: 'github:tanvir', requestedFrom: 'github', prNumber: 5, headSha: HEAD2, filePath: 'api/loan_applications.py', startLine: 20 });
+    // Approval needs a reason and an end date.
+    const nusrat = store.upsertUser({ sub: 'nusrat' }).id;
+    expect(() => store.decideException(workspaceId, request.id, nusrat, { approve: true, note: '', expiresAt: '2099-01-01' })).toThrow('reason');
+    expect(() => store.decideException(workspaceId, request.id, nusrat, { approve: true, note: 'ok', expiresAt: '2000-01-01' })).toThrow('future');
+    const until = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+    const approved = store.decideException(workspaceId, request.id, nusrat, { approve: true, note: 'Endpoint does not store PII; storage is added in LN-12', expiresAt: until.toISOString() });
+    const runs = fake.checkRuns.length;
+    expect(rerunCheckForException({ store, queue }, approved)).not.toBeNull();
+    expect(await queue.drain()).toBe(1);
+    expect(fake.checkRuns.length).toBe(runs + 1);
+    const green = finalPatch() as ReturnType<typeof finalPatch> & { actions?: unknown; output: { summary: string } };
+    expect(green.conclusion).toBe('success');
+    expect(green.actions).toBeUndefined();
+    const day = until.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+    expect(green.output.summary).toContain(`1 finding waived until ${day}`);
+    expect(green.output.annotations.find((a) => a.path === 'api/loan_applications.py')?.annotation_level).toBe('notice');
+
+    // Expiry (the guide's test-only admin action): the next check fails again.
+    store.setExceptionExpiry(workspaceId, request.id, new Date(Date.now() - 24 * 3600 * 1000).toISOString());
+    expect(store.expireExceptions()).toBe(1);
+    expect(store.getException(workspaceId, request.id)?.status).toBe('expired');
+    await deliver('pull_request', prPayload('synchronize', HEAD2));
+    expect(await queue.drain()).toBe(1);
+    expect(finalPatch()).toMatchObject({ conclusion: 'failure', output: { title: '1 new finding (R-1)' } });
   });
 
   it('ignores pushes to other branches and branch deletions', async () => {

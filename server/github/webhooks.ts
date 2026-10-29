@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import type { JobQueue } from '../jobs/queue.js';
 import type { ProductStore } from '../product/store.js';
 import { verifyWebhookSignature, type GitHubApp } from './client.js';
+import { REQUEST_EXCEPTION, requestExceptionsFromCheckRun } from './exceptions.js';
 import type { ScanJobPayload } from './scanJob.js';
 
 type Obj = Record<string, unknown>;
@@ -134,7 +135,14 @@ function routeEvent(event: string, payload: Obj, deps: WebhookDeps, app: GitHubA
     const subject = obj(event === 'check_run' ? payload.check_run : payload.check_suite);
     const ownerAppId = num(obj(subject.app).id);
     if (ownerAppId !== null && String(ownerAppId) !== app.credentials.appId) return `ignored: another app's ${event}`;
-    if (action === 'requested_action') return 'ignored: check run buttons arrive with exceptions (Phase 4)';
+    if (action === 'requested_action') {
+      const identifier = text(obj(payload.requested_action).identifier);
+      if (event !== 'check_run' || identifier !== REQUEST_EXCEPTION) return `ignored: unknown check run action ${identifier ?? ''}`.trim();
+      const checkRunId = num(subject.id);
+      const login = text(obj(payload.sender).login);
+      if (checkRunId === null || !login) return 'ignored: requested_action without a check run or sender';
+      return requestExceptionsFromCheckRun(deps, { checkRunId, installationId, login, deliveryId });
+    }
     if (action !== 'rerequested') return `ignored: ${event}.${action}`;
     const headSha = text(subject.head_sha);
     if (!headSha) return `ignored: ${event} without a head commit`;

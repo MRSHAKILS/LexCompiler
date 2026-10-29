@@ -46,6 +46,25 @@ const routes = {
     impact: [{ repoId: 'repo-1', repoName: 'acme/core-platform', failures: 3, places: [{ filePath: 'schema/postgres_pii.sql', line: 4 }, { filePath: 'workers/redis_cache_worker.py', line: 8 }, { filePath: 'api/fastapi_intake.py', line: 20 }] }],
   },
   [`/api/workspaces/${WS}/rule-versions/v1/approve`]: { id: 'v1', version: 1, status: 'approved', queuedScans: [{ repoId: 'repo-1', jobId: 'j1' }] },
+  [`/api/workspaces/${WS}/inbox`]: {
+    exceptionRequests: [
+      {
+        id: 'ex-1',
+        ruleKey: 'R-1',
+        repoName: 'acme/core-platform',
+        filePath: 'api/loan_applications.py',
+        startLine: 20,
+        pathGlob: null,
+        message: 'create_application logs national_id without redaction',
+        reason: 'Requested from GitHub by @tanvir on pull request #1',
+        requestedBy: 'github:tanvir',
+        requestedFrom: 'github',
+        prNumber: 1,
+      },
+    ],
+    ruleDrafts: [{ versionId: 'v1', ruleKey: 'R-1', version: 1 }],
+  },
+  [`/api/workspaces/${WS}/exceptions/ex-1/approve`]: { id: 'ex-1', status: 'approved', rerunJobId: 'job-7' },
 };
 
 afterEach(() => {
@@ -82,6 +101,23 @@ describe("lawyer's workspace", () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Approve R-1 v1' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(`/api/workspaces/${WS}/rule-versions/v1/approve`, expect.objectContaining({ method: 'POST' })));
     expect((await screen.findByText(/queued for a scan of main/)).textContent).toBe('Approved. 1 repository queued for a scan of main.');
+  });
+
+  it('approves an exception from the inbox with a reason and an end date', async () => {
+    const fetchMock = mockFetch(routes);
+    render(<LegalWorkspace />);
+    const request = await screen.findByRole('listitem', { name: 'Exception request for R-1 at api/loan_applications.py:20' });
+    expect(within(request).getByText(/@tanvir on GitHub/)).toBeTruthy();
+    const approve = within(request).getByRole('button', { name: 'Approve exception' }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    fireEvent.change(within(request).getByRole('textbox', { name: 'Reason for the decision' }), { target: { value: 'Endpoint does not store PII; storage is added in LN-12' } });
+    fireEvent.change(within(request).getByLabelText('Waived until'), { target: { value: '2026-11-30' } });
+    expect(approve.disabled).toBe(false);
+    fireEvent.click(approve);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(`/api/workspaces/${WS}/exceptions/ex-1/approve`, expect.anything()));
+    const call = (fetchMock.mock.calls as unknown as Array<[string, RequestInit]>).find(([u]) => u.endsWith('/exceptions/ex-1/approve'))!;
+    expect(JSON.parse(String(call[1].body))).toEqual({ note: 'Endpoint does not store PII; storage is added in LN-12', expiresAt: '2026-11-30T23:59:59.000Z' });
+    expect((await screen.findByText(/Exception approved/)).textContent).toBe('Exception approved. The pull request check runs again.');
   });
 
   it('names every control', async () => {

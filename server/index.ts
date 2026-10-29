@@ -11,6 +11,7 @@ import { GitHubApp, githubUrls } from './github/client.js';
 import { loadGitHubAppCredentials } from './github/credentials.js';
 import { createBrowserAuth, createGitHubApiRouter, createGitHubRoutes } from './github/routes.js';
 import { createScanJobHandler } from './github/scanJob.js';
+import { createCommentJobHandler, rerunCheckForException } from './github/exceptions.js';
 import { createWebhookHandler, enqueueScan } from './github/webhooks.js';
 import { JobQueue } from './jobs/queue.js';
 import path from 'node:path';
@@ -124,7 +125,7 @@ try {
 const getGitHubApp = () => githubApp;
 const jobQueue = new JobQueue(
   getDb(),
-  { scan: createScanJobHandler({ store: productStore, getApp: getGitHubApp, publicUrl }) },
+  { scan: createScanJobHandler({ store: productStore, getApp: getGitHubApp, publicUrl }), github_comment: createCommentJobHandler({ getApp: getGitHubApp }) },
   { onError: (err, job) => console.error(`[jobs] ${job.kind} ${job.id} attempt ${job.attempt} failed: ${err instanceof Error ? err.message : String(err)}`) }
 );
 // The webhook needs the raw body to check GitHub's signature, so it is registered before
@@ -147,8 +148,13 @@ app.use(
       repo.githubRepoId !== null && repo.installationId !== null
         ? enqueueScan({ queue: jobQueue }, { githubRepoId: repo.githubRepoId, installationId: repo.installationId, kind: 'push', trigger: 'rule_approved' }, `rule:${version.id}:${repo.id}`)
         : null,
+    onExceptionDecided: (exception) => rerunCheckForException({ store: productStore, queue: jobQueue }, exception),
   })
 );
+// Expires exceptions whose date has passed. Scans already ignore them; this keeps the inbox and
+// the evidence accurate.
+productStore.expireExceptions();
+setInterval(() => productStore.expireExceptions(), 60 * 60 * 1000).unref();
 app.use('/api', createGitHubApiRouter(getGitHubApp));
 
 /**

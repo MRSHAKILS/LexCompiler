@@ -13,7 +13,7 @@ import { DocumentError, extractDocumentText, looksLikeLegacyBangla, MAX_DOCUMENT
 import { buildRuleCard, CATEGORY_LABELS, cleanOverrides, impactPreview, type RuleCard } from './ruleCard.js';
 import { classifyFindings, scanFiles } from './scanner.js';
 import { scanConclusion, summarizeFindings } from './summary.js';
-import { can, ProductStore, StoreError, WORKSPACE_ROLES, type Permission, type Repo, type RuleScope, type RuleVersion, type User, type WorkspaceRole } from './store.js';
+import { can, ProductStore, StoreError, WORKSPACE_ROLES, type ExceptionRecord, type ExceptionStatus, type Permission, type Repo, type RuleScope, type RuleVersion, type User, type WorkspaceRole } from './store.js';
 
 /** Bearer API token (admin), OIDC bearer JWT, or OIDC session cookie. */
 export function createAuthenticator(oidc: OidcProvider, apiToken: string | null): Authenticator {
@@ -50,7 +50,11 @@ export interface ProductRouterOptions {
    * id (null when an identical scan is already queued). Without it, approval queues nothing.
    */
   enqueueBranchScan?: (repo: Repo, version: RuleVersion) => string | null;
+  /** Re-runs the pull request check an exception was requested on, after Legal decides it. */
+  onExceptionDecided?: (exception: ExceptionRecord) => string | null;
 }
+
+const EXCEPTION_STATUSES: ExceptionStatus[] = ['requested', 'approved', 'rejected', 'expired', 'revoked'];
 
 /** The card as stored with a draft: everything except the compiled clause, which the version has. */
 function storedCard(card: RuleCard): Record<string, unknown> {
@@ -451,6 +455,97 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
       res.json(rules.map((x) => ({ ...x, clause: { id: x.clause.id, title: x.clause.title, category: x.clause.category } })));
     })
   );
+
+  // ---------------------------------------------------------------- exceptions and the Legal inbox (Phase 4)
+
+  r.get(
+    '/workspaces/:workspaceId/exceptions',
+    need('view'),
+    handle((req, res) => {
+      const status = req.query.status ? String(req.query.status) : undefined;
+      if (status && !EXCEPTION_STATUSES.includes(status as ExceptionStatus)) throw new StoreError(`status must be one of ${EXCEPTION_STATUSES.join(', ')}`);
+      res.json(store.listExceptions(wid(req), { status: status as ExceptionStatus | undefined }));
+    })
+  );
+  /**
+   * Engineers ask for an exception from the dashboard: { scanId, fingerprint } for one finding of a
+   * scan, or { scanId, ruleKey, pathGlob } for every finding of a rule under a path; and a reason.
+   */
+  r.post(
+    '/workspaces/:workspaceId/exceptions',
+    need('requestExceptions'),
+    handle((req, res) => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const scan = store.getScan(wid(req), String(body.scanId || ''));
+      if (!scan) throw new StoreError('scan not found', 404);
+      const findings = store.listFindings(scan.id);
+      let ruleId: string;
+      let finding: { filePath: string; startLine: number; message: string } | null = null;
+      if (body.fingerprint) {
+        const f = findings.find((x) => x.fingerprint === String(body.fingerprint));
+        if (!f) throw new StoreError('that finding is not in this scan', 404);
+        ruleId = f.ruleId;
+        finding = { filePath: f.filePath, startLine: f.startLine, message: f.message };
+      } else {
+        const f = findings.find((x) => x.ruleKey === String(body.ruleKey || ''));
+        if (!f) throw new StoreError('this scan has no finding of that rule', 404);
+        ruleId = f.ruleId;
+      }
+      const user = userOf(res);
+      const { exception, created } = store.requestException({
+        workspaceId: wid(req),
+        ruleId,
+        repoId: scan.repoId,
+        fingerprint: body.fingerprint ? String(body.fingerprint) : null,
+        pathGlob: body.fingerprint ? null : String(body.pathGlob || ''),
+        reason: String(body.reason || ''),
+        requestedBy: user.id,
+        requestedFrom: 'dashboard',
+        scan: { id: scan.id, prNumber: scan.prNumber, headSha: scan.commitSha, baseSha: scan.baseSha },
+        finding,
+      });
+      res.status(created ? 201 : 200).json(exception);
+    })
+  );
+  const decided = (exception: ExceptionRecord) => ({ ...exception, rerunJobId: options.onExceptionDecided?.(exception) ?? null });
+  /** Legal approves with a reason and a required expiry date: { note, expiresAt }. */
+  r.post(
+    '/workspaces/:workspaceId/exceptions/:exceptionId/approve',
+    need('decideExceptions'),
+    handle((req, res) => {
+      if (!req.body?.expiresAt) throw new StoreError('expiresAt is required: every exception ends');
+      const e = store.decideException(wid(req), String(req.params.exceptionId), userOf(res).id, { approve: true, note: String(req.body?.note || ''), expiresAt: String(req.body.expiresAt) });
+      res.json(decided(e));
+    })
+  );
+  r.post(
+    '/workspaces/:workspaceId/exceptions/:exceptionId/reject',
+    need('decideExceptions'),
+    handle((req, res) => {
+      const e = store.decideException(wid(req), String(req.params.exceptionId), userOf(res).id, { approve: false, note: String(req.body?.note || '') });
+      res.json(decided(e));
+    })
+  );
+  /** Test-only admin action (guide, Phase 4 test): move an exception's expiry, for example to yesterday. */
+  r.post(
+    '/workspaces/:workspaceId/exceptions/:exceptionId/expiry',
+    need('view'),
+    handle((req, res) => {
+      if (!isAdmin(res)) throw new StoreError('only administrators can change an expiry date', 403);
+      const at = String(req.body?.expiresAt || '');
+      if (Number.isNaN(Date.parse(at))) throw new StoreError('expiresAt must be a date');
+      store.setExceptionExpiry(wid(req), String(req.params.exceptionId), at);
+      store.expireExceptions();
+      res.json(store.getException(wid(req), String(req.params.exceptionId)));
+    })
+  );
+  /** What waits for Legal: exception requests and rule drafts. */
+  r.get('/workspaces/:workspaceId/inbox', need('view'), (req, res) => {
+    const drafts = store
+      .listRules(wid(req))
+      .flatMap((rule) => rule.versions.filter((v) => v.status === 'draft').map((v) => ({ ruleId: rule.id, ruleKey: rule.key, title: rule.title, versionId: v.id, version: v.version, createdAt: v.createdAt })));
+    res.json({ exceptionRequests: store.listExceptions(wid(req), { status: 'requested' }), ruleDrafts: drafts, feedDrafts: [] });
+  });
 
   // ---------------------------------------------------------------- scans
 

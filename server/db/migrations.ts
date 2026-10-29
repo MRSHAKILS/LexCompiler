@@ -324,4 +324,21 @@ ALTER TABLE documents ADD COLUMN file_blob BLOB;
 ALTER TABLE rule_versions ADD COLUMN card_json TEXT;
 `,
   },
+  {
+    id: 5,
+    name: 'where an exception was requested from',
+    sql: `
+-- The pull request and check run an exception was requested on, so approval can re-run that check.
+ALTER TABLE exceptions ADD COLUMN scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL;
+ALTER TABLE exceptions ADD COLUMN pr_number INTEGER;
+ALTER TABLE exceptions ADD COLUMN head_sha TEXT;
+ALTER TABLE exceptions ADD COLUMN base_sha TEXT;
+-- The finding as it was when the exception was requested, for the inbox.
+ALTER TABLE exceptions ADD COLUMN file_path TEXT;
+ALTER TABLE exceptions ADD COLUMN start_line INTEGER;
+ALTER TABLE exceptions ADD COLUMN message TEXT;
+CREATE INDEX exceptions_workspace_status ON exceptions(workspace_id, status);
+CREATE INDEX scans_check_run ON scans(check_run_id);
+`,
+  },
 ];

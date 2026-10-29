@@ -5,6 +5,7 @@ import { summarizeFindings } from '../product/summary.js';
 import { lexcompilerVersion } from '../util/versions.js';
 import { CHECK_NAME, checkConclusion, chunk, renderCheckOutput, type CheckKind } from './checkRun.js';
 import { GitHubApiError, type GitHubApp } from './client.js';
+import { REQUEST_EXCEPTION_ACTION, waiverLine } from './exceptions.js';
 import { readTarballSources } from './tarball.js';
 
 export interface ScanJobPayload {
@@ -135,7 +136,8 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
         const baseline = await mergeBase(app, installationId, route, p.baseSha, headSha);
         base = await baselineFindings(deps.store, app, installationId, repo, baseline, rules, globs, version);
       }
-      const findings = classifyFindings(head.findings, base, deps.store.activeExceptions(repo.workspaceId, repo.id));
+      const exceptions = deps.store.activeExceptions(repo.workspaceId, repo.id);
+      const findings = classifyFindings(head.findings, base, exceptions);
       const summary = summarizeFindings(findings, head.undecidedRuleKeys);
       const conclusion = checkConclusion(p.kind, summary);
       deps.store.completeScan(scan.id, { conclusion, filesScanned: head.filesScanned, summary, facts: head.facts, findings });
@@ -151,6 +153,7 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
         filesScanned: head.filesScanned,
         truncated: head.truncated,
         lexcompilerVersion: version,
+        waiverLine: waiverLine(findings, new Map(exceptions.map((e) => [e.id, e.expiresAt ?? null]))),
       });
       const [first = [], ...rest] = chunk(output.annotations, 50);
       await app.request(installationId, 'PATCH', `${route}/check-runs/${run.id}`, {
@@ -159,6 +162,8 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
         completed_at: nowIso(),
         details_url: detailsUrl,
         output: { title: output.title, summary: output.summary, annotations: first },
+        // A pull request that fails for new findings offers "Request exception" (check_run.requested_action).
+        ...(p.kind === 'pull_request' && summary.newCount > 0 ? { actions: [REQUEST_EXCEPTION_ACTION] } : {}),
       });
       for (const batch of rest) {
         await app.request(installationId, 'PATCH', `${route}/check-runs/${run.id}`, { output: { title: output.title, summary: output.summary, annotations: batch } });

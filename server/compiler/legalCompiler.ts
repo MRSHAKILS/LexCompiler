@@ -1353,7 +1353,13 @@ async function withOfficialEurLexText(items: LiveRegulatoryFeedItem[], fetchImpl
   ];
 }
 
-export async function fetchLiveRegulatoryFeed(fetchImpl: typeof fetch = fetch): Promise<LiveRegulatoryFeedItem[]> {
+/** LEXCOMPILER_REGULATORY_FEED=offline: the default feed makes no network calls and serves its offline items. */
+const offlineFetch: typeof fetch = async () => {
+  throw new Error('the regulatory feed is offline (LEXCOMPILER_REGULATORY_FEED=offline)');
+};
+
+export async function fetchLiveRegulatoryFeed(fetchImpl?: typeof fetch): Promise<LiveRegulatoryFeedItem[]> {
+  fetchImpl ??= process.env.LEXCOMPILER_REGULATORY_FEED === 'offline' ? offlineFetch : fetch;
   const curated: LiveRegulatoryFeedItem[] = [
     {
       id: 'EURLEX-32024R1689-ART14',

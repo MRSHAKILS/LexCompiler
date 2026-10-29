@@ -24,13 +24,14 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | MRSHAKILS/LexCompiler #3 | Bangla and test-repository RAG eval sets |
 | MRSHAKILS/LexCompiler #4, #5 | Windows test fixes (4 Vitest workers); RAG: stemmed BM25 with identifier parts; graph seeds and HyDE only from evidenced categories |
 | MRSHAKILS/LexCompiler #6 | Phase 3: the lawyer's workspace at `/legal` (documents, clauses, rule cards, approval rescans `main`) |
+| MRSHAKILS/LexCompiler #7 | Phase 4: exceptions ("Request exception" on the check, API, Legal inbox, re-run after a decision, expiry job) |
 
 | Phase | Status |
 |---|---|
 | 0–2 | Done, tested live on GitHub |
 | 2a AI foundation | Done. RAG eval now has a Bangla set and a set for the test repo (see Evals) |
 | 3 Lawyer's workspace | Done and tested locally (`/legal`). The GitHub part of the guide's test needs this machine's App credentials (see Open questions) |
-| 4 Fixes and exceptions | Not started. The `exceptions` table exists, nothing writes to it |
+| 4 Fixes and exceptions | Exceptions done and tested against a fake GitHub; the live test on finhealth-core-platform PR #1 needs the App credentials. Fix PRs and suggested changes (guide items 1–2) are not started |
 | 4a MCP for coding assistants | Not started. The six demo MCP servers work |
 | 5 Evidence and auditor | Not started. The `evidence`, `shares` and `share_views` tables exist, nothing writes to them |
 | 6, 7 | Not started |
@@ -44,6 +45,17 @@ This file says where the work stands, how to run it, and what to do next. The fu
   - `POST .../rules` now takes `values` (Legal's numbers, compiled with `compileLegalProseWithOverrides`) and `scope`, and stores the card with the version (`card_json`, migration 4).
   - Approval is refused while a value is an open question, and queues a scan of the default branch of every GitHub repo in scope (`enqueueBranchScan`, trigger `rule_approved`).
   - With AI on, the gateway suggests the numeric value and `checkExtraction` decides whether the card shows it ("Suggested by <model>") or asks.
+- **Exceptions** (Phase 4):
+  - A pull request check that fails for new findings has a **Request exception** button. A click (`check_run.requested_action`, identifier `request_exception`) creates one request per new finding of that run, attributed to `github:<login>`, and comments "Exception requested by @… — waiting for Legal" on the PR (job `github_comment`). A second click adds nothing.
+  - API under `/api/workspaces/<id>/exceptions`:
+    - `GET`, optionally with `?status=`.
+    - `POST` with `{ scanId, fingerprint | ruleKey + pathGlob, reason }`; engineers can ask.
+    - `POST …/<exceptionId>/approve` with `{ note, expiresAt }`; Legal only. The reason and an end date within a year are required.
+    - `POST …/<exceptionId>/reject`.
+    - `POST …/<exceptionId>/expiry`: the guide's test-only admin action.
+  - After a decision, the PR's check runs again (`rerunCheckForException`). A waived finding is a notice, and the summary says "1 finding waived until 30 Nov 2026".
+  - An hourly job (`expireExceptions`) marks past exceptions expired; scans ignore them either way.
+  - `GET /api/workspaces/<id>/inbox` lists exception requests and rule drafts; `/legal` shows it as the Legal inbox.
 - **Rules API** (Phase 1): `POST /api/workspaces/<id>/rules` creates a draft, `POST .../rule-versions/<versionId>/approve` and `.../reject` decide it (Legal only), `GET .../rules-in-effect` lists what scans use.
 - **AI gateway** (`server/ai/gateway.ts`), the only code that calls a model:
   - A workspace's AI is `off` until the owner sets `local` or `cloud` with `PUT /api/workspaces/<id>/ai`, which also sets a daily token budget.
@@ -109,7 +121,9 @@ Dates are from the schedule in the product guide, section 7.
    - Decide whether to restore PR #15's files (below).
 2. ~~**Finish 2a.**~~ Done: `dataset.bn.json` and `dataset.finhealth.json`. The collection-model miss (q11, fh02) is fixed: BM25 stems words and splits identifiers, and a question with no category evidence no longer gets the retention clause's graph seeds and HyDE text. Both models are now in the top 5, at ranks 3 and 4.
 3. ~~**Phase 3, the lawyer's workspace.**~~ Done (#6). Left for later: the library screen (templates are served by `GET /api/library/templates` but have no screen yet), similar-rule links (guide 5.4 item 6), an LLM rephrasing of the plain reading, and the evidence record on approval (Phase 5).
-4. **Phase 4, fixes and exceptions** (Nov 23–29). The webhook ignores `check_run.requested_action` today (`server/github/webhooks.ts`). Exceptions need an API, a Legal inbox, a re-run after approval, and an expiry job. `classifyFindings` already applies approved exceptions.
+4. **Phase 4.** Exceptions are done (#7). Still to do:
+   - The live test on finhealth-core-platform PR #1 (guide, Phase 4 test, scene 4 steps 2–4 and Expiry). It needs the App credentials on this machine.
+   - Guide items 1–2: fix PRs through the Git Data API with the installation token, and review comments with `suggestion` blocks for findings on lines the PR changed.
 5. **Phase 4a, the `/mcp` endpoint** (Nov 30–Dec 6): tokens and the six tools in guide 5.8. Then fill in the client test table in 5.9.
 6. **Phase 5, evidence and the auditor** (Dec 7–13): `appendEvidence`, share links, `verify.mjs`. The guide has the code.
 7. **Phases 6 and 7** (Dec 14–19), then a freeze from Dec 20 to 25.
