@@ -176,6 +176,8 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
     })
   );
 
+  r.get('/workspaces/:workspaceId/github', need('view'), (req, res) => res.json(store.listInstallationsForWorkspace(wid(req))));
+
   r.get('/workspaces/:workspaceId/counterparties', need('view'), (req, res) => res.json(store.listCounterparties(wid(req))));
   r.post(
     '/workspaces/:workspaceId/counterparties',

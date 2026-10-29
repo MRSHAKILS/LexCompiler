@@ -108,7 +108,7 @@ export interface RuleInEffect {
   scope: RuleScope;
 }
 
-export type ScanTrigger = 'pull_request' | 'push' | 'manual' | 'rerun';
+export type ScanTrigger = 'pull_request' | 'push' | 'manual' | 'rerun' | 'baseline' | 'connect';
 export type ScanStatus = 'queued' | 'in_progress' | 'completed' | 'failed';
 export interface ScanRecord {
   id: string;
@@ -848,6 +848,42 @@ export class ProductStore {
       )
       .all(workspaceId, repoId, at) as Row[];
     return rows.map((r) => ({ id: String(r.id), ruleId: String(r.rule_id), fingerprint: str(r.fingerprint), pathGlob: str(r.path_glob) }));
+  }
+
+  // ---------------------------------------------------------------- GitHub
+
+  /** GitHub installations linked to a workspace, with their repositories. */
+  listInstallationsForWorkspace(workspaceId: string): Array<{ installationId: number; accountLogin: string; accountType: string; repos: Repo[] }> {
+    const rows = this.db
+      .prepare('SELECT installation_id, account_login, account_type FROM github_installations WHERE workspace_id = ? AND removed_at IS NULL ORDER BY created_at')
+      .all(workspaceId) as Row[];
+    return rows.map((r) => ({
+      installationId: Number(r.installation_id),
+      accountLogin: String(r.account_login),
+      accountType: String(r.account_type),
+      repos: this.listRepos(workspaceId).filter((repo) => repo.installationId === Number(r.installation_id)),
+    }));
+  }
+
+  /** Records a webhook delivery. Returns false when the delivery was already seen (a redelivery). */
+  recordWebhookDelivery(deliveryId: string, event: string, action: string | null): boolean {
+    const r = this.db
+      .prepare('INSERT OR IGNORE INTO webhook_deliveries (delivery_id, event, action, received_at) VALUES (?, ?, ?, ?)')
+      .run(deliveryId, event, action, nowIso());
+    return Number(r.changes) === 1;
+  }
+
+  /**
+   * Path globs a rule applies to in one repository: everything for workspace-wide rules, otherwise
+   * the scope of the rule's counterparties in this repository (empty means the rule does not apply).
+   */
+  ruleScopeGlobs(scope: RuleScope, repoId: string): string[] {
+    if (scope.all || !scope.counterpartyIds?.length) return ['**'];
+    const placeholders = scope.counterpartyIds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(`SELECT DISTINCT path_glob FROM counterparty_scope WHERE repo_id = ? AND counterparty_id IN (${placeholders})`)
+      .all(repoId, ...scope.counterpartyIds) as Row[];
+    return rows.map((r) => String(r.path_glob));
   }
 }
 

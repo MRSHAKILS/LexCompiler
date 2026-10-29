@@ -1,0 +1,213 @@
+import crypto from 'node:crypto';
+import { SignJWT } from 'jose';
+import type { GitHubAppCredentials } from './credentials.js';
+
+export class GitHubApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+  }
+}
+
+export interface GitHubUrls {
+  /** REST API, e.g. https://api.github.com */
+  apiUrl: string;
+  /** Web pages and OAuth, e.g. https://github.com */
+  webUrl: string;
+}
+
+export function githubUrls(env: NodeJS.ProcessEnv = process.env): GitHubUrls {
+  return {
+    apiUrl: (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, ''),
+    webUrl: (env.LEXCOMPILER_GITHUB_WEB_URL || 'https://github.com').replace(/\/+$/, ''),
+  };
+}
+
+const API_HEADERS = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'LexCompiler' };
+/** Repository archives over this size are refused. */
+export const MAX_TARBALL_BYTES = 200 * 1024 * 1024;
+
+export interface GitHubRepoSummary {
+  id: number;
+  fullName: string;
+  defaultBranch: string;
+}
+
+/** A GitHub App: authenticates as the app (JWT) and as its installations (one-hour tokens). */
+export class GitHubApp {
+  private readonly key: crypto.KeyObject;
+  private readonly tokens = new Map<number, { token: string; expiresAt: number }>();
+
+  constructor(
+    readonly credentials: GitHubAppCredentials,
+    readonly urls: GitHubUrls = githubUrls(),
+    private readonly fetchImpl: typeof fetch = fetch
+  ) {
+    this.key = crypto.createPrivateKey(credentials.privateKeyPem);
+  }
+
+  /** A JWT that authenticates as the app itself. GitHub accepts at most 10 minutes. */
+  appJwt(): Promise<string> {
+    const now = Math.floor(Date.now() / 1000);
+    return new SignJWT({})
+      .setProtectedHeader({ alg: 'RS256' })
+      .setIssuedAt(now - 60)
+      .setExpirationTime(now + 9 * 60)
+      .setIssuer(this.credentials.appId)
+      .sign(this.key);
+  }
+
+  private async call<T>(token: string, method: string, route: string, body?: unknown): Promise<T> {
+    const res = await this.fetchImpl(`${this.urls.apiUrl}${route}`, {
+      method,
+      headers: { ...API_HEADERS, Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new GitHubApiError(`GitHub ${method} ${route.split('?')[0]} failed (${res.status}): ${text.slice(0, 300)}`, res.status);
+    return (text ? JSON.parse(text) : {}) as T;
+  }
+
+  /** Installation tokens last an hour. One is reused until five minutes before it expires; none is stored. */
+  async installationToken(installationId: number): Promise<string> {
+    const cached = this.tokens.get(installationId);
+    if (cached && cached.expiresAt - Date.now() > 5 * 60 * 1000) return cached.token;
+    const data = await this.call<{ token: string; expires_at?: string }>(await this.appJwt(), 'POST', `/app/installations/${installationId}/access_tokens`);
+    this.tokens.set(installationId, { token: data.token, expiresAt: Date.parse(data.expires_at || '') || Date.now() + 55 * 60 * 1000 });
+    return data.token;
+  }
+
+  /** Calls the REST API as an installation. */
+  async request<T = Record<string, unknown>>(installationId: number, method: string, route: string, body?: unknown): Promise<T> {
+    return this.call<T>(await this.installationToken(installationId), method, route, body);
+  }
+
+  /** Downloads `owner/repo` at `sha` as a gzipped tarball (in memory), refusing archives over 200 MiB. */
+  async downloadTarball(installationId: number, fullName: string, sha: string): Promise<Buffer> {
+    const token = await this.installationToken(installationId);
+    const res = await this.fetchImpl(`${this.urls.apiUrl}/repos/${fullName}/tarball/${encodeURIComponent(sha)}`, {
+      headers: { ...API_HEADERS, Authorization: `Bearer ${token}` },
+      redirect: 'follow',
+    });
+    if (!res.ok || !res.body) throw new GitHubApiError(`GitHub tarball of ${fullName}@${sha} failed (${res.status})`, res.status);
+    const declared = Number(res.headers.get('content-length') || 0);
+    if (declared > MAX_TARBALL_BYTES) throw new GitHubApiError(`the repository archive is ${declared} bytes; the limit is ${MAX_TARBALL_BYTES}`, 413);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_TARBALL_BYTES) {
+        await reader.cancel();
+        throw new GitHubApiError(`the repository archive exceeds ${MAX_TARBALL_BYTES} bytes`, 413);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks);
+  }
+
+  /** Repositories an installation can access. */
+  async installationRepositories(installationId: number): Promise<GitHubRepoSummary[]> {
+    const out: GitHubRepoSummary[] = [];
+    for (let page = 1; page <= 50; page++) {
+      const data = await this.request<{ repositories?: Array<{ id: number; full_name: string; default_branch?: string }> }>(
+        installationId,
+        'GET',
+        `/installation/repositories?per_page=100&page=${page}`
+      );
+      const items = data.repositories ?? [];
+      out.push(...items.map((r) => ({ id: Number(r.id), fullName: String(r.full_name), defaultBranch: String(r.default_branch || 'main') })));
+      if (items.length < 100) break;
+    }
+    return out;
+  }
+
+  /** Where an owner installs the app. GitHub passes `state` back to the setup URL. */
+  installUrl(state: string): string | null {
+    const slug = this.credentials.slug;
+    return slug ? `${this.urls.webUrl}/apps/${encodeURIComponent(slug)}/installations/new?state=${encodeURIComponent(state)}` : null;
+  }
+
+  /** True when the app can confirm which GitHub user installed it (OAuth client credentials). */
+  canVerifyUsers(): boolean {
+    return Boolean(this.credentials.clientId && this.credentials.clientSecret);
+  }
+
+  authorizeUrl(state: string, redirectUri: string): string {
+    const q = new URLSearchParams({ client_id: this.credentials.clientId || '', redirect_uri: redirectUri, state });
+    return `${this.urls.webUrl}/login/oauth/authorize?${q}`;
+  }
+
+  /** Exchanges a user authorization code (web flow) for a user access token. */
+  async exchangeOAuthCode(code: string, redirectUri: string): Promise<string> {
+    const { clientId, clientSecret } = this.credentials;
+    if (!clientId || !clientSecret) throw new GitHubApiError('the GitHub App has no OAuth client credentials', 500);
+    const res = await this.fetchImpl(`${this.urls.webUrl}/login/oauth/access_token`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'LexCompiler' },
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: redirectUri }),
+    });
+    const data = (await res.json().catch(() => ({}))) as { access_token?: string; error?: string; error_description?: string };
+    if (!res.ok || !data.access_token) throw new GitHubApiError(`GitHub authorization failed: ${data.error_description || data.error || res.status}`, 401);
+    return data.access_token;
+  }
+
+  /** Installations of this app that a user (by user access token) can access. */
+  async userInstallations(userToken: string): Promise<Array<{ id: number; accountLogin: string; accountType: string }>> {
+    const out: Array<{ id: number; accountLogin: string; accountType: string }> = [];
+    for (let page = 1; page <= 10; page++) {
+      const data = await this.call<{ installations?: Array<{ id: number; account?: { login?: string; type?: string } }> }>(
+        userToken,
+        'GET',
+        `/user/installations?per_page=100&page=${page}`
+      );
+      const items = data.installations ?? [];
+      out.push(...items.map((i) => ({ id: Number(i.id), accountLogin: String(i.account?.login ?? ''), accountType: String(i.account?.type ?? 'User') })));
+      if (items.length < 100) break;
+    }
+    return out;
+  }
+}
+
+/** Completes the manifest flow: exchanges GitHub's temporary code for the new app's credentials. */
+export async function convertAppManifest(
+  code: string,
+  urls: GitHubUrls = githubUrls(),
+  fetchImpl: typeof fetch = fetch
+): Promise<Omit<GitHubAppCredentials, 'source'>> {
+  const res = await fetchImpl(`${urls.apiUrl}/app-manifests/${encodeURIComponent(code)}/conversions`, { method: 'POST', headers: API_HEADERS });
+  const text = await res.text();
+  if (!res.ok) throw new GitHubApiError(`GitHub manifest conversion failed (${res.status}): ${text.slice(0, 300)}`, res.status);
+  const d = JSON.parse(text) as {
+    id: number;
+    slug?: string;
+    name?: string;
+    html_url?: string;
+    pem: string;
+    webhook_secret: string;
+    client_id?: string;
+    client_secret?: string;
+  };
+  return {
+    appId: String(d.id),
+    slug: d.slug ?? null,
+    name: d.name ?? null,
+    htmlUrl: d.html_url ?? null,
+    privateKeyPem: d.pem,
+    webhookSecret: d.webhook_secret,
+    clientId: d.client_id ?? null,
+    clientSecret: d.client_secret ?? null,
+  };
+}
+
+/** Checks GitHub's `X-Hub-Signature-256` header (HMAC-SHA256 of the raw body) in constant time. */
+export function verifyWebhookSignature(secret: string, rawBody: Buffer, header: string | undefined): boolean {
+  if (!header || !header.startsWith('sha256=')) return false;
+  const expected = Buffer.from(crypto.createHmac('sha256', secret).update(rawBody).digest('hex'), 'utf8');
+  const provided = Buffer.from(header.slice('sha256='.length), 'utf8');
+  return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+}

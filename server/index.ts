@@ -7,6 +7,12 @@ import { getDb } from './db/index.js';
 import { createAuthenticator, createProductRouter } from './product/router.js';
 import { databaseSessionStore, ProductStore } from './product/store.js';
 import { lexcompilerVersion } from './util/versions.js';
+import { GitHubApp, githubUrls } from './github/client.js';
+import { loadGitHubAppCredentials } from './github/credentials.js';
+import { createBrowserAuth, createGitHubApiRouter, createGitHubRoutes } from './github/routes.js';
+import { createScanJobHandler } from './github/scanJob.js';
+import { createWebhookHandler } from './github/webhooks.js';
+import { JobQueue } from './jobs/queue.js';
 import path from 'node:path';
 import cors from 'cors';
 import express from 'express';
@@ -102,9 +108,29 @@ app.use(
     origin: (origin, callback) => callback(null, isOriginAllowed(securityConfig, origin)),
   })
 );
-app.use(express.json({ limit: '5mb' }));
 const oidcConfig = oidcConfigFromEnv();
 const productStore = new ProductStore(getDb());
+
+// GitHub App: credentials from the environment or data/github-app.json (written by /github/register).
+const publicUrl = (process.env.LEXCOMPILER_PUBLIC_URL || `http://localhost:${securityConfig.port}`).replace(/\/+$/, '');
+const ghUrls = githubUrls();
+let githubApp: GitHubApp | null = null;
+try {
+  const credentials = loadGitHubAppCredentials();
+  githubApp = credentials ? new GitHubApp(credentials, ghUrls) : null;
+} catch (err) {
+  console.error(`[github] ${err instanceof Error ? err.message : String(err)}`);
+}
+const getGitHubApp = () => githubApp;
+const jobQueue = new JobQueue(
+  getDb(),
+  { scan: createScanJobHandler({ store: productStore, getApp: getGitHubApp, publicUrl }) },
+  { onError: (err, job) => console.error(`[jobs] ${job.kind} ${job.id} attempt ${job.attempt} failed: ${err instanceof Error ? err.message : String(err)}`) }
+);
+// The webhook needs the raw body to check GitHub's signature, so it is registered before
+// express.json() and the /api guard (GitHub sends no browser headers).
+app.post('/api/github/webhooks', express.raw({ type: () => true, limit: '25mb' }), createWebhookHandler({ store: productStore, getApp: getGitHubApp, queue: jobQueue }));
+app.use(express.json({ limit: '5mb' }));
 const oidcProvider = oidcConfig ? new OidcProvider(oidcConfig, databaseSessionStore(productStore)) : null;
 // Expired sessions are also dropped when read; this keeps the table small.
 productStore.purgeExpiredSessions();
@@ -113,6 +139,7 @@ setInterval(() => productStore.purgeExpiredSessions(), 60 * 60 * 1000).unref();
 lexcompilerVersion();
 app.use('/api', createApiGuard(securityConfig, oidcProvider ? createAuthenticator(oidcProvider, securityConfig.apiToken) : undefined));
 app.use('/api', createProductRouter(productStore, oidcProvider, { reposRoot: process.env.LEXCOMPILER_PROJECT_REPOS_ROOT || path.join(process.cwd(), 'repos') }));
+app.use('/api', createGitHubApiRouter(getGitHubApp));
 
 /**
  * Requests that rewrite target-repo files, commit, or change clauses run one at a time,
@@ -1067,6 +1094,22 @@ app.post('/api/enterprise/byoc-scan', async (req, res) => {
   }
 });
 
+// GitHub App pages: register, install, link, and the scan report linked from check runs.
+app.use(
+  createGitHubRoutes({
+    store: productStore,
+    queue: jobQueue,
+    getApp: getGitHubApp,
+    onRegistered: (credentials) => {
+      githubApp = new GitHubApp(credentials, ghUrls);
+    },
+    auth: createBrowserAuth(oidcProvider),
+    publicUrl,
+    urls: ghUrls,
+    webhookUrl: process.env.LEXCOMPILER_GITHUB_WEBHOOK_URL || `${publicUrl}/api/github/webhooks`,
+  })
+);
+
 // Serve built frontend in production
 const distPath = path.resolve(process.cwd(), 'dist');
 app.use(express.static(distPath));
@@ -1079,6 +1122,8 @@ app.get('*', (req, res, next) => {
     if (err) next();
   });
 });
+
+jobQueue.start();
 
 app.listen(securityConfig.port, securityConfig.host, () => {
   console.log(

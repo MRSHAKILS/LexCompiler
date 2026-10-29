@@ -1,0 +1,220 @@
+import type { JobHandler } from '../jobs/queue.js';
+import { classifyFindings, globMatch, scanFiles, type RawFinding } from '../product/scanner.js';
+import { rulesetSha256, type ProductStore, type Repo, type RuleInEffect, type ScanTrigger } from '../product/store.js';
+import { summarizeFindings } from '../product/summary.js';
+import { lexcompilerVersion } from '../util/versions.js';
+import { CHECK_NAME, checkConclusion, chunk, renderCheckOutput, type CheckKind } from './checkRun.js';
+import type { GitHubApp } from './client.js';
+import { readTarballSources } from './tarball.js';
+
+export interface ScanJobPayload {
+  githubRepoId: number;
+  installationId: number;
+  kind: CheckKind;
+  trigger: ScanTrigger;
+  /** The commit to check. When missing, `ref` (default: the default branch) is resolved first. */
+  headSha?: string;
+  ref?: string;
+  /** Pull requests: the base branch commit GitHub reported. The merge base is used when available. */
+  baseSha?: string | null;
+  prNumber?: number | null;
+}
+
+export interface ScanJobDeps {
+  store: ProductStore;
+  getApp: () => GitHubApp | null;
+  publicUrl: string;
+}
+
+interface CommitScan {
+  findings: RawFinding[];
+  undecidedRuleKeys: string[];
+  filesScanned: number;
+  truncated: boolean;
+  facts: unknown;
+}
+
+const nowIso = () => new Date().toISOString();
+
+/**
+ * Scans one commit for the GitHub App and reports it as a check run. The repository is read
+ * from GitHub's archive in memory, parsed, and proved with Z3; nothing in it is executed.
+ */
+export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
+  return async (raw, ctx) => {
+    const p = raw as unknown as ScanJobPayload;
+    const app = deps.getApp();
+    if (!app) throw new Error('the GitHub App is not configured');
+    const repo = deps.store.getRepoByGithubId(p.githubRepoId);
+    if (!repo) return; // removed from the installation since the job was queued
+    const route = `/repos/${repo.fullName}`;
+    const installationId = p.installationId;
+    const headSha =
+      p.headSha ?? (await app.request<{ sha: string }>(installationId, 'GET', `${route}/commits/${encodeURIComponent(p.ref ?? repo.defaultBranch)}`)).sha;
+
+    if (!repo.workspaceId) {
+      await app.request(installationId, 'POST', `${route}/check-runs`, {
+        name: CHECK_NAME,
+        head_sha: headSha,
+        status: 'completed',
+        conclusion: 'action_required',
+        completed_at: nowIso(),
+        details_url: `${deps.publicUrl}/github/install`,
+        output: {
+          title: 'Connect this repository to a LexCompiler workspace',
+          summary: `The LexCompiler GitHub App is installed, but this installation is not linked to a workspace, so no rules apply yet. A workspace owner can link it at ${deps.publicUrl}/github/install.`,
+        },
+      });
+      return;
+    }
+
+    const globs = new Map<string, string[]>();
+    const rules = deps.store.rulesInEffect(repo.workspaceId).filter((r) => {
+      const g = deps.store.ruleScopeGlobs(r.scope, repo.id);
+      globs.set(r.ruleKey, g);
+      return g.length > 0;
+    });
+    if (rules.length === 0) {
+      await app.request(installationId, 'POST', `${route}/check-runs`, {
+        name: CHECK_NAME,
+        head_sha: headSha,
+        status: 'completed',
+        conclusion: 'neutral',
+        completed_at: nowIso(),
+        details_url: deps.publicUrl,
+        output: { title: 'No approved rules apply to this repository yet', summary: 'Rules are enforced once someone with the Legal role approves them in LexCompiler.' },
+      });
+      return;
+    }
+
+    const version = lexcompilerVersion();
+    const scan = deps.store.createScan({
+      repoId: repo.id,
+      commitSha: headSha,
+      baseSha: p.baseSha ?? null,
+      trigger: p.trigger,
+      prNumber: p.prNumber ?? null,
+      rules,
+      lexcompilerVersion: version,
+    });
+    const detailsUrl = `${deps.publicUrl}/scans/${scan.id}`;
+    let checkRunId: number | null = null;
+    let stored = false;
+    try {
+      const run = await app.request<{ id: number }>(installationId, 'POST', `${route}/check-runs`, {
+        name: CHECK_NAME,
+        head_sha: headSha,
+        status: 'in_progress',
+        started_at: nowIso(),
+        details_url: detailsUrl,
+        external_id: scan.id,
+        output: { title: `Checking ${rules.length} rules`, summary: `Parsing the code and proving ${rules.map((r) => r.ruleKey).join(', ')} with Z3.` },
+      });
+      checkRunId = run.id;
+      deps.store.setScanCheckRun(scan.id, run.id);
+
+      const head = await scanCommit(app, installationId, repo, headSha, rules, globs);
+      let base: RawFinding[] | null = null;
+      if (p.kind === 'pull_request' && p.baseSha) {
+        const baseline = await mergeBase(app, installationId, route, p.baseSha, headSha);
+        base = await baselineFindings(deps.store, app, installationId, repo, baseline, rules, globs, version);
+      }
+      const findings = classifyFindings(head.findings, base, deps.store.activeExceptions(repo.workspaceId, repo.id));
+      const summary = summarizeFindings(findings, head.undecidedRuleKeys);
+      const conclusion = checkConclusion(p.kind, summary);
+      deps.store.completeScan(scan.id, { conclusion, filesScanned: head.filesScanned, summary, facts: head.facts, findings });
+      stored = true;
+
+      const output = renderCheckOutput({
+        kind: p.kind,
+        summary,
+        findings,
+        rules: rules.map((r) => ({ ruleKey: r.ruleKey, title: r.clause.title, version: r.version })),
+        detailsUrl,
+        defaultBranch: repo.defaultBranch,
+        filesScanned: head.filesScanned,
+        truncated: head.truncated,
+        lexcompilerVersion: version,
+      });
+      const [first = [], ...rest] = chunk(output.annotations, 50);
+      await app.request(installationId, 'PATCH', `${route}/check-runs/${run.id}`, {
+        status: 'completed',
+        conclusion,
+        completed_at: nowIso(),
+        details_url: detailsUrl,
+        output: { title: output.title, summary: output.summary, annotations: first },
+      });
+      for (const batch of rest) {
+        await app.request(installationId, 'PATCH', `${route}/check-runs/${run.id}`, { output: { title: output.title, summary: output.summary, annotations: batch } });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!stored) deps.store.failScan(scan.id, message);
+      if (checkRunId !== null) {
+        const retrying = ctx.attempt < ctx.maxAttempts;
+        await app
+          .request(installationId, 'PATCH', `${route}/check-runs/${checkRunId}`, {
+            status: 'completed',
+            conclusion: 'failure',
+            completed_at: nowIso(),
+            output: {
+              title: 'LexCompiler could not finish this scan',
+              summary: `${message.slice(0, 2000)}\n\n${retrying ? `It will retry automatically (attempt ${ctx.attempt} of ${ctx.maxAttempts}).` : 'Use "Re-run" to try again.'}`,
+            },
+          })
+          .catch(() => undefined);
+      }
+      throw err;
+    }
+  };
+}
+
+async function scanCommit(
+  app: GitHubApp,
+  installationId: number,
+  repo: Repo,
+  sha: string,
+  rules: RuleInEffect[],
+  globs: Map<string, string[]>
+): Promise<CommitScan> {
+  const sources = await readTarballSources(await app.downloadTarball(installationId, repo.fullName, sha));
+  const result = await scanFiles(sources.files, rules);
+  // A rule scoped to a counterparty only counts in that counterparty's paths.
+  const findings = result.findings.filter((f) => (globs.get(f.ruleKey) ?? ['**']).some((g) => globMatch(g, f.filePath)));
+  return { findings, undecidedRuleKeys: result.undecidedRuleKeys, filesScanned: result.filesScanned, truncated: sources.truncatedAtLimit, facts: result.facts };
+}
+
+/** The commit the pull request branched from, so fixes made on the base branch later don't count as new. */
+async function mergeBase(app: GitHubApp, installationId: number, route: string, baseSha: string, headSha: string): Promise<string> {
+  try {
+    const cmp = await app.request<{ merge_base_commit?: { sha?: string } }>(installationId, 'GET', `${route}/compare/${baseSha}...${headSha}`);
+    return cmp.merge_base_commit?.sha || baseSha;
+  } catch {
+    return baseSha;
+  }
+}
+
+/** Findings on the baseline commit: reused from an earlier scan with the same rules, or scanned now. */
+async function baselineFindings(
+  store: ProductStore,
+  app: GitHubApp,
+  installationId: number,
+  repo: Repo,
+  sha: string,
+  rules: RuleInEffect[],
+  globs: Map<string, string[]>,
+  version: string
+): Promise<RawFinding[]> {
+  const cached = store.findCompletedScan(repo.id, sha, rulesetSha256(rules));
+  if (cached) return store.listFindings(cached.id);
+  const scan = store.createScan({ repoId: repo.id, commitSha: sha, trigger: 'baseline', rules, lexcompilerVersion: version });
+  try {
+    const result = await scanCommit(app, installationId, repo, sha, rules, globs);
+    const findings = classifyFindings(result.findings, null, []);
+    store.completeScan(scan.id, { conclusion: 'baseline', filesScanned: result.filesScanned, summary: summarizeFindings(findings, result.undecidedRuleKeys), facts: result.facts, findings });
+    return result.findings;
+  } catch (err) {
+    store.failScan(scan.id, err instanceof Error ? err.message : String(err));
+    throw err;
+  }
+}
