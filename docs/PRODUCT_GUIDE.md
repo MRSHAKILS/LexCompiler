@@ -6,14 +6,14 @@
 > | :--- | :--- |
 > | 0. Merge and fix | Done: #29, #28 (via #30); analyzer rewrite saved on `wip/analyzer-ir` |
 > | 1. Database | Done: #31 |
-> | 2. GitHub App and pull-request checks | Next |
-> | 3. The lawyer's workspace | Planned |
+> | 2. GitHub App and pull-request checks | Done: #32 |
+> | 3. The lawyer's workspace | Next |
 > | 4. Fixes and exceptions | Planned |
 > | 5. Evidence and the auditor | Planned |
 > | 6. Contract and regulation changes | Planned |
 > | 7. Online for outside testers | Planned |
 >
-> The test repository lives on the owner's own account instead of a separate organization; everything else in section 3 applies unchanged.
+> The test repository lives on the owner's own account instead of a separate organization. Since Phase 2, sections 3.2 and 3.3 are automated: `/github/register` creates the app from a manifest, and `/github/install` installs and links it (see the README, "GitHub App: Checking Pull Requests").
 
 
 This guide covers how to build the real-life scenario from the walkthrough (FinHealth, Nusrat, Arif, Tanvir, Lena) and test it on GitHub with real pull requests, a lawyer's workspace and an auditor's view.
