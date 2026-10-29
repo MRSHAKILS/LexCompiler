@@ -1383,6 +1383,43 @@ export class ProductStore {
     return true;
   }
 
+  // ---------------------------------------------------------------- fix pull requests and suggestions (Phase 4)
+
+  getFixPr(repoId: string, baseSha: string): { prNumber: number; url: string; branch: string; baseSha: string; commitSha: string; files: string[]; addressed: string[] } | undefined {
+    const r = this.db.prepare('SELECT * FROM fix_prs WHERE repo_id = ? AND base_sha = ?').get(repoId, baseSha) as Row | undefined;
+    return r ? this.fixPrFrom(r) : undefined;
+  }
+
+  listFixPrs(repoId: string): Array<{ prNumber: number; url: string; branch: string; baseSha: string; commitSha: string; files: string[]; addressed: string[]; createdAt: string }> {
+    return (this.db.prepare('SELECT * FROM fix_prs WHERE repo_id = ? ORDER BY created_at DESC').all(repoId) as Row[]).map((r) => ({ ...this.fixPrFrom(r), createdAt: String(r.created_at) }));
+  }
+
+  private fixPrFrom(r: Row) {
+    return {
+      prNumber: Number(r.pr_number),
+      url: String(r.url),
+      branch: String(r.branch),
+      baseSha: String(r.base_sha),
+      commitSha: String(r.commit_sha),
+      files: JSON.parse(String(r.files_json)) as string[],
+      addressed: JSON.parse(String(r.addressed_json)) as string[],
+    };
+  }
+
+  recordFixPr(input: { repoId: string; baseSha: string; prNumber: number; url: string; branch: string; commitSha: string; files: string[]; addressed: string[]; requestedBy: string }): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO fix_prs (repo_id, base_sha, pr_number, url, branch, commit_sha, files_json, addressed_json, requested_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(input.repoId, input.baseSha, input.prNumber, input.url, input.branch, input.commitSha, JSON.stringify(input.files), JSON.stringify(input.addressed), input.requestedBy, nowIso());
+  }
+
+  suggestedFingerprints(repoId: string, prNumber: number): Set<string> {
+    return new Set((this.db.prepare('SELECT fingerprint FROM pr_suggestions WHERE repo_id = ? AND pr_number = ?').all(repoId, prNumber) as Row[]).map((r) => String(r.fingerprint)));
+  }
+
+  recordSuggestion(repoId: string, prNumber: number, fingerprint: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO pr_suggestions (repo_id, pr_number, fingerprint, created_at) VALUES (?, ?, ?, ?)').run(repoId, prNumber, fingerprint, nowIso());
+  }
+
   // ---------------------------------------------------------------- share links (Phase 5)
 
   private shareFrom(r: Row): ShareRecord {

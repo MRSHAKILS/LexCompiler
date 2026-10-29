@@ -17,6 +17,8 @@ import { GitHubApp, verifyWebhookSignature } from './github/client.js';
 import { createCommentJobHandler, rerunCheckForException } from './github/exceptions.js';
 import { createGitHubRoutes, type BrowserAuth } from './github/routes.js';
 import { createScanJobHandler } from './github/scanJob.js';
+import { openFixPullRequest } from './github/fixes.js';
+import { scanFiles } from './product/scanner.js';
 import { readTarballSources } from './github/tarball.js';
 import { createWebhookHandler } from './github/webhooks.js';
 import { JobQueue } from './jobs/queue.js';
@@ -122,6 +124,14 @@ async function startFakeGitHub(publicKeyPem: string) {
   const tarballRequests: string[] = [];
   const checkRuns: Array<{ id: number; create: Record<string, unknown>; patches: Array<Record<string, unknown>> }> = [];
   const comments: Array<{ issue: number; body: string }> = [];
+  /** Changed files per pull request (GET pulls/:n/files), and what the app wrote through the API. */
+  const prFiles = new Map<number, Array<{ filename: string; patch: string }>>();
+  const reviews: Array<{ pr: number; body: Record<string, unknown> }> = [];
+  const blobs = new Map<string, string>();
+  const trees: Array<Record<string, unknown>> = [];
+  const commits: Array<Record<string, unknown>> = [];
+  const refs = new Map<string, string>();
+  const pulls: Array<Record<string, unknown>> = [];
   const appKey = await importSPKI(publicKeyPem, 'RS256');
   const server = http.createServer((req, res) => {
     let raw = '';
@@ -171,6 +181,34 @@ async function startFakeGitHub(publicKeyPem: string) {
           comments.push({ issue: Number(g[1]), body: String(body.body) });
           return json(201, { id: comments.length });
         }
+        if ((g = m(/^\/repos\/acme\/core-platform\/pulls\/(\d+)\/files$/))) return json(200, url.searchParams.get('page') === '1' ? (prFiles.get(Number(g[1])) ?? []) : []);
+        if ((g = m(/^\/repos\/acme\/core-platform\/pulls\/(\d+)\/reviews$/)) && req.method === 'POST') {
+          reviews.push({ pr: Number(g[1]), body });
+          return json(200, { id: reviews.length });
+        }
+        if (m(/^\/repos\/acme\/core-platform\/git\/blobs$/) && req.method === 'POST') {
+          const sha = crypto.createHash('sha1').update(String(body.content)).digest('hex');
+          blobs.set(sha, String(body.content));
+          return json(201, { sha });
+        }
+        if ((g = m(/^\/repos\/acme\/core-platform\/git\/commits\/(\w+)$/)) && req.method === 'GET') return json(200, { sha: g[1], tree: { sha: `tree-${g[1]}` } });
+        if (m(/^\/repos\/acme\/core-platform\/git\/trees$/) && req.method === 'POST') {
+          trees.push(body);
+          return json(201, { sha: `tree-new-${trees.length}` });
+        }
+        if (m(/^\/repos\/acme\/core-platform\/git\/commits$/) && req.method === 'POST') {
+          commits.push(body);
+          return json(201, { sha: `c0ffee${commits.length}`.padEnd(40, '0') });
+        }
+        if (m(/^\/repos\/acme\/core-platform\/git\/refs$/) && req.method === 'POST') {
+          if (refs.has(String(body.ref))) return json(422, { message: 'Reference already exists' });
+          refs.set(String(body.ref), String(body.sha));
+          return json(201, { ref: body.ref });
+        }
+        if (m(/^\/repos\/acme\/core-platform\/pulls$/) && req.method === 'POST') {
+          pulls.push(body);
+          return json(201, { number: 100 + pulls.length, html_url: `https://github.com/acme/core-platform/pull/${100 + pulls.length}` });
+        }
         if (url.pathname === '/installation/repositories') return json(200, { repositories: [{ id: REPO_ID, full_name: FULL_NAME, default_branch: 'main' }] });
         if (url.pathname === '/login/oauth/access_token' && req.method === 'POST') {
           return body.code === 'good-code' && body.client_secret === 'client-secret' ? json(200, { access_token: 'user-token' }) : json(200, { error: 'bad_verification_code' });
@@ -186,7 +224,7 @@ async function startFakeGitHub(publicKeyPem: string) {
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return { server, base, archives, dropTarball, tarballRequests, checkRuns, comments };
+  return { server, base, archives, dropTarball, tarballRequests, checkRuns, comments, prFiles, reviews, blobs, trees, commits, refs, pulls };
 }
 
 let fake: Awaited<ReturnType<typeof startFakeGitHub>>;
@@ -527,6 +565,57 @@ describe('GitHub App', () => {
     expect(patch.output.summary).toContain('### Coming up');
     expect(patch.output.summary).toContain(`**${r3.ruleKey} v${version.version}** takes effect on ${date}`);
     expect(patch.output.annotations.filter((a) => a.title.startsWith(`${r3.ruleKey} v${version.version} · from`)).map((a) => [a.path, a.annotation_level])).toContainEqual(['services/ai_credit_triage.ts', 'warning']);
+  });
+
+  it('scene 3: opens one verified fix pull request for main, as a single commit, once per base commit', async () => {
+    const repo = store.getRepoByGithubId(REPO_ID)!;
+    const first = await openFixPullRequest({ store, app: getApp() }, repo, 'arif@example.test');
+    expect(first).toMatchObject({ created: true, prNumber: 101, branch: `lexcompiler/fix-${BASE.slice(0, 7)}`, baseSha: BASE });
+    // One commit on the base commit's tree, with one blob per patched file.
+    expect(fake.commits).toHaveLength(1);
+    expect(fake.commits[0]).toMatchObject({ parents: [BASE], tree: 'tree-new-1' });
+    expect(String(fake.commits[0].message)).toContain('Z3 proves each rule after this change (SAT_COMPLIANT)');
+    const tree = fake.trees[0] as { base_tree: string; tree: Array<{ path: string; sha: string }> };
+    expect(tree.base_tree).toBe(`tree-${BASE}`);
+    expect(tree.tree.map((t) => t.path).sort()).toEqual([...first.files].sort());
+    expect(first.files.length).toBeGreaterThanOrEqual(3);
+    for (const t of tree.tree) expect(fake.blobs.get(t.sha)).not.toBe(fixture[t.path]);
+    expect(fake.refs.get(`refs/heads/${first.branch}`)).toBe(first.commitSha);
+    expect(fake.pulls[0]).toMatchObject({ head: first.branch, base: 'main' });
+    expect(String(fake.pulls[0].body)).toContain('Requested by arif@example.test');
+
+    // The patched files pass every rule in effect.
+    const patched = Object.fromEntries(tree.tree.map((t) => [t.path, fake.blobs.get(t.sha)!]));
+    const files = Object.entries({ ...fixture, 'api/privacy.py': PRIVACY, ...patched }).map(([p, content]) => ({ path: p, language: (p.endsWith('.sql') ? 'sql' : p.endsWith('.ts') ? 'typescript' : 'python') as 'sql' | 'typescript' | 'python', description: '', content, lastModified: '' }));
+    const after = await scanFiles(files, store.rulesInEffect(workspaceId));
+    expect(after.findings.filter((f) => first.addressed.includes(f.ruleKey))).toEqual([]);
+
+    // Asking again for the same main commit returns the same pull request.
+    expect(await openFixPullRequest({ store, app: getApp() }, repo, 'arif@example.test')).toMatchObject({ created: false, prNumber: 101 });
+    expect(fake.pulls).toHaveLength(1);
+  });
+
+  it('scene 4: suggests the redact_pii fix on the changed line, once per finding', async () => {
+    // Tanvir's PR adds the loan endpoint: every line of the file is in the diff.
+    fake.prFiles.set(9, [{ filename: 'api/loan_applications.py', patch: `@@ -0,0 +1,${LOANS.split('\n').length - 1} @@\n${LOANS.split('\n').slice(0, -1).map((l) => `+${l}`).join('\n')}` }]);
+    const reviewsBefore = fake.reviews.length;
+    queue.enqueue('scan', { githubRepoId: REPO_ID, installationId: INSTALLATION, kind: 'pull_request', trigger: 'pull_request', headSha: HEAD1, baseSha: BASE, prNumber: 9 });
+    await queue.drain();
+    expect(fake.reviews.length).toBe(reviewsBefore + 1);
+    const review = fake.reviews.at(-1)!;
+    expect(review.pr).toBe(9);
+    expect(review.body).toMatchObject({ commit_id: HEAD1, event: 'COMMENT' });
+    const comments = review.body.comments as Array<{ path: string; line: number; side: string; body: string }>;
+    const r2 = comments.find((c) => c.body.startsWith('**R-2**'))!;
+    expect(r2).toMatchObject({ path: 'api/loan_applications.py', line: 21, side: 'RIGHT' });
+    expect(r2.body).toMatch(/```suggestion\n.*redact_pii\(applicant\.phone\).*\n```/s);
+    // R-1 needs a tenant KMS client added elsewhere in the file: no one-line suggestion, the annotation stays.
+    expect(comments.some((c) => c.body.startsWith('**R-1**'))).toBe(false);
+
+    // A new push to the same PR doesn't repeat the comment.
+    queue.enqueue('scan', { githubRepoId: REPO_ID, installationId: INSTALLATION, kind: 'pull_request', trigger: 'pull_request', headSha: HEAD1, baseSha: BASE, prNumber: 9 });
+    await queue.drain();
+    expect(fake.reviews.length).toBe(reviewsBefore + 1);
   });
 
   it('maps scan summaries to check conclusions', () => {

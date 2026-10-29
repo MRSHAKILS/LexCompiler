@@ -5,7 +5,7 @@ import { verifyTimestamp } from './enterprise/timestamp.js';
 import { OidcProvider, oidcConfigFromEnv } from './auth/oidc.js';
 import { dataDir, getDb } from './db/index.js';
 import { createAuthenticator, createProductRouter } from './product/router.js';
-import { databaseSessionStore, ProductStore, type Repo } from './product/store.js';
+import { databaseSessionStore, ProductStore, StoreError, type Repo } from './product/store.js';
 import { lexcompilerVersion } from './util/versions.js';
 import { GitHubApp, githubUrls } from './github/client.js';
 import { loadGitHubAppCredentials } from './github/credentials.js';
@@ -46,6 +46,7 @@ import { createWorkspaceMcpRouter } from './mcp/workspaceServer.js';
 import { EvidenceLog } from './evidence/log.js';
 import { EvidenceRecorder } from './evidence/records.js';
 import { createPublicEvidenceRouter } from './evidence/share.js';
+import { FixPrError, openFixPullRequest } from './github/fixes.js';
 import { refreshRegulatoryFeed, runDueJobs } from './product/feed.js';
 import { readTarballSources } from './github/tarball.js';
 import { loadActiveClauseState, saveActiveClauseState } from './state.js';
@@ -210,6 +211,17 @@ app.use(
     publicUrl,
     readRepoFiles,
     refreshFeed: () => refreshRegulatoryFeed(productStore),
+    openFixPr: async (repo, requestedBy) => {
+      const gh = getGitHubApp();
+      if (!gh) throw new StoreError('the GitHub App is not configured on this server', 503);
+      try {
+        return await openFixPullRequest({ store: productStore, app: gh }, repo, requestedBy);
+      } catch (err) {
+        // A fix that didn't pass the Z3 gate (or nothing to fix) is a 409 for the caller.
+        if (err instanceof FixPrError) throw new StoreError(err.message, err.status);
+        throw err;
+      }
+    },
   })
 );
 // Expires exceptions whose date has passed. Scans already ignore them; this keeps the inbox and

@@ -29,16 +29,17 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | MRSHAKILS/LexCompiler #9 | Phase 5: the signed evidence log, share links for auditors (`/share/<token>`), the evidence pack with `verify.mjs`, public keys under `/.well-known` |
 | MRSHAKILS/LexCompiler #10 | Phase 6: rules proven only on their scope's paths, future effective dates ("Coming up", PR warnings), the regulation feed with "Draft rule change", daily jobs |
 | MRSHAKILS/LexCompiler #11 | Phase 7 preparation: proxy trust, HTTPS only, rate limits, daily backups, `deploy/` (Caddy + compose), `docs/DEPLOY.md` |
+| MRSHAKILS/LexCompiler #12 | Phase 4 items 1–2: "Open fix PR" (one verified commit through the Git Data API) and `suggestion` review comments on pull requests |
 
 | Phase | Status |
 |---|---|
 | 0–2 | Done, tested live on GitHub |
 | 2a AI foundation | Done. RAG eval now has a Bangla set and a set for the test repo (see Evals) |
 | 3 Lawyer's workspace | Done and tested locally (`/legal`). The GitHub part of the guide's test needs this machine's App credentials (see Open questions) |
-| 4 Fixes and exceptions | Exceptions done and tested against a fake GitHub; the live test on finhealth-core-platform PR #1 needs the App credentials. Fix PRs and suggested changes (guide items 1–2) are not started |
+| 4 Fixes and exceptions | Done and tested against a fake GitHub: exceptions (#7), fix PRs and suggested changes (#12). The live test on finhealth-core-platform needs the App credentials |
 | 4a MCP for coding assistants | Done; tested in-process and live over HTTP (guide 5.9 results). Claude Code connects but its CLI here isn't signed in; Cursor and VS Code not tried; OAuth not started |
 | 5 Evidence and auditor | Done and tested (the pack verifies; the three tamper cases are caught). Not done: RFC 3161 timestamps of each day's last header, per-workspace keys |
-| 6 Contract and regulation changes | Done and tested (scenes 5 and 6 through the API on the fixture, and the PR warning against a fake GitHub). The live GitHub run needs the App credentials. "Open fix PR" (scene 5 step 4) is Phase 4's fix PRs, not started |
+| 6 Contract and regulation changes | Done and tested (scenes 5 and 6 through the API on the fixture, and the PR warning against a fake GitHub). The live GitHub run needs the App credentials. "Open fix PR" (scene 5 step 4) works since #12 |
 | 7 Online for outside testers | Code and configuration ready (#11, `docs/DEPLOY.md`); not deployed. Needs a tunnel or a VPS with a domain, and the GitHub App credentials. The Docker image wasn't rebuilt here (Docker Desktop was off) |
 
 ## What works today
@@ -69,6 +70,10 @@ This file says where the work stands, how to run it, and what to do next. The fu
   - The auditor's page `/share/<token>` needs no account: summary, rule history with approvers, checks over time with their evidence numbers, findings of the latest default-branch check (no code), exceptions, the pack, and "Verify signatures in this browser" (Web Crypto). Data: `GET /api/share/<token>` and `…/pack.zip`, outside the `/api` guard, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`.
   - The pack: `headers.jsonl` (every header of the period), `bodies.jsonl` (only the bodies about the shared rules and repositories), `rules/`, `exceptions.json`, `sarif/`, `keys.json`, `verify.mjs`, `report.html`, `README.txt`. Zipped by `server/evidence/zip.ts` (Node's zlib; no fflate dependency).
   - Public keys: `GET /.well-known/lexcompiler/<workspaceId>/keys.json` (every key that signed the workspace's records, with validity dates). Auditors should take them from the company's own site, not from LexCompiler.
+- **Fix PRs and suggested changes** (Phase 4, items 1–2; `server/github/fixes.ts`):
+  - "Open fix PR" (owner, Legal, engineers) reads the default branch's head with the installation token, runs the remediation synthesizer on it with the rules in effect (scoped), and opens a PR only for a `READY_TO_MERGE` bundle that Z3 proves (`SAT_COMPLIANT`): blobs, one tree on the base commit's tree, one commit, a `lexcompiler/fix-<sha>` branch, the PR. Otherwise 409 with the unresolved rules. One PR per base commit (`fix_prs`, migration 9); asking again returns it.
+  - After each PR check, new findings whose verified fix is one replacement of lines in the PR's diff (`pulls/<n>/files`) get a review (event `COMMENT`) with a `suggestion` block. Fingerprints already commented on are stored per PR (`pr_suggestions`). Fixes that also need code elsewhere (a helper, a KMS client) stay annotations. A failure here is logged and never fails the check.
+  - The synthesizer now reuses a `redact_pii` the file already imports (as in the walkthrough's `from api.privacy import redact_pii`) instead of adding its own, so the loan endpoint's R-2 fix is the one-line change on line 21.
 - **Contract and regulation changes** (Phase 6):
   - Scope by path: `POST /api/workspaces/<id>/counterparties/<cpId>/scope` with `{ scope: [{ repoId, pathGlob }] }` (Legal). A rule scoped to counterparties is proven only on the files in their paths (`scanFilesScoped` in `server/product/scanner.ts`, used by the GitHub job, local scans and the MCP tools), so shared code must meet the stricter rule. `POST …/rules/<ruleId>/rescope` drafts a new version with another scope. The local-repo scan now applies scopes too (it ignored them before).
   - Effective dates: an approved version dated later doesn't fail anything. PR checks list its findings as warnings ("Coming up" section, "R-3 v2 will fail from 1 January 2027" in the title when nothing is new). `GET …/coming-up` lists what each upcoming version finds on each default branch (`coming_up` table, refreshed by default-branch scans, the nightly job, approval of a future version, and `POST …/coming-up/refresh`). `POST …/rule-versions/<versionId>/effective` with `{ effectiveFrom }` moves the date (Legal; today or earlier puts it in effect and rescans), and writes a `rule.rescheduled` evidence record.
@@ -148,7 +153,7 @@ Dates are from the schedule in the product guide, section 7.
 3. ~~**Phase 3, the lawyer's workspace.**~~ Done (#6). Left for later: the library screen (templates are served by `GET /api/library/templates` but have no screen yet), similar-rule links (guide 5.4 item 6), an LLM rephrasing of the plain reading. The evidence record on approval is written since #9.
 4. **Phase 4.** Exceptions are done (#7). Still to do:
    - The live test on finhealth-core-platform PR #1 (guide, Phase 4 test, scene 4 steps 2–4 and Expiry). It needs the App credentials on this machine.
-   - Guide items 1–2: fix PRs through the Git Data API with the installation token, and review comments with `suggestion` blocks for findings on lines the PR changed.
+   - ~~Guide items 1–2~~ done (#12): `POST /api/workspaces/<id>/repos/<repoId>/fix-pr` ("Open fix PR" on `/legal`) and suggestions after each PR check (`server/github/fixes.ts`). The old demo endpoint `/api/remediation/open-github-pr` still uses a personal token; the workspace path uses the installation token.
 5. **Phase 4a.** Done (#8). Still to do:
    - Sign in to the Claude Code CLI and finish its row in the 5.9 results. Run the client test in Cursor and VS Code (GUI; the configurations are on `/settings`), and in Kiro, Codex, Antigravity and Claude Desktop where they're installed.
    - OAuth (`/.well-known/oauth-protected-resource`, RFC 8414 metadata, dynamic client registration), which Claude Desktop's custom connectors need. Until then Claude Desktop goes through `mcp-remote`.

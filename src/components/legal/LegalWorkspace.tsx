@@ -715,7 +715,15 @@ export function LegalWorkspace() {
 
           {ws && ['owner', 'legal', 'admin'].includes(ws.role) && <SharesPanel key={workspaceId} base={base} rules={rules} counterparties={counterparties} />}
 
-          {workspaceId && <ChangesPanel key={`changes-${workspaceId}`} base={base} canEdit={Boolean(canEdit)} onChanged={refresh} />}
+          {workspaceId && (
+            <ChangesPanel
+              key={`changes-${workspaceId}`}
+              base={base}
+              canEdit={Boolean(canEdit)}
+              canOpenFixes={Boolean(ws && ['owner', 'legal', 'engineer', 'admin'].includes(ws.role))}
+              onChanged={refresh}
+            />
+          )}
         </section>
       </div>
     </div>

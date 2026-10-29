@@ -62,6 +62,8 @@ export interface ProductRouterOptions {
   readRepoFiles?: (repo: Repo, commitSha: string) => Promise<TargetRepoFile[]>;
   /** Fetches the regulation feed and stores new items; returns how many were new. */
   refreshFeed?: () => Promise<number>;
+  /** Opens a verified fix pull request for a GitHub repository's default branch (Phase 4). */
+  openFixPr?: (repo: Repo, requestedBy: string) => Promise<{ created: boolean }>;
 }
 
 const EXCEPTION_STATUSES: ExceptionStatus[] = ['requested', 'approved', 'rejected', 'expired', 'revoked'];
@@ -788,6 +790,28 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
       res.json({ ...scan, findings: store.listFindings(scan.id) });
     })
   );
+  /**
+   * "Open fix PR": one commit fixing every finding on the default branch, opened only when Z3
+   * proves every rule after the patch. Returns the existing PR for the same base commit.
+   */
+  r.post(
+    '/workspaces/:workspaceId/repos/:repoId/fix-pr',
+    need('runScans'),
+    handle(async (req, res) => {
+      const repo = store.getRepo(String(req.params.repoId));
+      if (!repo || repo.workspaceId !== wid(req)) throw new StoreError('repository not found', 404);
+      if (repo.source !== 'github') throw new StoreError('fix pull requests are opened on GitHub repositories; apply the fix to a local folder by hand', 409);
+      if (!options.openFixPr) throw new StoreError('the GitHub App is not configured on this server', 503);
+      const user = userOf(res);
+      const result = await options.openFixPr(repo, user.email ?? user.name ?? user.oidcSub);
+      res.status(result.created ? 201 : 200).json(result);
+    })
+  );
+  r.get('/workspaces/:workspaceId/repos/:repoId/fix-prs', need('view'), (req, res) => {
+    const repo = store.getRepo(String(req.params.repoId));
+    if (!repo || repo.workspaceId !== wid(req)) return void res.status(404).json({ error: 'repository not found' });
+    res.json(store.listFixPrs(repo.id));
+  });
   /** Scans a local repository with the rules in effect. GitHub repositories are scanned by the app. */
   r.post(
     '/workspaces/:workspaceId/repos/:repoId/scan',

@@ -31,6 +31,7 @@ interface FeedItem {
 interface Repo {
   id: string;
   fullName: string;
+  source?: 'github' | 'local';
 }
 interface Counterparty {
   id: string;
@@ -78,7 +79,8 @@ function ScopeEditor({ cp, repos, busy, onSave }: { cp: Counterparty; repos: Rep
   );
 }
 
-export function ChangesPanel({ base, canEdit, onChanged }: { base: string; canEdit: boolean; onChanged: () => Promise<void> }) {
+export function ChangesPanel({ base, canEdit, canOpenFixes = false, onChanged }: { base: string; canEdit: boolean; canOpenFixes?: boolean; onChanged: () => Promise<void> }) {
+  const [fixPr, setFixPr] = useState<{ repo: string; prNumber: number; url: string; created: boolean } | null>(null);
   const [comingUp, setComingUp] = useState<ComingUpResult[]>([]);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -119,6 +121,12 @@ export function ChangesPanel({ base, canEdit, onChanged }: { base: string; canEd
       await refresh();
       await onChanged();
       setMessage({ kind: 'ok', text: `${r.rule.key} v${r.version.version} drafted from ${item.documentNumber}. Nothing takes effect until it is approved.` });
+    });
+  /** One verified commit fixing the default branch; LexCompiler refuses a fix Z3 doesn't prove. */
+  const openFix = (repo: Repo) =>
+    run(async () => {
+      const r = await api<{ created: boolean; prNumber: number; url: string; files: string[] }>(`${base}/repos/${repo.id}/fix-pr`, {});
+      setFixPr({ repo: repo.fullName, prNumber: r.prNumber, url: r.url, created: r.created });
     });
   const saveScope = (cp: Counterparty, scope: Array<{ repoId: string; pathGlob: string }>) =>
     run(async () => {
@@ -170,6 +178,36 @@ export function ChangesPanel({ base, canEdit, onChanged }: { base: string; canEd
           );
         })}
       </div>
+
+      {canOpenFixes && repos.some((r) => r.source === 'github') && (
+        <div aria-labelledby="fixes-heading" role="region" className="space-y-2">
+          <h3 id="fixes-heading" className="text-sm font-semibold">
+            Fix the default branch
+          </h3>
+          <p className="text-xs text-zinc-400">One commit with every fix, opened as a pull request only when Z3 proves each rule after the patch.</p>
+          <ul className="space-y-1">
+            {repos
+              .filter((r) => r.source === 'github')
+              .map((r) => (
+                <li key={r.id} className="flex items-center gap-2 text-sm">
+                  <span>{r.fullName}</span>
+                  <button type="button" disabled={busy} onClick={() => void openFix(r)} className="rounded bg-emerald-700 hover:bg-emerald-800 text-white px-2 py-0.5 text-xs disabled:opacity-50">
+                    Open fix PR for {r.fullName}
+                  </button>
+                </li>
+              ))}
+          </ul>
+          {fixPr && (
+            <p role="status" className="text-sm text-emerald-200">
+              {fixPr.created ? 'Opened' : 'Already open for this commit:'}{' '}
+              <a className="underline" href={fixPr.url} target="_blank" rel="noreferrer">
+                pull request #{fixPr.prNumber}
+              </a>{' '}
+              on {fixPr.repo}.
+            </p>
+          )}
+        </div>
+      )}
 
       <div aria-labelledby="feed-heading" role="region" className="space-y-2">
         <h3 id="feed-heading" className="text-sm font-semibold">

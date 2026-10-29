@@ -34,7 +34,8 @@ function stubApi(extra: Record<string, unknown> = {}) {
       { id: 'FEDERAL_REGISTER:2026-21001', source: 'FEDERAL_REGISTER', documentNumber: '2026-21001', title: 'Health data retention', publicationDate: '2026-10-28', excerpt: 'Must purge within 24 hours.', url: 'https://www.federalregister.gov/d/2026-21001', kind: 'TEXT', illustrative: false, documentId: null },
       { id: 'EUR_LEX:32026R0999', source: 'EUR_LEX', documentNumber: '32026R0999', title: 'Corrigendum', publicationDate: '2026-10-27', excerpt: 'Amends Article 14.', url: null, kind: 'CHANGE_NOTICE', illustrative: false, documentId: null },
     ],
-    [`${BASE}/repos`]: [{ id: 'repo-1', fullName: 'acme/core-platform' }],
+    [`${BASE}/repos`]: [{ id: 'repo-1', fullName: 'acme/core-platform', source: 'github' }],
+    [`${BASE}/repos/repo-1/fix-pr`]: { created: true, prNumber: 101, url: 'https://github.com/acme/core-platform/pull/101', files: ['api/fastapi_intake.py'] },
     [`${BASE}/counterparties`]: [{ id: 'cp-1', name: 'Nodi Microfinance', scope: [{ repoId: 'repo-1', pathGlob: 'workers/**' }] }],
     [`${BASE}/feed/FEDERAL_REGISTER%3A2026-21001/draft`]: { rule: { key: 'R-5' }, version: { version: 1 } },
     [`${BASE}/counterparties/cp-1/scope`]: { id: 'cp-1', name: 'Nodi Microfinance', scope: [] },
@@ -89,6 +90,23 @@ describe('ChangesPanel', () => {
     fireEvent.change(paths, { target: { value: 'other/repo: **' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save paths for Nodi Microfinance' }));
     expect(screen.getByText(/write "repository: path glob"/)).toBeTruthy();
+  });
+});
+
+describe('Open fix PR', () => {
+  it('opens a fix pull request for a GitHub repository and links it', async () => {
+    const calls = stubApi();
+    render(<ChangesPanel base={BASE} canEdit={false} canOpenFixes onChanged={async () => undefined} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open fix PR for acme/core-platform' }));
+    expect((await screen.findByRole('link', { name: 'pull request #101' })).getAttribute('href')).toBe('https://github.com/acme/core-platform/pull/101');
+    expect(calls.some((c) => c.url === `${BASE}/repos/repo-1/fix-pr`)).toBe(true);
+  });
+
+  it('is hidden for roles that cannot run scans', async () => {
+    stubApi();
+    render(<ChangesPanel base={BASE} canEdit={false} onChanged={async () => undefined} />);
+    await screen.findByRole('article', { name: 'R-3 v2 coming up' });
+    expect(screen.queryByRole('button', { name: /Open fix PR/ })).toBeNull();
   });
 });
 
