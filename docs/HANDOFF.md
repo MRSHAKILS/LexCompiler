@@ -22,7 +22,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | #35 | Phase 2a, part 1: RAG embeddings fixed, duration parser fixed, model labels that match what ran |
 | #36 | Phase 2a, part 2: AI gateway, AI setting per workspace, call log, extraction eval |
 | MRSHAKILS/LexCompiler #3 | Bangla and test-repository RAG eval sets |
-| next PR | RAG: stemmed BM25 with identifier parts; graph seeds and HyDE only from evidenced categories |
+| MRSHAKILS/LexCompiler #4, #5 | Windows test fixes (4 Vitest workers); RAG: stemmed BM25 with identifier parts; graph seeds and HyDE only from evidenced categories |
 
 | Phase | Status |
 |---|---|
