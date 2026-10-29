@@ -730,6 +730,8 @@ process.exit(problems.length ? 1 : 0);
 
 ### Phase 7. Put it online for outside testers (1–2 days)
 
+The steps, the settings and a checklist are in `docs/DEPLOY.md`; `deploy/` has the Caddy and compose files.
+
 - **Quick: Cloudflare tunnel.** `cloudflared tunnel --url http://localhost:3001` gives a temporary public HTTPS URL. Use it for:
   - the App's webhook URL (no smee needed);
   - `LEXCOMPILER_PUBLIC_URL`;
