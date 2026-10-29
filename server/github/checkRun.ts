@@ -53,6 +53,8 @@ export function renderCheckOutput(input: {
   lexcompilerVersion: string;
   /** "1 finding waived until 30 Nov 2026", shown under the counts. */
   waiverLine?: string | null;
+  /** The signed evidence record of this scan, so the run (timestamped by GitHub) names it. */
+  evidence?: { seq: number; headerSha256: string } | null;
 }): CheckOutput {
   const { summary: s, kind, defaultBranch } = input;
   const titles = new Map(input.rules.map((r) => [r.ruleKey, r.title]));
@@ -98,6 +100,7 @@ export function renderCheckOutput(input: {
     // re-encode JSON (smee) break the signature of bodies containing <, > or &.
     `_${plural(input.filesScanned, 'source file')} scanned · rules ${input.rules.map((r) => `${r.ruleKey} v${r.version}`).join(', ')} · LexCompiler ${input.lexcompilerVersion}_`
   );
+  if (input.evidence) lines.push('', `Evidence record #${input.evidence.seq} · header SHA-256 \`${input.evidence.headerSha256}\``);
 
   const annotations = [...input.findings]
     .sort((a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine)

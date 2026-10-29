@@ -7,6 +7,7 @@ import { AiGateway, localModelConfig, modelForTask } from '../ai/gateway.js';
 import { OidcProvider, type Principal } from '../auth/oidc.js';
 import { tokensMatch, type Authenticator } from '../security.js';
 import { lexcompilerVersion } from '../util/versions.js';
+import type { EvidenceRecorder } from '../evidence/records.js';
 import type { RuleCategory } from '../../shared/types.js';
 import { compileClause, isRuleCategory, libraryTemplates, RULE_CATEGORIES } from './clauses.js';
 import { DocumentError, extractDocumentText, looksLikeLegacyBangla, MAX_DOCUMENT_BYTES, splitClauses } from './documents.js';
@@ -54,6 +55,10 @@ export interface ProductRouterOptions {
   onExceptionDecided?: (exception: ExceptionRecord) => string | null;
   /** The workspace MCP endpoint, shown on the settings page (default http://localhost:3001/mcp). */
   mcpUrl?: string;
+  /** Writes the signed evidence log (Phase 5). Without it, nothing is recorded. */
+  evidence?: EvidenceRecorder;
+  /** Where share links point (default http://localhost:3001). */
+  publicUrl?: string;
 }
 
 const EXCEPTION_STATUSES: ExceptionStatus[] = ['requested', 'approved', 'rejected', 'expired', 'revoked'];
@@ -410,7 +415,7 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
   r.post(
     '/workspaces/:workspaceId/rule-versions/:versionId/approve',
     need('editRules'),
-    handle((req, res) => {
+    handle(async (req, res) => {
       const effectiveFrom = req.body?.effectiveFrom ? String(req.body.effectiveFrom) : undefined;
       if (effectiveFrom && Number.isNaN(Date.parse(effectiveFrom))) throw new StoreError('effectiveFrom must be a date');
       const draft = store.getRuleVersion(wid(req), String(req.params.versionId));
@@ -423,6 +428,7 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
         answers: req.body?.answers && typeof req.body.answers === 'object' ? req.body.answers : undefined,
         note: req.body?.note ? String(req.body.note).slice(0, 2000) : undefined,
       });
+      const evidence = await options.evidence?.ruleApproved(wid(req), version);
       // Rescan main of every repository in scope, so the rule's failures show within a minute.
       const queuedScans: Array<{ repoId: string; jobId: string | null }> = [];
       if (options.enqueueBranchScan) {
@@ -431,7 +437,7 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
           queuedScans.push({ repoId: repo.id, jobId: options.enqueueBranchScan(repo, version) });
         }
       }
-      res.json({ ...version, queuedScans });
+      res.json({ ...version, queuedScans, evidenceSeq: evidence?.seq ?? null });
     })
   );
   r.post(
@@ -442,9 +448,11 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
   r.post(
     '/workspaces/:workspaceId/rules/:ruleId/retire',
     need('editRules'),
-    handle((req, res) => {
+    handle(async (req, res) => {
       store.retireRule(wid(req), String(req.params.ruleId), userOf(res).id);
-      res.json(store.getRule(wid(req), String(req.params.ruleId)));
+      const rule = store.getRule(wid(req), String(req.params.ruleId))!;
+      await options.evidence?.ruleRetired(wid(req), rule, userOf(res).id);
+      res.json(rule);
     })
   );
   r.get(
@@ -509,35 +517,38 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
       res.status(created ? 201 : 200).json(exception);
     })
   );
-  const decided = (exception: ExceptionRecord) => ({ ...exception, rerunJobId: options.onExceptionDecided?.(exception) ?? null });
+  const decided = async (exception: ExceptionRecord) => {
+    await options.evidence?.exceptionChanged(exception);
+    return { ...exception, rerunJobId: options.onExceptionDecided?.(exception) ?? null };
+  };
   /** Legal approves with a reason and a required expiry date: { note, expiresAt }. */
   r.post(
     '/workspaces/:workspaceId/exceptions/:exceptionId/approve',
     need('decideExceptions'),
-    handle((req, res) => {
+    handle(async (req, res) => {
       if (!req.body?.expiresAt) throw new StoreError('expiresAt is required: every exception ends');
       const e = store.decideException(wid(req), String(req.params.exceptionId), userOf(res).id, { approve: true, note: String(req.body?.note || ''), expiresAt: String(req.body.expiresAt) });
-      res.json(decided(e));
+      res.json(await decided(e));
     })
   );
   r.post(
     '/workspaces/:workspaceId/exceptions/:exceptionId/reject',
     need('decideExceptions'),
-    handle((req, res) => {
+    handle(async (req, res) => {
       const e = store.decideException(wid(req), String(req.params.exceptionId), userOf(res).id, { approve: false, note: String(req.body?.note || '') });
-      res.json(decided(e));
+      res.json(await decided(e));
     })
   );
   /** Test-only admin action (guide, Phase 4 test): move an exception's expiry, for example to yesterday. */
   r.post(
     '/workspaces/:workspaceId/exceptions/:exceptionId/expiry',
     need('view'),
-    handle((req, res) => {
+    handle(async (req, res) => {
       if (!isAdmin(res)) throw new StoreError('only administrators can change an expiry date', 403);
       const at = String(req.body?.expiresAt || '');
       if (Number.isNaN(Date.parse(at))) throw new StoreError('expiresAt must be a date');
       store.setExceptionExpiry(wid(req), String(req.params.exceptionId), at);
-      store.expireExceptions();
+      for (const e of store.expireExceptionRecords()) await options.evidence?.exceptionChanged(e);
       res.json(store.getException(wid(req), String(req.params.exceptionId)));
     })
   );
@@ -547,6 +558,57 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
       .listRules(wid(req))
       .flatMap((rule) => rule.versions.filter((v) => v.status === 'draft').map((v) => ({ ruleId: rule.id, ruleKey: rule.key, title: rule.title, versionId: v.id, version: v.version, createdAt: v.createdAt })));
     res.json({ exceptionRequests: store.listExceptions(wid(req), { status: 'requested' }), ruleDrafts: drafts, feedDrafts: [] });
+  });
+
+  // ---------------------------------------------------------------- share links and the evidence log (Phase 5)
+
+  const publicUrl = (options.publicUrl ?? 'http://localhost:3001').replace(/\/+$/, '');
+  r.get('/workspaces/:workspaceId/shares', need('createShares'), (req, res) => res.json(store.listShares(wid(req))));
+  /**
+   * { ruleIds, periodFrom, periodTo, expiresAt, counterpartyId?, label? } → the link, shown once.
+   * The auditor sees those rules' history, checks and exceptions in the period, with signed evidence.
+   */
+  r.post(
+    '/workspaces/:workspaceId/shares',
+    need('createShares'),
+    handle(async (req, res) => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const { token, share } = store.createShare({
+        workspaceId: wid(req),
+        label: body.label ? String(body.label) : null,
+        counterpartyId: body.counterpartyId ? String(body.counterpartyId) : null,
+        ruleIds: Array.isArray(body.ruleIds) ? body.ruleIds.map(String) : [],
+        periodFrom: String(body.periodFrom ?? ''),
+        periodTo: String(body.periodTo ?? ''),
+        expiresAt: String(body.expiresAt ?? ''),
+        createdBy: userOf(res).id,
+      });
+      await options.evidence?.shareChanged(share, 'created');
+      res.status(201).json({ ...share, token, url: `${publicUrl}/share/${token}` });
+    })
+  );
+  r.post(
+    '/workspaces/:workspaceId/shares/:shareId/revoke',
+    need('createShares'),
+    handle(async (req, res) => {
+      const share = store.revokeShare(wid(req), String(req.params.shareId));
+      await options.evidence?.shareChanged(share, 'revoked');
+      res.json(share);
+    })
+  );
+  /** Who opened a share: time, IP and browser of each view or download. */
+  r.get(
+    '/workspaces/:workspaceId/shares/:shareId/views',
+    need('createShares'),
+    handle((req, res) => {
+      if (!store.getShare(wid(req), String(req.params.shareId))) throw new StoreError('unknown share', 404);
+      res.json(store.listShareViews(String(req.params.shareId)));
+    })
+  );
+  /** The workspace's evidence records (headers and bodies), optionally within ?from=&to=. */
+  r.get('/workspaces/:workspaceId/evidence', need('createShares'), (req, res) => {
+    if (!options.evidence) return void res.json([]);
+    res.json(options.evidence.log.records(wid(req), { from: req.query.from ? String(req.query.from) : undefined, to: req.query.to ? String(req.query.to) : undefined }));
   });
 
   // ---------------------------------------------------------------- personal access tokens (Phase 4a)
@@ -608,7 +670,8 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
           facts: result.facts,
           findings,
         });
-        res.json({ ...done, findings: store.listFindings(scan.id) });
+        const evidence = await options.evidence?.scanCompleted(wid(req), { scan: done, rules, findings, undecidedRuleKeys: result.undecidedRuleKeys });
+        res.json({ ...done, findings: store.listFindings(scan.id), evidence: evidence ? { seq: evidence.seq, headerSha256: evidence.headerSha256 } : null });
       } catch (err) {
         store.failScan(scan.id, (err as Error).message);
         throw err;

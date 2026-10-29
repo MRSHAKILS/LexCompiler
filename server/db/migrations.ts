@@ -379,4 +379,15 @@ CREATE INDEX mcp_calls_workspace_time ON mcp_calls(workspace_id, created_at);
 ALTER TABLE exceptions ADD COLUMN requested_until TEXT;
 `,
   },
+  {
+    id: 7,
+    name: 'evidence record of each scan, share links in time order',
+    sql: `
+-- The signed evidence record written when a scan completed; its header hash is also in the check run.
+ALTER TABLE scans ADD COLUMN evidence_seq INTEGER;
+ALTER TABLE scans ADD COLUMN evidence_header_sha256 TEXT;
+CREATE INDEX shares_workspace ON shares(workspace_id, created_at);
+CREATE INDEX share_views_share ON share_views(share_id, at);
+`,
+  },
 ];

@@ -3,6 +3,7 @@ import { classifyFindings, globMatch, scanFiles, type RawFinding } from '../prod
 import { rulesetSha256, type ProductStore, type Repo, type RuleInEffect, type ScanTrigger } from '../product/store.js';
 import { summarizeFindings } from '../product/summary.js';
 import { lexcompilerVersion } from '../util/versions.js';
+import type { EvidenceRecorder } from '../evidence/records.js';
 import { CHECK_NAME, checkConclusion, chunk, renderCheckOutput, type CheckKind } from './checkRun.js';
 import { GitHubApiError, type GitHubApp } from './client.js';
 import { REQUEST_EXCEPTION_ACTION, waiverLine } from './exceptions.js';
@@ -25,6 +26,8 @@ export interface ScanJobDeps {
   store: ProductStore;
   getApp: () => GitHubApp | null;
   publicUrl: string;
+  /** Signs a record of each completed scan; its header hash goes into the check run. */
+  evidence?: EvidenceRecorder;
 }
 
 interface CommitScan {
@@ -111,7 +114,7 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
       // A retry updates the run its first attempt created (still in progress), so a commit never
       // collects one run per attempt or keeps a run that stays "in progress" forever.
       const reuse = ctx.attempt > 1 ? deps.store.previousCheckRunForJob(ctx.jobId) : null;
-      let run: { id: number } | null = null;
+      let run: { id: number; html_url?: string } | null = null;
       if (reuse !== null) {
         try {
           await app.request(installationId, 'PATCH', `${route}/check-runs/${reuse}`, { status: 'in_progress', ...progress });
@@ -120,7 +123,7 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
           if (!(err instanceof GitHubApiError) || ![404, 422].includes(err.status)) throw err;
         }
       }
-      run ??= await app.request<{ id: number }>(installationId, 'POST', `${route}/check-runs`, {
+      run ??= await app.request<{ id: number; html_url?: string }>(installationId, 'POST', `${route}/check-runs`, {
         name: CHECK_NAME,
         head_sha: headSha,
         status: 'in_progress',
@@ -140,8 +143,9 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
       const findings = classifyFindings(head.findings, base, exceptions);
       const summary = summarizeFindings(findings, head.undecidedRuleKeys);
       const conclusion = checkConclusion(p.kind, summary);
-      deps.store.completeScan(scan.id, { conclusion, filesScanned: head.filesScanned, summary, facts: head.facts, findings });
+      const done = deps.store.completeScan(scan.id, { conclusion, filesScanned: head.filesScanned, summary, facts: head.facts, findings });
       stored = true;
+      const evidence = await deps.evidence?.scanCompleted(repo.workspaceId, { scan: done, rules, findings, undecidedRuleKeys: head.undecidedRuleKeys, checkRunUrl: run.html_url ?? null });
 
       const output = renderCheckOutput({
         kind: p.kind,
@@ -154,6 +158,7 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
         truncated: head.truncated,
         lexcompilerVersion: version,
         waiverLine: waiverLine(findings, new Map(exceptions.map((e) => [e.id, e.expiresAt ?? null]))),
+        evidence: evidence ?? null,
       });
       const [first = [], ...rest] = chunk(output.annotations, 50);
       await app.request(installationId, 'PATCH', `${route}/check-runs/${run.id}`, {
