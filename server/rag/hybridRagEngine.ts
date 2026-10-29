@@ -641,9 +641,9 @@ export async function executeRealNeuralRagQuery(
     .map((c) => `[${c.chunk.citationOrPath}]: ${c.chunk.rawChunkText.slice(0, 220)}`)
     .join('\n');
   const llmGen = await runRealLlmInference({
-    model: 'qwen2.5-coder:0.5b',
     prompt: `Question: ${query}\nRetrieved Context:\n${contextBlock}\nProvide a concise 2-sentence grounded compliance answer citing the exact file/statute:`,
     maxTokens: 95,
+    task: 'rag-answer',
   });
 
   return {

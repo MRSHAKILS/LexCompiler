@@ -922,17 +922,17 @@ app.get('/api/services/mesh', async (_req, res) => {
 
 app.post('/api/llm/generate', async (req, res) => {
   try {
-    const { model, prompt, systemPrompt, maxTokens, cloudApiKey, cloudProvider } =
-      req.body || {};
+    // Keys are never taken from the request: cloud calls use the server's configured model.
+    const { model, prompt, systemPrompt, maxTokens, cloudProvider } = req.body || {};
     const result = await runRealLlmInference({
-      model: model || 'qwen2.5-coder:0.5b',
+      model: typeof model === 'string' && model ? model : 'qwen2.5-coder:0.5b',
       prompt:
         prompt ||
         'Explain why GDPR Art. 17 requires 72h TTL and tenant-isolated KMS keys in Postgres and FastAPI.',
       systemPrompt,
-      maxTokens: maxTokens || 120,
-      cloudApiKey,
+      maxTokens: Math.min(Number(maxTokens) || 120, 1024),
       cloudProvider,
+      task: 'playground',
     });
     res.json(result);
   } catch (err) {
@@ -976,6 +976,7 @@ app.post('/api/llm/multi-model-pipeline', async (req, res) => {
       model: 'qwen2.5-coder:0.5b',
       prompt: `Analyze this code snippet against the rule "${legalText}":\n${snippet}\nProvide a concise 2-sentence technical explanation of the violation and the code fix.`,
       maxTokens: 110,
+      task: 'code-explanation',
     });
 
     // 3. Real Legal / General Counsel LLM Inference (dolphin3:latest or qwen2.5-coder)
@@ -984,6 +985,7 @@ app.post('/api/llm/multi-model-pipeline', async (req, res) => {
       model: legalModelName,
       prompt: `As General Counsel, write a 2-sentence formal compliance attestation explaining how enforcing tenant-isolated KMS keys and 72-hour TTL satisfies "${legalText}".`,
       maxTokens: 110,
+      task: 'legal-attestation',
     });
 
     res.json({

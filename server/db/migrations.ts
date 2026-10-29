@@ -275,4 +275,39 @@ ALTER TABLE scans ADD COLUMN job_id TEXT;
 CREATE INDEX scans_job ON scans(job_id);
 `,
   },
+  {
+    id: 3,
+    name: 'AI settings per workspace and a log of model calls',
+    sql: `
+-- AI is off until a workspace owner turns it on: contracts and code are confidential.
+CREATE TABLE workspace_ai_settings (
+  workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+  mode TEXT NOT NULL DEFAULT 'off' CHECK (mode IN ('off','local','cloud')),
+  daily_token_budget INTEGER NOT NULL DEFAULT 200000,
+  updated_by TEXT,
+  updated_at TEXT NOT NULL
+);
+
+-- One row per model call. Prompts are not stored, only their SHA-256.
+-- workspace_id is NULL for the demo screens, which use the bundled fixture.
+CREATE TABLE ai_calls (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+  task TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  endpoint_host TEXT NOT NULL,
+  prompt_sha256 TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cached_tokens INTEGER NOT NULL DEFAULT 0,
+  latency_ms INTEGER NOT NULL,
+  outcome TEXT NOT NULL CHECK (outcome IN ('ok','invalid_output','error')),
+  error TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX ai_calls_workspace_time ON ai_calls(workspace_id, created_at);
+`,
+  },
 ];

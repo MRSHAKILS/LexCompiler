@@ -38,7 +38,6 @@ export const LiveMultiLlmMeshStudio: React.FC<LiveMultiLlmMeshStudioProps> = ({
   const [playgroundPrompt, setPlaygroundPrompt] = useState(
     'In 2 concise sentences, explain why logging raw SSN in FastAPI logger.info violates HIPAA 164.312(b) and how SHA-256 redaction fixes it.'
   );
-  const [cloudApiKey, setCloudApiKey] = useState('');
   const [playgroundResult, setPlaygroundResult] = useState<any | null>(null);
   const [isGeneratingSingle, setIsGeneratingSingle] = useState(false);
 
@@ -85,8 +84,8 @@ export const LiveMultiLlmMeshStudio: React.FC<LiveMultiLlmMeshStudioProps> = ({
           model: playgroundModel,
           prompt: playgroundPrompt,
           maxTokens: 110,
-          cloudApiKey: cloudApiKey.trim() || undefined,
-          cloudProvider: cloudApiKey.trim() || playgroundModel === 'cloud:openai' ? 'openai' : undefined,
+          // Keys stay on the server; "cloud" uses the server's configured model.
+          cloudProvider: playgroundModel === 'cloud:openai' ? 'openai' : undefined,
         }),
       });
       if (res.ok) {
@@ -394,15 +393,8 @@ export const LiveMultiLlmMeshStudio: React.FC<LiveMultiLlmMeshStudioProps> = ({
             >
               <option value="qwen2.5-coder:0.5b">Local Ollama: qwen2.5-coder:0.5b (397 MB)</option>
               <option value="dolphin3:latest">Local Ollama: dolphin3:latest (Llama-3.1 8B · 4.9 GB)</option>
-              <option value="cloud:openai">Cloud: OpenAI (server OPENAI_API_KEY)</option>
+              <option value="cloud:openai">Cloud: the server's model (LEXCOMPILER_LLM_MODEL or OPENAI_API_KEY)</option>
             </select>
-            <input
-              type="password"
-              value={cloudApiKey}
-              onChange={(e) => setCloudApiKey(e.target.value)}
-              placeholder="Optional OpenAI key (prefer OPENAI_API_KEY on the server)"
-              className="rounded-lg bg-[#06070B] border border-white/[0.1] px-3 py-1.5 text-xs font-mono text-zinc-200 w-72"
-            />
             <button
               type="button"
               disabled={isGeneratingSingle}
