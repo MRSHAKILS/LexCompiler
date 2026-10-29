@@ -35,6 +35,7 @@ function runGuard(
   let status: number | null = null;
   let passed = false;
   const res = {
+    locals: {},
     status(code: number) {
       status = code;
       return this;
@@ -176,7 +177,11 @@ describe('illustrative demo content', () => {
   });
 
   it('tags curated and offline feed items and never invents Federal Register abstracts', async () => {
-    const items = await fetchLiveRegulatoryFeed();
+    // Offline: every source is unreachable, so only the curated and offline items remain.
+    const offline = (async () => {
+      throw new Error('offline');
+    }) as typeof fetch;
+    const items = await fetchLiveRegulatoryFeed(offline);
     const curated = items.filter((i) => i.source === 'EUR_LEX');
     expect(curated.length).toBeGreaterThan(0);
     for (const item of curated) {
@@ -194,7 +199,7 @@ describe('illustrative demo content', () => {
     expect(compiled.deontic.extractedParameters.minAiConfidenceThreshold).toBe(0.88);
   }, 10000);
 
-  it('does not label a self-signed attestation as a certification', () => {
+  it('does not label a self-signed attestation as a certification', async () => {
     const report = {
       repositoryName: 'demo',
       commitHash: 'abc12345',
@@ -206,7 +211,7 @@ describe('illustrative demo content', () => {
       z3EngineVersion: 'z3',
       proofs: [],
     } as unknown as FullComplianceScanReport;
-    const cert = generateSignedConformityCertificate(report);
+    const cert = await generateSignedConformityCertificate(report);
     expect(cert.overallVerdict).toBe('SAT_COMPLIANT_ATTESTED');
     expect(cert.issuer).not.toMatch(/hardware/i);
     expect(cert.standard).toMatch(/not an EU AI Act Art\. 43/);

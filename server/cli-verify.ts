@@ -1,3 +1,4 @@
+import { loadClausesForCli } from './cli/clauses.js';
 import { enterScratchFixtureCopy } from './cli/scratchFixture.js';
 
 /**
@@ -14,9 +15,8 @@ async function main() {
   const realRepo = Boolean(process.env.LEXCOMPILER_TARGET_REPO) && process.env.LEXCOMPILER_TARGET_REPO_IS_FIXTURE !== '1';
   if (!realRepo) enterScratchFixtureCopy('verify');
 
-  const { analyzeFullRepository } = await import('./analyzer/astAnalyzer.js');
-  const { readTargetRepoFiles, resetTargetRepoToBaseline, TARGET_REPO_ROOT } = await import('./analyzer/repoBaseline.js');
-  const { getInitialClauses } = await import('./compiler/legalCompiler.js');
+  const { analyzeFullRepositoryAsync } = await import('./analyzer/astAnalyzer.js');
+  const { getLastRepositoryScanCoverage, readTargetRepoFiles, resetTargetRepoToBaseline, TARGET_REPO_ROOT } = await import('./analyzer/repoBaseline.js');
   const { verifyRepositoryAgainstClauses } = await import('./prover/z3Engine.js');
   const { synthesizeRemediationPullRequest } = await import('./remediation/prSynthesizer.js');
 
@@ -24,9 +24,16 @@ async function main() {
   console.log(`Repository: ${TARGET_REPO_ROOT}${realRepo ? '' : ' (scratch copy of the demo fixture)'}`);
   if (!realRepo) resetTargetRepoToBaseline();
 
-  const clauses = getInitialClauses();
-  const { sqlTables, astFindings, enrichedFiles } = analyzeFullRepository(readTargetRepoFiles());
+  const clauses = await loadClausesForCli();
+  const { sqlTables, astFindings, enrichedFiles } = await analyzeFullRepositoryAsync(readTargetRepoFiles());
   console.log(`Parsed ${enrichedFiles.length} files (${sqlTables.length} SQL tables, ${astFindings.length} findings).`);
+  const coverage = getLastRepositoryScanCoverage();
+  if (coverage.truncatedAtLimit) {
+    console.warn(`WARNING: stopped at ${coverage.maxFiles} source files; the rest of the repository was not scanned (raise LEXCOMPILER_MAX_SCANNED_FILES).`);
+  }
+  if (coverage.skippedLargeFiles.length) {
+    console.warn(`WARNING: ${coverage.skippedLargeFiles.length} file(s) over 1 MiB were not analysed: ${coverage.skippedLargeFiles.slice(0, 5).join(', ')}${coverage.skippedLargeFiles.length > 5 ? ', …' : ''}`);
+  }
 
   const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
   for (const proof of verification.proofs) {
@@ -47,6 +54,10 @@ async function main() {
 
   const failing = verification.proofs.filter((p) => p.status !== 'SAT_COMPLIANT');
   if (realRepo) {
+    if (coverage.truncatedAtLimit) {
+      console.error('\nGATE FAILED: the scan is incomplete, so compliance of the unscanned files is not proven.');
+      process.exit(1);
+    }
     if (failing.length > 0) {
       console.error(`\nGATE FAILED: ${failing.length} clause(s) not proven compliant.`);
       process.exit(1);

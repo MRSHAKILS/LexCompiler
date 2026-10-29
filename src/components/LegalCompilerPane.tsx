@@ -205,7 +205,7 @@ export const LegalCompilerPane: React.FC<LegalCompilerPaneProps> = ({
               <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
                 {activeClause.deontic.modality} · {activeClause.deontic.deonticOperatorSymbol}
               </span>
-              <span className="text-[10px] font-mono text-slate-500">
+              <span className="text-[10px] font-mono text-slate-400">
                 {activeClause.version}
               </span>
               {activeClause.illustrative && (

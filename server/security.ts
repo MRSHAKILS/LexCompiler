@@ -25,6 +25,10 @@ export interface ServerSecurityConfig {
   allowedOrigins: string[];
   allowedHosts: string[];
   runtimeSandboxEnabled: boolean;
+  /** OIDC sign-in is configured (LEXCOMPILER_OIDC_ISSUER + LEXCOMPILER_OIDC_CLIENT_ID). */
+  oidcEnabled: boolean;
+  /** Project role every signed-in user has on the default (single-repository) project. */
+  defaultProjectRole: 'viewer' | 'editor' | 'owner' | 'none';
 }
 
 function splitList(value: string | undefined): string[] {
@@ -48,6 +52,8 @@ export function resolveServerSecurityConfig(env: NodeJS.ProcessEnv = process.env
     allowedOrigins: extraOrigins.length > 0 ? extraOrigins : DEFAULT_ALLOWED_ORIGINS,
     allowedHosts: splitList(env.LEXCOMPILER_ALLOWED_HOSTS).map((h) => h.toLowerCase()),
     runtimeSandboxEnabled: env.LEXCOMPILER_ENABLE_RUNTIME_SANDBOX === '1',
+    oidcEnabled: Boolean(env.LEXCOMPILER_OIDC_ISSUER?.trim() && env.LEXCOMPILER_OIDC_CLIENT_ID?.trim()),
+    defaultProjectRole: (['viewer', 'editor', 'owner', 'none'] as const).find((r) => r === env.LEXCOMPILER_DEFAULT_PROJECT_ROLE) || 'viewer',
   };
 }
 
@@ -56,10 +62,10 @@ export function resolveServerSecurityConfig(env: NodeJS.ProcessEnv = process.env
  * rewrite target-repo files and trigger Git commits.
  */
 export function assertSafeBindConfig(config: ServerSecurityConfig): void {
-  if (!isLoopbackHostname(config.host) && !config.apiToken) {
+  if (!isLoopbackHostname(config.host) && !config.apiToken && !config.oidcEnabled) {
     throw new Error(
-      `Refusing to listen on non-loopback host "${config.host}" without LEXCOMPILER_API_TOKEN. ` +
-        'Set LEXCOMPILER_API_TOKEN, or bind to 127.0.0.1.'
+      `Refusing to listen on non-loopback host "${config.host}" without LEXCOMPILER_API_TOKEN or OIDC. ` +
+        'Set LEXCOMPILER_API_TOKEN or LEXCOMPILER_OIDC_ISSUER/LEXCOMPILER_OIDC_CLIENT_ID, or bind to 127.0.0.1.'
     );
   }
 }
@@ -72,7 +78,7 @@ function hostnameFromHostHeader(hostHeader: string | undefined): string {
   return hostHeader.split(':')[0].toLowerCase();
 }
 
-function tokensMatch(expected: string, provided: string): boolean {
+export function tokensMatch(expected: string, provided: string): boolean {
   const a = Buffer.from(expected, 'utf8');
   const b = Buffer.from(provided, 'utf8');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
@@ -89,9 +95,15 @@ export function isOriginAllowed(config: ServerSecurityConfig, origin: string | u
  * - Without a token, the Host header must be loopback (or allowlisted) to defeat
  *   DNS rebinding, and the client header must be present.
  */
-export function createApiGuard(config: ServerSecurityConfig) {
+const PUBLIC_AUTH_PATHS = new Set(['/auth/config', '/auth/login', '/auth/callback']);
+const ROLE_RANK = { none: 0, viewer: 1, editor: 2, owner: 3 } as const;
+
+/** Resolves the caller from a bearer token or session cookie (OIDC); null when unauthenticated. */
+export type Authenticator = (req: Request) => Promise<import('./auth/oidc.js').Principal | null>;
+
+export function createApiGuard(config: ServerSecurityConfig, authenticate?: Authenticator) {
   return (req: Request, res: Response, next: NextFunction): void => {
-    if (req.path === '/health' || req.method === 'OPTIONS') {
+    if (req.path === '/health' || req.method === 'OPTIONS' || (config.oidcEnabled && PUBLIC_AUTH_PATHS.has(req.path))) {
       next();
       return;
     }
@@ -102,6 +114,33 @@ export function createApiGuard(config: ServerSecurityConfig) {
       return;
     }
 
+    if (config.oidcEnabled && authenticate) {
+      authenticate(req)
+        .then((principal) => {
+          if (!principal) {
+            res.status(401).json({ error: 'Sign in required.', authRequired: true, loginUrl: '/api/auth/login' });
+            return;
+          }
+          // Cookie sessions also need the client header on writes (CSRF: no custom header cross-site).
+          if (principal.via === 'oidc-session' && req.method !== 'GET' && !req.headers[CLIENT_HEADER]) {
+            res.status(403).json({ error: `Missing required "${CLIENT_HEADER}" request header.` });
+            return;
+          }
+          res.locals.principal = principal;
+          // Single-repository endpoints act on the default project.
+          if (!req.path.startsWith('/projects') && !req.path.startsWith('/auth/') && principal.globalRole !== 'admin') {
+            const need = req.method === 'GET' ? ROLE_RANK.viewer : ROLE_RANK.editor;
+            if (ROLE_RANK[config.defaultProjectRole] < need) {
+              res.status(403).json({ error: `Your role on the default project (${config.defaultProjectRole}) does not allow this request.` });
+              return;
+            }
+          }
+          next();
+        })
+        .catch((err) => res.status(500).json({ error: err instanceof Error ? err.message : String(err) }));
+      return;
+    }
+
     if (config.apiToken) {
       const auth = req.headers.authorization || '';
       const provided = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length).trim() : '';
@@ -109,6 +148,7 @@ export function createApiGuard(config: ServerSecurityConfig) {
         res.status(401).json({ error: 'Missing or invalid API token.', authRequired: true });
         return;
       }
+      res.locals.principal = { sub: 'api-token', globalRole: 'admin', via: 'api-token' };
       next();
       return;
     }
@@ -123,6 +163,7 @@ export function createApiGuard(config: ServerSecurityConfig) {
       res.status(403).json({ error: `Missing required "${CLIENT_HEADER}" request header.` });
       return;
     }
+    res.locals.principal = { sub: 'local', globalRole: 'admin', via: 'loopback' };
 
     next();
   };

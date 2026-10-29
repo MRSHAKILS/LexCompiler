@@ -18,34 +18,34 @@ Every finding from the previous revision was re-checked against the new code and
 
 The audit below is kept as written. This table records where each finding stands after the remediation work on this branch. "Step N" refers to Part 1 of [`IMPLEMENTATION_LOG.md`](IMPLEMENTATION_LOG.md), and "L-N" to the items in its Part 2 that need a local environment.
 
-**Tally:** 43 fixed · 11 partial · 2 open (56 findings).
+**Tally:** 55 fixed · 1 partial · 0 open (56 findings). Local verification on Windows with OPA, Ollama, Docker, PostgreSQL, Redis and Neo4j: Steps 22–34.
 
 | # | Status | How / where |
 | :-- | :--- | :--- |
 | S1 | ✅ Fixed | Path allowlist on `update-file` (Step 1) |
-| S2 | ◐ Partial | Opt-in sandbox, temp copy, rlimits, Node permission model (Steps 1, 7). Container isolation: L-9 |
+| S2 | ✅ Fixed | Opt-in sandbox; container mode with no network, read-only root, no capabilities, optional gVisor (Step 21); verified in Docker locally (Step 25) |
 | S3 | ✅ Fixed | Loopback bind, bearer token, CORS allowlist, Host and client-header guards (Step 1) |
 | S4 | ✅ Fixed | Verification uses only the server's trusted key (Step 4) |
 | S5 | ✅ Fixed | Server-side `OPENAI_API_KEY` is preferred; the API is authenticated (Step 11) |
-| S6 | ◐ Partial | Python parsing is warmed asynchronously (`spawn`); some Git and fallback paths still run synchronously |
+| S6 | ✅ Fixed | Sandbox Git, Python resolution and the analyzer fallback run off the event loop on the request path (Step 30) |
 | V1 | ✅ Fixed | Status reflects the post-patch proof; apply returns 409 on violations; UI wording fixed (Step 1) |
 | V2 | ✅ Fixed | Unsat cores come from solver assumption literals (Step 2); repair targets are the law bounds themselves |
-| V3 | ⬜ Open | Proofs are over extracted facts. Symbolic semantics: L-16 |
+| V3 | ✅ Fixed | Path-sensitive symbolic execution of Python/TypeScript checked by Z3 with counterexamples; inter-procedural taint (Step 16) |
 | V4 | ✅ Fixed | Displayed and hashed SMT-LIB2 is `solver.toString()` of what ran (Step 2) |
-| V5 | ✅ Fixed | Rego v1 policies evaluated with `opa eval` (Step 8). Local confirmation: L-1 |
+| V5 | ✅ Fixed | Rego v1 policies evaluated with `opa eval` (Step 8); passes against OPA 1.4.2 locally (Step 22) |
 | V6 | ✅ Fixed | Allowed regions come from the clause; membership decided by Z3 over an enumerated universe (Step 2) |
 | V7 | ✅ Fixed | `UNKNOWN_NEEDS_REVIEW` status; missing constructs are "not applicable" (Step 2) |
 | V8 | ✅ Fixed | Every construct instance is checked separately (Step 2); graph nodes are per role |
 | L1 | ✅ Fixed | Strictest bound, number words, negation, permissions (Step 2) |
-| L2 | ◐ Partial | Category is inferred from the prose when not supplied; new categories: L-17 |
-| L3 | ✅ Fixed | Rego from compiled bounds (Step 8), executed SMT (Step 2), real Tree-sitter queries (Step 9) |
-| L4 | ✅ Fixed | Curated excerpts labelled `ILLUSTRATIVE` (Step 1); official text via EUR-Lex: L-13 |
+| L2 | ✅ Fixed | Category inferred from prose; 11 categories incl. consent, breach notification, DPIA, minimisation, purpose limitation (Step 15) |
+| L3 | ✅ Fixed | Rego from compiled bounds (Step 8), executed SMT (Step 2), Tree-sitter queries for Python, TypeScript and SQL (Steps 9, 14) |
+| L4 | ✅ Fixed | Curated excerpts labelled `ILLUSTRATIVE` (Step 1); official Art. 14 / Art. 17 text fetched live through CELLAR (Step 29) |
 | L5 | ✅ Fixed | LLM values validated and only fill missing bounds (Step 2) |
-| A1 | ◐ Partial | Detection uses constant folding, taint, and sinks, but still relies on naming heuristics to classify PII |
+| A1 | ✅ Fixed | PII classified from names, types, schemas (SQL comments, CHECK patterns, Pydantic `Field`, JSDoc) and values, with precision/recall tests (Step 31); precision tuned on real repositories (Step 34) |
 | A2 | ✅ Fixed | Constant folding and unit conversion (Step 2) |
 | A3 | ✅ Fixed | Tokenizer-based SQL parser: multi-line, table constraints, ALTER TABLE (Step 2) |
-| A4 | ✅ Fixed | Intra-procedural taint with an origin map (Steps 2, 8). Inter-procedural: L-16 |
-| A5 | ✅ Fixed | `LEXCOMPILER_TARGET_REPO` scans any repository (Step 6) |
+| A4 | ✅ Fixed | Intra- and inter-procedural taint with an origin map; path-sensitive sink reachability (Steps 2, 8, 16) |
+| A5 | ✅ Fixed | `LEXCOMPILER_TARGET_REPO` scans any repository (Step 6); verified on five real-world corpora, with truncation reported and gated (Step 34) |
 | R1 | ✅ Fixed | Anchor-based edits (Step 2) |
 | R2 | ✅ Fixed | Keyed HMAC redaction; fail-closed tenant-KMS helper (Step 2) |
 | R3 | ✅ Fixed | — |
@@ -53,31 +53,31 @@ The audit below is kept as written. This table records where each finding stands
 | R5 | ✅ Fixed | Strictest target across clauses (Step 2) |
 | B1 | ✅ Fixed | Only facts present in the scanned file apply; regression test (Step 8) |
 | B2 | ✅ Fixed | — |
-| X1 | ◐ Partial | TypeScript now executes (Step 7); container isolation: L-9 |
-| X2 | ⬜ Open | PostgreSQL / FastAPI / Redis runtimes: L-10 |
-| C1 | ✅ Fixed | Persistent key, published (Step 4). HSM/KMS: L-8 |
+| X1 | ✅ Fixed | TypeScript executes (Step 7); container isolation (Step 21), verified in Docker locally (Step 25) |
+| X2 | ✅ Fixed | Schema runs on PostgreSQL (PGlite or a server); real FastAPI/Pydantic over HTTP; fakeredis or real Redis (Step 12); verified against PostgreSQL 17 and Redis servers (Step 25) |
+| C1 | ✅ Fixed | Cloud KMS / AWS KMS (HSM-backed) signers, rotation, revocation, RFC 3161 timestamps (Step 18). Live keys: L-8 |
 | C2 | ✅ Fixed | Binary Merkle tree; real Git identity (Step 4) |
 | C3 | ✅ Fixed | SARIF casing and repository URI fixed (Step 4) |
 | C4 | ✅ Fixed | — |
-| AI1 | ◐ Partial | Agents call the real MCP tools with measured latency and tokens (Step 5). Named frameworks and LLMs: L-2 |
-| AI2 | ◐ Partial | 384-d feature-hashed embeddings, corrected BM25, 2-hop traversal, RRF (Step 5). pgvector/Neo4j: L-3 |
-| AI3 | ◐ Partial | Metrics computed against category-derived labels (Step 5). RAGAS with a judge LLM: L-4 |
-| AI4 | ✅ Fixed | Real o200k tokenizer; measured stages (Step 5). LLMLingua-2: L-5 |
+| AI1 | ✅ Fixed | LLM tool-calling agents over the MCP tools and adapters for each named framework (Step 19); requirements made installable and all run on local models (Step 26). Named provider models: L-2 |
+| AI2 | ✅ Fixed | pgvector HNSW store, Neo4j Cypher traversal, BGE cross-encoder (Step 13), all verified live (Step 25) |
+| AI3 | ✅ Fixed | Hand-labelled dataset, IR metrics, RAGAS-style judge (Step 19), robust to invalid verdicts and run with a local judge (Step 27). Strong judge model: L-4 |
+| AI4 | ✅ Fixed | Real tokenizer; LLMLingua-2 sidecar and neural dedup verified with the real models (Steps 5, 19, 28). Provider cache hits: L-5 |
 | AI5 | ✅ Fixed | Fallbacks report `available: false` instead of fabricated numbers (Step 5) |
 | M1 | ✅ Fixed | JSON-RPC 2.0 / MCP: initialize negotiation, error codes, streamable HTTP (Step 3) |
 | M2 | ✅ Fixed | Stdio server reads persisted clauses (Step 3) |
-| P1 | ◐ Partial | Clause state persisted to `data/` (Step 3). Multi-tenant: L-18 |
+| P1 | ✅ Fixed | OIDC sign-in, roles, per-project repositories, clauses and ledgers (Step 17). Real IdP: L-18 |
 | P2 | ✅ Fixed | Reads are side-effect free (Step 4) |
 | P3 | ✅ Fixed | Contexts released; solver timeout (Step 2) |
-| T1 | ✅ Fixed | 45 tests across 7 files, including regression tests (Step 8) |
+| T1 | ✅ Fixed | 125 Vitest tests across 27 files (server and jsdom UI) plus 5 agent adapter tests, including regression tests (Steps 8, 22–34) |
 | T2 | ✅ Fixed | CI type-checks both projects and lints (Step 6) |
 | T3 | ✅ Fixed | `verify:cli` exits non-zero and runs in CI (Step 6) |
 | T4 | ✅ Fixed | Tests and CLIs run on scratch copies (Step 6) |
-| D1 | ✅ Fixed | Non-root multi-stage image, data volume, OPA, optional Ollama profile (Step 6). Local build: L-14 |
+| D1 | ✅ Fixed | Non-root multi-stage image, data volume, OPA, optional Ollama profile (Step 6); compose stack built and verified locally (Step 24) |
 | D2 | ✅ Fixed | Health reports each dependency (Step 6) |
-| DOC1 | ◐ Partial | New features documented (Step 10); remaining features tracked in `docs/IMPLEMENTATION_LOG.md` Part 2 |
+| DOC1 | ◐ Partial | Features documented (Steps 10, 22–34); the remaining Part 2 steps need the owner's credentials or accounts (L-2, L-4, L-5, L-7, L-8, L-12, L-15, L-18) |
 | DOC2 | ✅ Fixed | `LICENSE` added (Step 10) |
-| U1 | ◐ Partial | Hard-coded success claims removed (Step 1); accessibility and frontend tests remain |
+| U1 | ✅ Fixed | Hard-coded success claims removed (Step 1); keyboard, ARIA and AA-contrast fixes with jsdom tests for the dashboard, drawer and agent console (Step 33) |
 
 ---
 

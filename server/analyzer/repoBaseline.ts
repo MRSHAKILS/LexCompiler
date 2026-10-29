@@ -25,7 +25,7 @@ const SOURCE_EXTENSIONS: Record<string, TargetRepoFile['language']> = {
   '.sql': 'sql',
 };
 const SKIPPED_DIRS = new Set(['node_modules', '.git', '.venv', 'venv', '__pycache__', 'dist', 'build', '.next', 'coverage', '.tox', '.mypy_cache']);
-const MAX_SCANNED_FILES = 2000;
+const MAX_SCANNED_FILES = Math.max(1, Number(process.env.LEXCOMPILER_MAX_SCANNED_FILES) || 2000);
 const MAX_FILE_BYTES = 1024 * 1024;
 
 export class TargetRepoPathError extends Error {}
@@ -243,10 +243,27 @@ export function resetTargetRepoToBaseline(): void {
   }
 }
 
-function listSourceFiles(): string[] {
+/** What the most recent repository read left out, so callers can refuse to call a partial scan complete. */
+export interface RepositoryScanCoverage {
+  filesRead: number;
+  /** True when more source files existed than LEXCOMPILER_MAX_SCANNED_FILES (default 2000). */
+  truncatedAtLimit: boolean;
+  maxFiles: number;
+  /** Source files over 1 MiB, which are not read. */
+  skippedLargeFiles: string[];
+}
+
+let lastCoverage: RepositoryScanCoverage = { filesRead: 0, truncatedAtLimit: false, maxFiles: MAX_SCANNED_FILES, skippedLargeFiles: [] };
+
+export function getLastRepositoryScanCoverage(): RepositoryScanCoverage {
+  return lastCoverage;
+}
+
+function listSourceFiles(root: string = TARGET_REPO_ROOT): string[] {
   const out: string[] = [];
+  let truncated = false;
   const walk = (dir: string) => {
-    if (out.length >= MAX_SCANNED_FILES) return;
+    if (truncated) return;
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -255,17 +272,39 @@ function listSourceFiles(): string[] {
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
-      if (out.length >= MAX_SCANNED_FILES) return;
+      if (truncated) return;
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!SKIPPED_DIRS.has(entry.name) && !entry.name.startsWith('.')) walk(abs);
       } else if (entry.isFile() && SOURCE_EXTENSIONS[path.extname(entry.name)] && !entry.name.endsWith('.d.ts')) {
-        out.push(path.relative(TARGET_REPO_ROOT, abs).split(path.sep).join('/'));
+        if (out.length >= MAX_SCANNED_FILES) {
+          truncated = true;
+          return;
+        }
+        out.push(path.relative(root, abs).split(path.sep).join('/'));
       }
     }
   };
-  walk(TARGET_REPO_ROOT);
+  walk(root);
+  lastCoverage = { filesRead: 0, truncatedAtLimit: truncated, maxFiles: MAX_SCANNED_FILES, skippedLargeFiles: [] };
   return out;
+}
+
+/** Reads every Python, TypeScript, and SQL file under `root` (a project's repository). */
+export function readRepositoryFilesAt(root: string): TargetRepoFile[] {
+  const result: TargetRepoFile[] = [];
+  for (const relPath of listSourceFiles(root)) {
+    const absPath = path.join(root, relPath);
+    const stat = fs.statSync(absPath);
+    if (stat.size > MAX_FILE_BYTES) {
+      lastCoverage.skippedLargeFiles.push(relPath);
+      continue;
+    }
+    const language = SOURCE_EXTENSIONS[path.extname(relPath)];
+    result.push({ path: relPath, language, description: `${language} source file`, content: fs.readFileSync(absPath, 'utf8'), lastModified: stat.mtime.toISOString() });
+  }
+  lastCoverage.filesRead = result.length;
+  return result;
 }
 
 /** Reads every Python, TypeScript, and SQL file under the target repository. */
@@ -275,7 +314,10 @@ export function readTargetRepoFiles(): TargetRepoFile[] {
   for (const relPath of listSourceFiles()) {
     const absPath = path.join(TARGET_REPO_ROOT, relPath);
     const stat = fs.statSync(absPath);
-    if (stat.size > MAX_FILE_BYTES) continue;
+    if (stat.size > MAX_FILE_BYTES) {
+      lastCoverage.skippedLargeFiles.push(relPath);
+      continue;
+    }
     const language = SOURCE_EXTENSIONS[path.extname(relPath)];
     result.push({
       path: relPath,
@@ -285,6 +327,7 @@ export function readTargetRepoFiles(): TargetRepoFile[] {
       lastModified: stat.mtime.toISOString(),
     });
   }
+  lastCoverage.filesRead = result.length;
   return result;
 }
 

@@ -1,3 +1,5 @@
+import { runAgent } from './agentRuntime.js';
+import { llmConfigFor } from './llmClient.js';
 import { performance } from 'node:perf_hooks';
 import { handleMcpMessage } from '../mcp/mcpSuite.js';
 import {
@@ -146,6 +148,48 @@ export async function buildMultiAgentExecutionReport(
 
   const steps: AgentExecutionStep[] = [];
   for (const [idx, spec] of specs.entries()) {
+    const llm = llmConfigFor(spec.agentId);
+    if (llm) {
+      // A configured model reasons over the agent's MCP tools and returns a validated answer.
+      try {
+        const run = await runAgent({
+          agentId: spec.agentId,
+          role: `You are the ${spec.agentName} of LexCompiler, a compliance compiler (${spec.frameworkUsed} role).`,
+          task: `Use ${spec.mcpToolCalled} (suggested arguments: ${JSON.stringify(spec.args)}) and any other tool you need, then report what you found for these clauses:\n${spec.optimizedInput.slice(0, 4000)}`,
+          mcpServerId: spec.mcpServerCalled,
+          clauses,
+          llm,
+        });
+        steps.push({
+          stepNumber: idx + 1,
+          agentId: spec.agentId,
+          agentName: spec.agentName,
+          frameworkUsed: spec.frameworkUsed,
+          llmModel: run.model,
+          runtime: spec.runtime,
+          mcpServerCalled: spec.mcpServerCalled,
+          mcpToolCalled: run.toolCalls.map((t) => t.name).join(', ') || spec.mcpToolCalled,
+          inputTokensRaw: countTokens(spec.rawInput),
+          inputTokensOptimized: run.usage.promptTokens,
+          outputTokens: run.usage.completionTokens,
+          latencyMs: run.latencyMs,
+          status: 'COMPLETED',
+          reasoningSummary: run.output.summary,
+          structuredArtifactPreview: JSON.stringify(run.output).slice(0, 400),
+          execution: 'LLM_AGENT',
+          llmUsage: run.usage,
+          toolCallsMade: run.toolCalls.map(({ name, ok, latencyMs }) => ({ name, ok, latencyMs })),
+        });
+      } catch (err) {
+        steps.push({
+          stepNumber: idx + 1, agentId: spec.agentId, agentName: spec.agentName, frameworkUsed: spec.frameworkUsed, llmModel: llm.label || llm.model,
+          runtime: spec.runtime, mcpServerCalled: spec.mcpServerCalled, mcpToolCalled: spec.mcpToolCalled, inputTokensRaw: countTokens(spec.rawInput),
+          inputTokensOptimized: 0, outputTokens: 0, latencyMs: 0, status: 'FAILED', reasoningSummary: `LLM agent failed: ${(err as Error).message}`,
+          structuredArtifactPreview: '', execution: 'LLM_AGENT',
+        });
+      }
+      continue;
+    }
     const s0 = performance.now();
     const response = await handleMcpMessage(
       spec.mcpServerCalled,
@@ -172,6 +216,7 @@ export async function buildMultiAgentExecutionReport(
       status: ok ? 'COMPLETED' : 'FAILED',
       reasoningSummary: ok ? spec.summarize(result?.structuredContent || {}) : `Tool call failed: ${outputText}`,
       structuredArtifactPreview: outputText.slice(0, 400),
+      execution: 'DIRECT_TOOL_CALL',
     });
   }
 

@@ -185,9 +185,17 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2 mb-1">
-                    <span className="text-xs font-mono font-bold text-indigo-300 truncate">
+                    <button
+                      type="button"
+                      aria-pressed={isSelected}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedServerId(srv.id);
+                      }}
+                      className="text-xs font-mono font-bold text-indigo-300 truncate text-left cursor-pointer"
+                    >
                       {srv.id}
-                    </span>
+                    </button>
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                       {srv.toolsCount} tools · {srv.resourcesCount} res
                     </span>
@@ -215,9 +223,10 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
                           setSelectedServerId(srv.id);
                           handleInvokeTool(srv.id, firstTool.name, firstTool.sampleArgs);
                         }}
+                        aria-label={`Invoke ${firstTool.name} on ${srv.id}`}
                         className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[10.5px] font-mono font-semibold bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer"
                       >
-                        <Play className="w-3 h-3" /> Invoke RPC
+                        <Play className="w-3 h-3" aria-hidden="true" /> Invoke RPC
                       </button>
                     )}
                   </div>
@@ -290,7 +299,7 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
                       }
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-semibold bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer"
                     >
-                      <Play className="w-3 h-3" />
+                      <Play className="w-3 h-3" aria-hidden="true" />
                       Call tools/call: {tool.name}()
                     </button>
                   ))}
@@ -299,7 +308,7 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
             )}
 
             {invocationResult ? (
-              <div className="space-y-3">
+              <div className="space-y-3" role="status" aria-label="JSON-RPC response">
                 <div className="flex items-center justify-between text-xs font-mono">
                   <span className="text-emerald-400 font-semibold">
                     ✓ JSON-RPC 2.0 Response ({invocationResult.latencyMs} ms)
@@ -350,16 +359,17 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
             <button
               type="button"
               onClick={onRefreshAgents}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-semibold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-semibold bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer"
             >
-              <Zap className="w-3.5 h-3.5" /> Re-Run 6-Agent Compliance Crew
+              <Zap className="w-3.5 h-3.5" aria-hidden="true" /> Re-Run 6-Agent Compliance Crew
             </button>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {multiAgentReport.steps.map((step) => (
-              <div
+              <article
                 key={step.agentId}
+                aria-label={`Step ${step.stepNumber}: ${step.agentName}`}
                 className="p-3.5 rounded-xl bg-[#0B101B] border border-slate-800 flex flex-col justify-between space-y-2.5"
               >
                 <div className="space-y-1.5">
@@ -401,7 +411,7 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
                     <span>Latency: {step.latencyMs} ms</span>
                   </div>
                 </div>
-              </div>
+              </article>
             ))}
           </div>
 
