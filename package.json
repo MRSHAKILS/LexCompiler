@@ -1,6 +1,7 @@
 {
   "name": "justicesphere-complianceos",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "JusticeSphere AI — ComplianceOS / GovernanceIQ: Autonomous Legal-to-Formal-Logic Compiler (SMT/Z3 + OPA Rego + AST) & Continuous Code/Schema Compliance Prover",
   "type": "module",
   "scripts": {
@@ -8,15 +9,21 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite --port 5173 --host",
     "build": "vite build && tsc -p tsconfig.server.json",
-    "start": "NODE_ENV=production tsx server/index.ts",
+    "start": "node dist-server/server/index.js",
     "test": "vitest run",
     "verify:cli": "tsx server/cli-verify.ts",
-    "verify:realworld": "tsx server/cli-realworld-demo.ts"
+    "verify:realworld": "tsx server/cli-realworld-demo.ts",
+    "start:tsx": "tsx server/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "lint": "eslint .",
+    "sarif": "tsx server/cli-sarif.ts"
   },
   "dependencies": {
+    "@vscode/tree-sitter-wasm": "0.3.1",
     "cors": "^2.8.5",
     "diff": "^7.0.0",
     "express": "^4.21.2",
+    "gpt-tokenizer": "4.0.0",
     "lucide-react": "^0.475.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -24,6 +31,7 @@
     "z3-solver": "^4.13.4"
   },
   "devDependencies": {
+    "@eslint/js": "9.39.5",
     "@tailwindcss/vite": "^4.0.6",
     "@types/cors": "^2.8.17",
     "@types/diff": "^7.0.0",
@@ -33,9 +41,15 @@
     "@types/react-dom": "^19.0.3",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
+    "eslint": "10.12.0",
+    "eslint-plugin-react-hooks": "7.1.1",
     "tailwindcss": "^4.0.6",
     "tsx": "^4.19.2",
+    "typescript-eslint": "8.71.2",
     "vite": "^6.1.0",
     "vitest": "^3.0.5"
+  },
+  "engines": {
+    "node": ">=22.13"
   }
 }

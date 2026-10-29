@@ -1,28 +1,40 @@
-FROM node:22-bookworm-slim
-
-# Install Python 3 for native Python AST parsing alongside Node/TypeScript & Z3 WASM
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    git \
-    ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
-
+# --- build stage: compile the React client and the TypeScript server ---
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
-
 COPY package*.json ./
-RUN npm install
-
+RUN npm ci
 COPY . .
-
-# Build frontend Vite bundle and verify TypeScript server
 RUN npm run build
 
-ENV NODE_ENV=production
-ENV PORT=3001
+# --- runtime stage: production dependencies only, non-root ---
+FROM node:22-bookworm-slim
+# python3: Python AST analysis and the optional runtime sandbox; git: sandbox history and repo identity
+RUN apt-get update && apt-get install -y --no-install-recommends python3 git ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
+# OPA evaluates the generated Rego policies (LEXCOMPILER_OPA_BIN defaults to `opa` on PATH)
+COPY --from=openpolicyagent/opa:1.4.2-static /opa /usr/local/bin/opa
+
+WORKDIR /app
+ENV NODE_ENV=production \
+    PORT=3001 \
+    HOST=0.0.0.0 \
+    LEXCOMPILER_DATA_DIR=/app/data
+
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/dist-server ./dist-server
+COPY target-repo ./target-repo
+RUN mkdir -p /app/data && chown -R node:node /app/data /app/target-repo
+
+USER node
 EXPOSE 3001
+# Ledger, signing key, sandbox git history, and persisted clauses live here.
+VOLUME ["/app/data"]
 
-HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://localhost:3001/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+# The server refuses to start on 0.0.0.0 unless LEXCOMPILER_API_TOKEN is provided at runtime.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3001/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
-CMD ["npm", "start"]
+CMD ["node", "dist-server/server/index.js"]

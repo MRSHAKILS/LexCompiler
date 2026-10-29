@@ -1,18 +1,12 @@
 import React, { useState } from 'react';
 import {
-  Activity,
   Bot,
-  CheckCircle2,
   Cpu,
-  HardDrive,
-  Layers,
   Network,
   Play,
   Radio,
   Server,
-  Sparkles,
   Terminal,
-  Workflow,
   Zap,
 } from 'lucide-react';
 import type {
@@ -47,7 +41,7 @@ const INTEGRATED_EXTERNAL_MCPS = [
     name: 'GitHub Repository & Pull Request Automation MCP',
     transport: 'streamable-http',
     endpoints: 8,
-    description: 'Creates remediation branches, commits AST-verified patches, and opens PR #409.',
+    description: 'Creates remediation branches, commits AST-verified patches, and opens the remediation PR.',
   },
   {
     id: 'filesystem-sandbox-mcp',
@@ -95,15 +89,10 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
   ) => {
     setIsInvoking(true);
     try {
-      const res = await fetch(`/api/mcp/${serverId}/rpc`, {
+      const res = await fetch(`/api/mcp/${serverId}/invoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: `req-${Date.now()}`,
-          method: 'tools/call',
-          params: { name: toolName, arguments: sampleArgs },
-        }),
+        body: JSON.stringify({ toolName, arguments: sampleArgs }),
       });
       if (res.ok) {
         const data = (await res.json()) as McpToolInvocationResult;

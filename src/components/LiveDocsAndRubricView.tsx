@@ -2,15 +2,8 @@ import React, { useState } from 'react';
 import {
   BookOpen,
   Check,
-  Code2,
   Copy,
-  Cpu,
-  Database,
   Layers,
-  Lock,
-  Scale,
-  Server,
-  ShieldCheck,
   Terminal,
 } from 'lucide-react';
 import type { PromptLibraryEntry } from '../../shared/types';

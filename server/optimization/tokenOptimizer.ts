@@ -1,3 +1,5 @@
+import { countTokens as countO200kTokens } from 'gpt-tokenizer/encoding/o200k_base';
+import { sha256Hex } from '../util/hash.js';
 import type {
   ASTFindingNode,
   LegalClause,
@@ -76,14 +78,19 @@ export function compressLegalProseCaveman(rawProse: string): string {
 }
 
 /**
- * Codeburn — Code-Aware AST Dead-Branch Pruner:
- * Strips comments, blank lines, and non-PII boilerplate from polyglot repository files.
+ * Codeburn — Code-Aware Dead-Weight Pruner:
+ * Strips comments, docstrings, blank lines, and trailing whitespace from Python,
+ * TypeScript, and SQL while preserving indentation (so Python stays valid).
  */
 export function pruneCodeWithCodeburn(rawCode: string): string {
-  return rawCode
+  const withoutDocstrings = rawCode.replace(/^[ \t]*("""|''')[\s\S]*?\1[ \t]*$/gm, '');
+  return withoutDocstrings
     .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0 && !l.startsWith('#') && !l.startsWith('//') && !l.startsWith('/*'))
+    .map((l) => l.replace(/\s+$/, ''))
+    .filter((l) => {
+      const t = l.trim();
+      return t.length > 0 && !t.startsWith('#') && !t.startsWith('//') && !t.startsWith('--') && !t.startsWith('/*') && !t.startsWith('*');
+    })
     .join('\n');
 }
 
@@ -118,8 +125,67 @@ export function compressRepoToGraphifySExpr(
   return `(ComplianceGraph ${tableNodes} ${astNodes})`;
 }
 
+/** Real BPE token count (o200k_base, the GPT-4o / o-series tokenizer). */
+export function countTokens(text: string): number {
+  return text ? countO200kTokens(text) : 0;
+}
+
+function shingles(text: string): Set<string> {
+  const words = text.toLowerCase().split(/\W+/).filter(Boolean);
+  const out = new Set<string>();
+  for (let i = 0; i + 2 < words.length; i++) out.add(words.slice(i, i + 3).join(' '));
+  if (words.length < 3 && words.length > 0) out.add(words.join(' '));
+  return out;
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
 /**
- * Runs a full live Token Optimization Benchmark over the active legal clauses and target repository files.
+ * Removes segments (sentences / graph nodes) that are near-duplicates of an earlier
+ * segment (word-trigram Jaccard ≥ threshold).
+ */
+export function deduplicateSegments(segments: string[], threshold = 0.8): { kept: string[]; removed: string[] } {
+  const kept: string[] = [];
+  const keptShingles: Array<Set<string>> = [];
+  const removed: string[] = [];
+  for (const seg of segments) {
+    const sh = shingles(seg);
+    if (keptShingles.some((k) => jaccard(k, sh) >= threshold)) {
+      removed.push(seg);
+      continue;
+    }
+    kept.push(seg);
+    keptShingles.push(sh);
+  }
+  return { kept, removed };
+}
+
+/** Pricing/throughput assumptions; override with env vars to match your provider. */
+function benchmarkAssumptions() {
+  const num = (name: string, fallback: number) => {
+    const v = Number(process.env[name]);
+    return Number.isFinite(v) && v > 0 ? v : fallback;
+  };
+  return {
+    inputPricePerMTokUsd: num('LEXCOMPILER_INPUT_PRICE_PER_MTOK_USD', 3.0),
+    cacheReadMultiplier: num('LEXCOMPILER_CACHE_READ_MULTIPLIER', 0.1),
+    prefillTokensPerSecond: num('LEXCOMPILER_PREFILL_TOKENS_PER_SEC', 5000),
+  };
+}
+
+const pct = (before: number, after: number) => (before > 0 ? Math.round(((before - after) / before) * 1000) / 10 : 0);
+
+/**
+ * Measures the five-stage prompt optimization on the active clauses and repository with
+ * a real tokenizer. The baseline is the prompt a naive pipeline sends (static policy
+ * ontology + full clause text + full source files); each stage replaces part of it.
+ * The cache stage counts the static ontology prefix at the provider's cache-read price
+ * (LEXCOMPILER_CACHE_READ_MULTIPLIER), and latency/cost use the stated assumptions.
  */
 export function runTokenOptimizationBenchmark(
   clauses: LegalClause[],
@@ -127,44 +193,51 @@ export function runTokenOptimizationBenchmark(
   sqlTables: SQLTableSchema[],
   astFindings: ASTFindingNode[]
 ): TokenOptimizationBenchmarkReport {
-  const rawLegalCombined = clauses.map((c) => `${c.citation}: ${c.rawLegalText}`).join('\n\n');
-  const rawCodeCombined = files.map((f) => `// ${f.path}\n${f.content}`).join('\n\n');
+  const a = benchmarkAssumptions();
+  const staticPrefix = clauses.map((c) => `${c.compiled.smtLib2Snippet}\n${c.compiled.opaRegoRule}`).join('\n\n');
+  const legal = clauses.map((c) => `${c.citation}: ${c.rawLegalText}`).join('\n\n');
+  const code = files.map((f) => `// ${f.path}\n${f.content}`).join('\n\n');
 
-  // Simulate realistic enterprise context amplification (full statutory recitals + repo imports)
-  const rawLegalTokens = Math.ceil(rawLegalCombined.length / 3.6) * 4;
-  const rawCodeTokens = Math.ceil(rawCodeCombined.length / 3.6) * 4;
-  const rawContextTokens = rawLegalTokens + rawCodeTokens;
+  const prefixTokens = countTokens(staticPrefix);
+  const legalTokens = countTokens(legal);
+  const rawContextTokens = prefixTokens + legalTokens + countTokens(code);
 
-  // Stage 1: Codeburn AST Dead-Branch Pruning
-  const codeburnCompressed = files.map((f) => pruneCodeWithCodeburn(f.content)).join('\n');
-  const afterCodeburnTokens = rawLegalTokens + Math.ceil(codeburnCompressed.length / 3.6) * 2;
+  // Stage 1: Codeburn
+  const codeburn = files.map((f) => `// ${f.path}\n${pruneCodeWithCodeburn(f.content)}`).join('\n\n');
+  const afterCodeburn = prefixTokens + legalTokens + countTokens(codeburn);
 
-  // Stage 2: Graphify AST & Schema Graph Serialization
-  const graphifySExpr = compressRepoToGraphifySExpr(sqlTables, astFindings);
-  const afterGraphifyTokens = rawLegalTokens + Math.ceil(graphifySExpr.length / 3.6);
+  // Stage 2: Graphify replaces source code with the compliance property graph
+  const graph = compressRepoToGraphifySExpr(sqlTables, astFindings);
+  const afterGraphify = prefixTokens + legalTokens + countTokens(graph);
 
-  // Stage 3: LLMLingua-2 / Caveman Normative Prose Slimming
-  const cavemanLegal = clauses.map((c) => compressLegalProseCaveman(c.rawLegalText)).join(' | ');
-  const afterCavemanTokens =
-    Math.ceil(cavemanLegal.length / 3.6) + Math.ceil(graphifySExpr.length / 3.6);
+  // Stage 3: Caveman legal prose slimming
+  const caveman = clauses.map((c) => `${c.citation}: ${compressLegalProseCaveman(c.rawLegalText)}`).join('\n');
+  const afterCaveman = prefixTokens + countTokens(caveman) + countTokens(graph);
 
-  // Stage 4: Semantic Chunk Dedup & Sliding-Window Context Trimming
-  const afterDedupTokens = Math.round(afterCavemanTokens * 0.78);
+  // Stage 4: near-duplicate removal across clause sentences and graph nodes
+  const segments = [
+    ...caveman.split(/(?<=[.;])\s+|\n/).filter((x) => x.trim()),
+    ...graph.split(/(?=\((?:SQLTable|ASTNode) )/).filter((x) => x.trim()),
+  ];
+  const dedup = deduplicateSegments(segments);
+  const afterDedup = prefixTokens + countTokens(dedup.kept.join('\n'));
 
-  // Stage 5: Anthropic / OpenAI / Gemini / DeepSeek Context Caching (KV-Cache Prefix Reuse)
-  const finalBillableTokens = Math.round(afterDedupTokens * 0.34);
+  // Stage 5: static ontology prefix served from the provider prompt cache
+  const dynamicTokens = afterDedup - prefixTokens;
+  const billableEquivalent = Math.round(dynamicTokens + prefixTokens * a.cacheReadMultiplier);
+  const cachedPrefixHitRatePercent = afterDedup > 0 ? Math.round((prefixTokens / afterDedup) * 1000) / 10 : 0;
 
+  const saved = (before: number, after: number) => Math.round(((before - after) / a.prefillTokensPerSecond) * 1000 * 10) / 10;
   const stages: TokenOptimizationStageMetric[] = [
     {
       techniqueId: 'opt-codeburn',
-      techniqueName: 'Codeburn — Code-Aware AST Dead-Branch Pruner',
+      techniqueName: 'Codeburn — Code-Aware Dead-Weight Pruner',
       category: 'Codeburn (Dead-Branch AST Pruning)',
       tokensBefore: rawContextTokens,
-      tokensAfter: afterCodeburnTokens,
-      reductionPercent: Math.round(((rawContextTokens - afterCodeburnTokens) / rawContextTokens) * 1000) / 10,
-      latencySavedMs: 145,
-      description:
-        'Parses Python/TypeScript/SQL ASTs and strips non-PII helper routines, import boilerplate, and comments before prompt construction.',
+      tokensAfter: afterCodeburn,
+      reductionPercent: pct(rawContextTokens, afterCodeburn),
+      latencySavedMs: saved(rawContextTokens, afterCodeburn),
+      description: 'Strips comments, docstrings, and blank lines from every source file (indentation preserved).',
       beforeSnippet: files[1]?.content.slice(0, 210) || '',
       afterSnippet: pruneCodeWithCodeburn(files[1]?.content || '').slice(0, 160),
     },
@@ -172,67 +245,61 @@ export function runTokenOptimizationBenchmark(
       techniqueId: 'opt-graphify',
       techniqueName: 'Graphify — S-Expression Compliance Property Graph Compression',
       category: 'Graphify (AST & Legal Graph Compression)',
-      tokensBefore: afterCodeburnTokens,
-      tokensAfter: afterGraphifyTokens,
-      reductionPercent: Math.round(((afterCodeburnTokens - afterGraphifyTokens) / afterCodeburnTokens) * 1000) / 10,
-      latencySavedMs: 290,
-      description:
-        'Replaces raw multi-file source code with a compact, lossless S-expression property graph of PII sinks, KMS envelopes, and TTL bounds.',
-      beforeSnippet: `CREATE TABLE patient_records ( patient_id UUID PRIMARY KEY, tenant_id UUID NOT NULL, full_name VARCHAR(160)...`,
-      afterSnippet: graphifySExpr.slice(0, 200),
+      tokensBefore: afterCodeburn,
+      tokensAfter: afterGraphify,
+      reductionPercent: pct(afterCodeburn, afterGraphify),
+      latencySavedMs: saved(afterCodeburn, afterGraphify),
+      description: 'Replaces source code with the extracted compliance property graph (tables, PII sinks, KMS flags, TTLs).',
+      beforeSnippet: codeburn.slice(0, 200),
+      afterSnippet: graph.slice(0, 200),
     },
     {
       techniqueId: 'opt-llmlingua-caveman',
-      techniqueName: 'LLMLingua-2 + Caveman — Normative Legal Perplexity Slimmer',
+      techniqueName: 'Caveman — Normative Legal Prose Slimmer',
       category: 'LLMLingua-2 / Caveman (Perplexity Token Slimming)',
-      tokensBefore: afterGraphifyTokens,
-      tokensAfter: afterCavemanTokens,
-      reductionPercent: Math.round(((afterGraphifyTokens - afterCavemanTokens) / afterGraphifyTokens) * 1000) / 10,
-      latencySavedMs: 180,
-      description:
-        'Prunes non-normative statutory recital words while preserving 100% of deontic operators (O, F, P), numeric bounds (72h, 85%), and article citations.',
+      tokensBefore: afterGraphify,
+      tokensAfter: afterCaveman,
+      reductionPercent: pct(afterGraphify, afterCaveman),
+      latencySavedMs: saved(afterGraphify, afterCaveman),
+      description: 'Drops recital stopwords while keeping deontic operators, numbers, and citations.',
       beforeSnippet: clauses[0]?.rawLegalText.slice(0, 190) || '',
       afterSnippet: compressLegalProseCaveman(clauses[0]?.rawLegalText || '').slice(0, 160),
     },
     {
       techniqueId: 'opt-semantic-dedup',
-      techniqueName: 'Semantic Chunk Dedup + Sliding-Window Context Trimming',
+      techniqueName: 'Near-Duplicate Segment Dedup',
       category: 'Semantic Chunk Dedup & Sliding Window',
-      tokensBefore: afterCavemanTokens,
-      tokensAfter: afterDedupTokens,
-      reductionPercent: 22.0,
-      latencySavedMs: 95,
-      description:
-        'Deduplicates overlapping GDPR/HIPAA/CCPA retention clauses via cosine similarity (>0.92 threshold) and trims unchanged AST subtrees.',
-      beforeSnippet: 'Duplicate retention & encryption recitals across GDPR Art. 17, Art. 32, and CCPA §1798.105',
-      afterSnippet: 'Canonical Deontic Equivalence Class: O(TenantKMS ∧ PurgeTTL ≤ 72h)',
+      tokensBefore: afterCaveman,
+      tokensAfter: afterDedup,
+      reductionPercent: pct(afterCaveman, afterDedup),
+      latencySavedMs: saved(afterCaveman, afterDedup),
+      description: `Removed ${dedup.removed.length} of ${segments.length} segments with word-trigram Jaccard ≥ 0.8 to an earlier segment.`,
+      beforeSnippet: dedup.removed[0]?.slice(0, 160) || 'No near-duplicate segments found.',
+      afterSnippet: dedup.kept.slice(0, 2).join(' | ').slice(0, 160),
     },
     {
       techniqueId: 'opt-kv-context-cache',
-      techniqueName: 'Anthropic / Gemini / DeepSeek KV-Cache Prefix Pinning & Model Routing',
+      techniqueName: 'Prompt-Cache Prefix Pinning',
       category: 'Anthropic / DeepSeek / Gemini Context Caching',
-      tokensBefore: afterDedupTokens,
-      tokensAfter: finalBillableTokens,
-      reductionPercent: 66.0,
-      latencySavedMs: 410,
-      description:
-        'Pins static SMT-LIB2/Rego ontologies in KV-cache prefix (94.2% hit rate) and routes fast AST triage to local Ollama Qwen-2.5-Coder-7B (Q4_K_M).',
-      beforeSnippet: 'Uncached full system prompt + SMT-LIB2 standard prelude re-sent on every commit',
-      afterSnippet: 'KV-Cache Prefix [SHA256: 8f91c4a2] HIT (90% token discount) + Structured JSON Mode',
+      tokensBefore: afterDedup,
+      tokensAfter: billableEquivalent,
+      reductionPercent: pct(afterDedup, billableEquivalent),
+      latencySavedMs: saved(afterDedup, billableEquivalent),
+      description: `Pins the ${prefixTokens}-token static SMT-LIB2/Rego ontology as a cached prefix, billed at ${a.cacheReadMultiplier}× the input price on cache hits.`,
+      beforeSnippet: staticPrefix.slice(0, 160),
+      afterSnippet: `cache_control: ephemeral · prefix sha256 ${sha256Hex(staticPrefix).slice(0, 12)} · ${prefixTokens} tokens`,
     },
   ];
 
-  const totalReductionPercent =
-    Math.round(((rawContextTokens - finalBillableTokens) / rawContextTokens) * 1000) / 10;
-
+  const costPer1k = (tokens: number) => Math.round(tokens * 1000 * (a.inputPricePerMTokUsd / 1e6) * 100) / 100;
   return {
-    benchmarkId: `TOK-BENCH-${Date.now().toString().slice(-5)}`,
+    benchmarkId: `TOK-BENCH-${sha256Hex(staticPrefix + legal + code).slice(0, 8)}`,
     rawContextTokens,
-    finalCompressedTokens: finalBillableTokens,
-    totalReductionPercent,
-    cachedPrefixHitRatePercent: 94.2,
-    estimatedCostPer1kScansRawUsd: 18.4,
-    estimatedCostPer1kScansOptimizedUsd: 1.95,
+    finalCompressedTokens: billableEquivalent,
+    totalReductionPercent: pct(rawContextTokens, billableEquivalent),
+    cachedPrefixHitRatePercent,
+    estimatedCostPer1kScansRawUsd: costPer1k(rawContextTokens),
+    estimatedCostPer1kScansOptimizedUsd: costPer1k(billableEquivalent),
     stages,
   };
 }
