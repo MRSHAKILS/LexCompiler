@@ -15,6 +15,9 @@ import { canonicalJson, EvidenceLog, verifyRecords, type PublicKeyEntry } from '
 import { EvidenceRecorder } from './evidence/records.js';
 import { createPublicEvidenceRouter } from './evidence/share.js';
 import { readZip } from './evidence/zip.js';
+import { verifyTimestamp } from './enterprise/timestamp.js';
+import { runDueJobs } from './product/feed.js';
+import { fakeTsa } from './testing/fakeTsa.js';
 import { renderCheckOutput } from './github/checkRun.js';
 import { createProductRouter } from './product/router.js';
 import { ProductStore } from './product/store.js';
@@ -266,5 +269,49 @@ describe('share links and the evidence pack', () => {
     expect((await call(`/api/workspaces/${ws}/shares`, 'nusrat', { ...base, expiresAt: new Date(Date.now() + 400 * 864e5).toISOString() })).status).toBe(400);
     expect((await call('/api/share/lexc_share_nope', null)).status).toBe(404);
     expect((await call('/.well-known/lexcompiler/nope/keys.json', null)).status).toBe(404);
+  });
+});
+
+describe('RFC 3161 timestamps of the evidence chain', () => {
+  it('has a Time-Stamp Authority vouch for the newest header once, and ships the token in the pack', async () => {
+    const tsa = (await fakeTsa()) as unknown as typeof fetch;
+    const newest = log.records(ws).at(-1)!;
+    const stamp = await log.timestampLatest(ws, 'https://tsa.test/ts', tsa);
+    expect(stamp).toMatchObject({ seq: newest.seq, headerSha256: newest.headerSha256, tsaUrl: 'https://tsa.test/ts' });
+    expect(await verifyTimestamp(stamp!.tokenBase64, Buffer.from(newest.header, 'utf8'))).toMatchObject({ valid: true });
+    // Nothing new since: no second token for the same header.
+    expect(await log.timestampLatest(ws, 'https://tsa.test/ts', tsa)).toBeNull();
+
+    const now = new Date();
+    const share = await call(`/api/workspaces/${ws}/shares`, 'nusrat', {
+      ruleIds: [ruleIds['R-1']],
+      periodFrom: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString(),
+      periodTo: new Date(Date.now() + 3600 * 1000).toISOString(),
+      expiresAt: new Date(Date.now() + 864e5).toISOString(),
+    });
+    const view = await call(`/api/share/${share.body.token}`, null);
+    expect(view.body.evidence.timestamps).toEqual([{ seq: newest.seq, headerSha256: newest.headerSha256, tsaUrl: 'https://tsa.test/ts', genTime: stamp!.genTime }]);
+    const files = readZip((await call(`/api/share/${share.body.token}/pack.zip`, null)).body as Buffer);
+    expect(files.get(`timestamps/${newest.seq}.tsr`)!.equals(Buffer.from(stamp!.tokenBase64, 'base64'))).toBe(true);
+    expect(files.get(`timestamps/${newest.seq}.header`)!.toString('utf8')).toBe(newest.header);
+    expect(files.get('README.txt')!.toString()).toContain('openssl ts -verify -token_in');
+    const keysJson = JSON.stringify((await call(`/.well-known/lexcompiler/${ws}/keys.json`, null)).body);
+    expect(runVerify(files, keysJson).out).toMatch(/OK: .* 1 timestamped headers match the chain\.\n$/);
+    // A stamped header that isn't the one in the chain is reported.
+    const swapped = runVerify(files, keysJson, (dir) => fs.writeFileSync(path.join(dir, 'timestamps', `${newest.seq}.header`), newest.header.replace('"v":1', '"v":2')));
+    expect(swapped.out).toContain(`timestamp #${newest.seq}: the stamped header is not the one in headers.jsonl`);
+  });
+
+  it('timestamps each workspace once a day in the daily jobs', async () => {
+    const db = openDatabase(':memory:');
+    const s2 = new ProductStore(db);
+    const w = s2.createWorkspace('W', null).id;
+    const log2 = new EvidenceLog(db, async () => signer);
+    await log2.append(w, 'rule.retired', { ruleIds: ['r'], repoIds: [] });
+    const deps = { store: s2, evidence: new EvidenceRecorder(log2, s2), enqueueGithubScan: () => null, fetchFeed: async () => [], timestamps: { tsaUrl: 'https://tsa.test/ts', fetchImpl: (await fakeTsa()) as unknown as typeof fetch } };
+    expect(await runDueJobs(deps, new Date('2026-12-01T01:00:00Z'))).toContain('timestamps: 1 headers');
+    expect(log2.timestamps(w)).toHaveLength(1);
+    expect((await runDueJobs(deps, new Date('2026-12-01T05:00:00Z'))).some((d) => d.startsWith('timestamps'))).toBe(false);
+    db.close();
   });
 });

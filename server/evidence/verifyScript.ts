@@ -48,12 +48,24 @@ for (const { header, signature } of rows('headers.jsonl')) { // header = the exa
   prevHash = sha256(header);
   prevSeq = h.seq;
 }
+// Headers a Time-Stamp Authority vouched for: the stamped text must be the header in the chain.
+// (The tokens themselves are checked with OpenSSL; see README.txt.)
+let stamped = 0;
+const tsDir = path.join(dir, 'timestamps');
+if (fs.existsSync(tsDir)) {
+  const bySeq = new Map(rows('headers.jsonl').map((r) => [JSON.parse(r.header).seq, r.header]));
+  for (const f of fs.readdirSync(tsDir).filter((n) => n.endsWith('.header'))) {
+    const seq = Number(f.slice(0, -'.header'.length));
+    if (fs.readFileSync(path.join(tsDir, f), 'utf8') !== bySeq.get(seq)) problems.push(\`timestamp #\${seq}: the stamped header is not the one in headers.jsonl\`);
+    else stamped++;
+  }
+}
 let bodies = 0;
 for (const { seq, body } of rows('bodies.jsonl')) {
   bodies++;
   if (bodyHash.get(seq) !== sha256(body)) problems.push(\`body #\${seq}: does not match its signed header\`);
 }
 console.log(problems.length ? problems.join('\\n')
-  : \`OK: \${bodyHash.size} signed headers in an unbroken chain; \${bodies} bodies match.\`);
+  : \`OK: \${bodyHash.size} signed headers in an unbroken chain; \${bodies} bodies match.\${stamped ? \` \${stamped} timestamped headers match the chain.\` : ''}\`);
 process.exit(problems.length ? 1 : 0);
 `;

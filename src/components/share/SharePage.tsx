@@ -32,7 +32,11 @@ interface ShareData {
   }>;
   openFindings: Array<{ repo: string; ruleKey: string; filePath: string; startLine: number; state: string; message: string }>;
   exceptions: Array<{ id: string; ruleKey: string; repo: string | null; where: string | null; reason: string; status: string; decidedBy: string | null; decidedAt: string | null; decisionNote: string | null; expiresAt: string | null }>;
-  evidence: { headers: Array<{ seq: number; header: string; headerSha256: string; signature: string }>; bodySeqs: number[] };
+  evidence: {
+    headers: Array<{ seq: number; header: string; headerSha256: string; signature: string }>;
+    bodySeqs: number[];
+    timestamps?: Array<{ seq: number; headerSha256: string; tsaUrl: string; genTime: string }>;
+  };
   keysUrl: string;
 }
 
@@ -120,6 +124,11 @@ export function SharePage({ token }: { token: string }) {
           <li>
             {data.evidence.headers.length} signed evidence records; {data.evidence.bodySeqs.length} are about this share.
           </li>
+          {data.evidence.timestamps?.map((t) => (
+            <li key={t.seq}>
+              Record #{t.seq} timestamped by {new URL(t.tsaUrl).host} at {when(t.genTime)} UTC (RFC 3161; the token is in the pack).
+            </li>
+          ))}
         </ul>
         <div className="flex flex-wrap gap-2">
           <a href={`/api/share/${encodeURIComponent(token)}/pack.zip`} className="rounded bg-sky-700 hover:bg-sky-800 text-white px-3 py-1.5 text-sm inline-flex items-center gap-1">

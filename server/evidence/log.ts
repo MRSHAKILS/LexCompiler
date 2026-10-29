@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { Db } from '../db/index.js';
 import type { AttestationAlgorithm, AttestationSigner } from '../enterprise/attestationSigner.js';
+import { requestTimestamp } from '../enterprise/timestamp.js';
 
 /**
  * The evidence log (product guide, Phase 5): an append-only, hash-chained, signed record per
@@ -66,6 +67,16 @@ export interface EvidenceSubjects {
   repoIds: string[];
 }
 
+/** An RFC 3161 token over one header's exact text. */
+export interface EvidenceTimestamp {
+  seq: number;
+  headerSha256: string;
+  tsaUrl: string;
+  genTime: string;
+  serial: string;
+  tokenBase64: string;
+}
+
 export interface PublicKeyEntry {
   keyId: string;
   algorithm: AttestationAlgorithm;
@@ -125,6 +136,33 @@ export class EvidenceLog {
         const at = (JSON.parse(r.header) as EvidenceHeader).at;
         return (!period.from || at >= period.from) && (!period.to || at <= period.to);
       });
+  }
+
+  /**
+   * Has a Time-Stamp Authority (RFC 3161) vouch for the newest header's exact text, unless that
+   * header already has a token. Returns the new timestamp, or null when there was nothing to do.
+   */
+  async timestampLatest(workspaceId: string, tsaUrl: string, fetchImpl: typeof fetch = fetch): Promise<EvidenceTimestamp | null> {
+    const last = this.db.prepare('SELECT seq, header, header_sha256 FROM evidence WHERE workspace_id = ? ORDER BY seq DESC LIMIT 1').get(workspaceId) as Row | undefined;
+    if (!last) return null;
+    if (this.db.prepare('SELECT 1 FROM evidence_timestamps WHERE workspace_id = ? AND seq = ?').get(workspaceId, Number(last.seq))) return null;
+    const token = await requestTimestamp(Buffer.from(String(last.header), 'utf8'), tsaUrl, fetchImpl);
+    this.db
+      .prepare('INSERT INTO evidence_timestamps (workspace_id, seq, header_sha256, tsa_url, gen_time, serial, token_base64, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(workspaceId, Number(last.seq), String(last.header_sha256), tsaUrl, token.genTime, token.serialNumber, token.tokenBase64, this.now().toISOString());
+    return { seq: Number(last.seq), headerSha256: String(last.header_sha256), tsaUrl, genTime: token.genTime, serial: token.serialNumber, tokenBase64: token.tokenBase64 };
+  }
+
+  /** Timestamps of this workspace's headers, in sequence order. */
+  timestamps(workspaceId: string): EvidenceTimestamp[] {
+    return (this.db.prepare('SELECT * FROM evidence_timestamps WHERE workspace_id = ? ORDER BY seq').all(workspaceId) as Row[]).map((r) => ({
+      seq: Number(r.seq),
+      headerSha256: String(r.header_sha256),
+      tsaUrl: String(r.tsa_url),
+      genTime: String(r.gen_time),
+      serial: String(r.serial),
+      tokenBase64: String(r.token_base64),
+    }));
   }
 
   /** Every key that signed this workspace's records, plus the current one. */
