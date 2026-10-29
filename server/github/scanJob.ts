@@ -9,6 +9,7 @@ import type { EvidenceRecorder } from '../evidence/records.js';
 import { CHECK_NAME, checkConclusion, chunk, renderCheckOutput, type CheckKind } from './checkRun.js';
 import { GitHubApiError, type GitHubApp } from './client.js';
 import { REQUEST_EXCEPTION_ACTION, waiverLine } from './exceptions.js';
+import { postSuggestions } from './fixes.js';
 import { readTarballSources } from './tarball.js';
 
 export interface ScanJobPayload {
@@ -179,6 +180,14 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
       });
       for (const batch of rest) {
         await app.request(installationId, 'PATCH', `${route}/check-runs/${run.id}`, { output: { title: output.title, summary: output.summary, annotations: batch } });
+      }
+      // Suggested changes (Phase 4, item 2): after the check is final, and never failing it.
+      if (p.kind === 'pull_request' && p.prNumber) {
+        try {
+          await postSuggestions({ store: deps.store, app }, { repo, prNumber: p.prNumber, headSha, files: head.files, findings, rules, globs });
+        } catch (err) {
+          console.warn(`[github] suggestions on ${repo.fullName}#${p.prNumber} failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

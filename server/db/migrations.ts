@@ -432,4 +432,33 @@ CREATE TABLE scheduler_runs (
 );
 `,
   },
+  {
+    id: 9,
+    name: 'fix pull requests and suggested changes',
+    sql: `
+-- Fix pull requests LexCompiler opened for a default branch, one per base commit.
+CREATE TABLE fix_prs (
+  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  base_sha TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  url TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  files_json TEXT NOT NULL,
+  addressed_json TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, base_sha)
+);
+
+-- Findings LexCompiler already posted a suggestion for, per pull request, so pushes don't repeat them.
+CREATE TABLE pr_suggestions (
+  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  pr_number INTEGER NOT NULL,
+  fingerprint TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, pr_number, fingerprint)
+);
+`,
+  },
 ];
