@@ -32,6 +32,16 @@ export function backupDataDir(db: Db, dataDir: string, backupDir: string, option
     fs.chmodSync(path.join(folder, name), 0o600);
     files.push(name);
   }
+  // One signing key per workspace (data/workspace-keys).
+  const keysDir = path.join(dataDir, 'workspace-keys');
+  if (fs.existsSync(keysDir)) {
+    fs.mkdirSync(path.join(folder, 'workspace-keys'), { recursive: true });
+    for (const name of fs.readdirSync(keysDir).filter((n) => n.endsWith('.pem'))) {
+      fs.copyFileSync(path.join(keysDir, name), path.join(folder, 'workspace-keys', name));
+      fs.chmodSync(path.join(folder, 'workspace-keys', name), 0o600);
+      files.push(`workspace-keys/${name}`);
+    }
+  }
   const all = fs
     .readdirSync(backupDir, { withFileTypes: true })
     .filter((e) => e.isDirectory() && e.name.startsWith('lexcompiler-'))

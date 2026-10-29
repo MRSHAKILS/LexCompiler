@@ -45,6 +45,7 @@ import { getMcpServersCatalog, handleMcpMessage, invokeMcpTool } from './mcp/mcp
 import { createWorkspaceMcpRouter } from './mcp/workspaceServer.js';
 import { EvidenceLog } from './evidence/log.js';
 import { EvidenceRecorder } from './evidence/records.js';
+import { workspaceSigners } from './evidence/signer.js';
 import { createPublicEvidenceRouter } from './evidence/share.js';
 import { FixPrError, openFixPullRequest } from './github/fixes.js';
 import { refreshRegulatoryFeed, runDueJobs } from './product/feed.js';
@@ -157,7 +158,8 @@ try {
 }
 const getGitHubApp = () => githubApp;
 // The signed evidence log (Phase 5): the server's attestation key (local file, Cloud KMS or AWS KMS).
-const evidenceLog = new EvidenceLog(getDb(), getAttestationSigner);
+// Local signing: one Ed25519 key per workspace in data/workspace-keys; KMS: the server's KMS key.
+const evidenceLog = new EvidenceLog(getDb(), workspaceSigners(dataDir()));
 const evidence = new EvidenceRecorder(evidenceLog, productStore);
 const keysFor = (workspaceId: string) =>
   evidenceLog.publicKeys(workspaceId, trustedKeys(), new Map(revocations().keys.map((k) => [k.keyId, k.revokedAt])));
