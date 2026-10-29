@@ -9,9 +9,11 @@ import { tokensMatch, type Authenticator } from '../security.js';
 import { lexcompilerVersion } from '../util/versions.js';
 import type { RuleCategory } from '../../shared/types.js';
 import { compileClause, isRuleCategory, libraryTemplates, RULE_CATEGORIES } from './clauses.js';
+import { DocumentError, extractDocumentText, looksLikeLegacyBangla, MAX_DOCUMENT_BYTES, splitClauses } from './documents.js';
+import { buildRuleCard, CATEGORY_LABELS, cleanOverrides, impactPreview, type RuleCard } from './ruleCard.js';
 import { classifyFindings, scanFiles } from './scanner.js';
 import { scanConclusion, summarizeFindings } from './summary.js';
-import { can, ProductStore, StoreError, WORKSPACE_ROLES, type Permission, type User, type WorkspaceRole } from './store.js';
+import { can, ProductStore, StoreError, WORKSPACE_ROLES, type Permission, type Repo, type RuleScope, type RuleVersion, type User, type WorkspaceRole } from './store.js';
 
 /** Bearer API token (admin), OIDC bearer JWT, or OIDC session cookie. */
 export function createAuthenticator(oidc: OidcProvider, apiToken: string | null): Authenticator {
@@ -43,6 +45,28 @@ export interface ProductRouterOptions {
   reposRoot: string;
   /** Model calls; defaults to a gateway on the store's database. */
   ai?: AiGateway;
+  /**
+   * Queues a scan of a repository's default branch after a rule is approved, and returns the job
+   * id (null when an identical scan is already queued). Without it, approval queues nothing.
+   */
+  enqueueBranchScan?: (repo: Repo, version: RuleVersion) => string | null;
+}
+
+/** The card as stored with a draft: everything except the compiled clause, which the version has. */
+function storedCard(card: RuleCard): Record<string, unknown> {
+  const { clause: _clause, ...rest } = card;
+  void _clause;
+  return rest as unknown as Record<string, unknown>;
+}
+
+/** A rule scope from a request: all of the workspace's repos, or the named counterparties'. */
+function scopeFrom(store: ProductStore, workspaceId: string, raw: unknown): RuleScope {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const ids = Array.isArray(o.counterpartyIds) ? o.counterpartyIds.map(String) : [];
+  if (o.all === true || ids.length === 0) return { all: true };
+  const known = new Set(store.listCounterparties(workspaceId).map((c) => c.id));
+  for (const id of ids) if (!known.has(id)) throw new StoreError(`unknown counterparty ${id}`, 404);
+  return { counterpartyIds: [...new Set(ids)] };
 }
 
 /** Sign-in endpoints and the workspace API (members, repositories, rules, scans). */
@@ -218,6 +242,121 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
 
   // ---------------------------------------------------------------- rules
 
+  // ---------------------------------------------------------------- documents (Phase 3)
+
+  r.get('/workspaces/:workspaceId/documents', need('view'), (req, res) => res.json(store.listDocuments(wid(req))));
+  /**
+   * Uploads a contract, regulation or policy: { title, kind, counterpartyId?, language?, and either
+   * text, or fileName with contentBase64 (PDF, DOCX or UTF-8 text, up to 3 MB) }.
+   */
+  r.post(
+    '/workspaces/:workspaceId/documents',
+    need('editRules'),
+    handle(async (req, res) => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const kind = String(body.kind || 'contract');
+      if (!['contract', 'regulation', 'policy'].includes(kind)) throw new StoreError('kind must be contract, regulation or policy');
+      const language = body.language ? String(body.language).slice(0, 10) : null;
+      let text: string;
+      let file: { name: string; format: string; data: Buffer; sha256: string } | undefined;
+      if (typeof body.contentBase64 === 'string' && body.contentBase64) {
+        const data = Buffer.from(body.contentBase64, 'base64');
+        if (data.length > MAX_DOCUMENT_BYTES) throw new StoreError(`the file is larger than ${MAX_DOCUMENT_BYTES / 1024 / 1024} MB`, 413);
+        const name = String(body.fileName || 'document');
+        try {
+          const extracted = await extractDocumentText(data, name);
+          text = extracted.text;
+          file = { name, format: extracted.format, data, sha256: extracted.fileSha256 };
+        } catch (err) {
+          if (err instanceof DocumentError) throw new StoreError(err.message, 422);
+          throw err;
+        }
+      } else {
+        text = String(body.text || '').replace(/\r\n?/g, '\n');
+      }
+      if (!text.trim()) throw new StoreError('the document has no text');
+      if (text.length > 500_000) throw new StoreError('the document text is too long (max 500,000 characters)', 413);
+      if (language === 'bn' && looksLikeLegacyBangla(text)) {
+        throw new StoreError('This Bangla document looks like it uses the old Bijoy encoding: its text came out as Latin letters. Upload a Unicode version, or paste the text.', 422);
+      }
+      const doc = store.addDocument({
+        workspaceId: wid(req),
+        counterpartyId: body.counterpartyId ? String(body.counterpartyId) : null,
+        kind: kind as 'contract' | 'regulation' | 'policy',
+        title: String(body.title || file?.name || 'Untitled document'),
+        language,
+        text,
+        uploadedBy: userOf(res).id,
+        file,
+      });
+      const clauses = splitClauses(text);
+      res.status(201).json({ ...store.getDocument(wid(req), doc.id), clauses });
+    })
+  );
+  r.get(
+    '/workspaces/:workspaceId/documents/:documentId',
+    need('view'),
+    handle((req, res) => {
+      const doc = store.getDocument(wid(req), String(req.params.documentId));
+      if (!doc) throw new StoreError('document not found', 404);
+      res.json({ ...doc, clauses: splitClauses(doc.text) });
+    })
+  );
+  r.get(
+    '/workspaces/:workspaceId/documents/:documentId/file',
+    need('view'),
+    handle((req, res) => {
+      const file = store.getDocumentFile(wid(req), String(req.params.documentId));
+      if (!file) throw new StoreError('this document was pasted as text; there is no file', 404);
+      const type = file.format === 'pdf' ? 'application/pdf' : file.format === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'text/plain; charset=utf-8';
+      res.set({ 'Content-Type': type, 'Content-Disposition': `attachment; filename="${file.name.replace(/[^\w.-]+/g, '_')}"`, 'X-Content-Type-Options': 'nosniff' }).send(file.data);
+    })
+  );
+
+  // ---------------------------------------------------------------- rule cards (Phase 3)
+
+  const repoName = (repo: Repo) => repo.fullName || repo.localPath || repo.id;
+  /** The card for a clause, and how many places in each in-scope repo would fail. */
+  const cardWithImpact = async (req: Request, text: string, key: string) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const category = body.category;
+    if (category !== undefined && category !== null && !isRuleCategory(category)) throw new StoreError(`category must be one of ${RULE_CATEGORIES.join(', ')}`);
+    const scope = scopeFrom(store, wid(req), body.scope);
+    const card = await buildRuleCard({
+      text,
+      key,
+      title: body.title ? String(body.title) : undefined,
+      citation: body.citation ? String(body.citation) : undefined,
+      category: (category ?? undefined) as RuleCategory | undefined,
+      overrides: cleanOverrides(body.values),
+      normativeMatches: Array.isArray(body.normativeMatches) ? (body.normativeMatches as Array<{ start: number; end: number; text: string }>) : undefined,
+      ai: body.useAi === false ? undefined : { gateway: ai, workspaceId: wid(req) },
+    });
+    const impact = await impactPreview(
+      card.clause,
+      store.reposInScope(wid(req), scope).map((repo) => ({ repoId: repo.id, repoName: repoName(repo), scan: store.latestBranchScan(repo.id) }))
+    );
+    return { card, impact, scope };
+  };
+  r.get('/rule-categories', (_req, res) => res.json(RULE_CATEGORIES.map((id) => ({ id, label: CATEGORY_LABELS[id] }))));
+  /** A card preview for clause text; nothing is saved. Body: { text, category?, values?, scope?, citation?, useAi? }. */
+  r.post(
+    '/workspaces/:workspaceId/rule-card',
+    need('editRules'),
+    handle(async (req, res) => {
+      const text = String(req.body?.text || '').trim();
+      if (!text) throw new StoreError('text is required');
+      if (text.length > 20000) throw new StoreError('text is too long (max 20000 characters)');
+      const { card, impact } = await cardWithImpact(req, text, String(req.body?.ruleKey || store.nextRuleKey(wid(req))));
+      const { clause, ...rest } = card;
+      res.json({
+        ...rest,
+        compiled: { smtLib2: clause.compiled.smtLib2Snippet, rego: clause.compiled.opaRegoRule, deonticFormula: clause.compiled.deonticFormula },
+        impact,
+      });
+    })
+  );
+
   r.get('/library/templates', (_req, res) => res.json(libraryTemplates()));
   r.get('/workspaces/:workspaceId/rules', need('view'), (req, res) => res.json(store.listRules(wid(req))));
   r.post(
@@ -236,7 +375,9 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
       if (category !== undefined && !isRuleCategory(category)) throw new StoreError(`category must be one of ${RULE_CATEGORIES.join(', ')}`);
       const documentId = req.body?.documentId ? String(req.body.documentId) : null;
       if (documentId && !store.getDocument(wid(req), documentId)) throw new StoreError('unknown document', 404);
-      const clause = await compileClause({
+      // Without card values the clause is the parser's compile, as before; the card records
+      // what Legal saw and set.
+      const base = await compileClause({
         text,
         key,
         title,
@@ -244,6 +385,8 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
         category: category as RuleCategory | undefined,
         frameworkId: req.body?.frameworkId,
       });
+      const { card, scope } = await cardWithImpact(req, text, key);
+      const clause = { ...base, category: card.category, deontic: card.clause.deontic, compiled: card.clause.compiled };
       const created = store.createRuleDraft({
         workspaceId: wid(req),
         ruleId,
@@ -251,6 +394,8 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
         sourceText: text,
         clause,
         documentId,
+        scope,
+        card: storedCard(card),
         createdBy: userOf(res).id,
       });
       res.status(201).json(created);
@@ -262,13 +407,25 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
     handle((req, res) => {
       const effectiveFrom = req.body?.effectiveFrom ? String(req.body.effectiveFrom) : undefined;
       if (effectiveFrom && Number.isNaN(Date.parse(effectiveFrom))) throw new StoreError('effectiveFrom must be a date');
-      res.json(
-        store.approveRuleVersion(wid(req), String(req.params.versionId), userOf(res).id, {
-          effectiveFrom,
-          answers: req.body?.answers && typeof req.body.answers === 'object' ? req.body.answers : undefined,
-          note: req.body?.note ? String(req.body.note).slice(0, 2000) : undefined,
-        })
-      );
+      const draft = store.getRuleVersion(wid(req), String(req.params.versionId));
+      const open = ((draft?.card?.values ?? []) as Array<{ label: string; source: string }>).filter((v) => v.source === 'question');
+      if (open.length) {
+        throw new StoreError(`Set these values on the card before approving: ${open.map((v) => v.label).join(', ')}. A value the parser could not confirm is never enforced.`, 409);
+      }
+      const version = store.approveRuleVersion(wid(req), String(req.params.versionId), userOf(res).id, {
+        effectiveFrom,
+        answers: req.body?.answers && typeof req.body.answers === 'object' ? req.body.answers : undefined,
+        note: req.body?.note ? String(req.body.note).slice(0, 2000) : undefined,
+      });
+      // Rescan main of every repository in scope, so the rule's failures show within a minute.
+      const queuedScans: Array<{ repoId: string; jobId: string | null }> = [];
+      if (options.enqueueBranchScan) {
+        for (const repo of store.reposInScope(wid(req), version.scope)) {
+          if (repo.source !== 'github') continue;
+          queuedScans.push({ repoId: repo.id, jobId: options.enqueueBranchScan(repo, version) });
+        }
+      }
+      res.json({ ...version, queuedScans });
     })
   );
   r.post(
