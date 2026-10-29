@@ -86,7 +86,7 @@ npm run eval:extract                       # parser only, no model
 npm run eval:extract -- --model local      # LEXCOMPILER_LOCAL_LLM_MODEL on Ollama
 npm run eval:extract -- --model cloud      # needs LEXCOMPILER_LLM_MODEL (or OPENAI_API_KEY)
 npm run eval:rag                           # 16 questions on the bundled fixture
-npm run eval:rag -- --dataset bn           # 10 Bangla questions, Bangla clause set (MRR 0.95, nDCG@5 0.60)
+npm run eval:rag -- --dataset bn           # 10 Bangla questions, Bangla clause set (MRR 0.95, nDCG@5 0.63)
 LEXCOMPILER_TARGET_REPO=<finhealth-core-platform clone on feat/loan-applications> \
   npm run eval:rag -- --dataset finhealth  # 8 questions (MRR 0.66, nDCG@5 0.45; fh02 'loan applicant fields' misses)
 ```
@@ -98,7 +98,7 @@ Dates are from the schedule in the product guide, section 7.
 1. **Owner decisions** (blocking AI drafting):
    - Pick the cloud model provider, put its key in `.env`, and run `npm run eval:extract -- --model cloud`.
    - Decide whether to restore PR #15's files (below).
-2. ~~**Finish 2a.**~~ Done: `dataset.bn.json` and `dataset.finhealth.json`. Retrieval misses the loan applicant model for "what personal data does the model collect" (fh02); improve chunk text for `PII_COLLECTION_MODEL` before Phase 3 relies on it.
+2. ~~**Finish 2a.**~~ Done: `dataset.bn.json` and `dataset.finhealth.json`. Code chunks no longer embed the symbolic-execution summary, and model chunks name the personal data they collect (fixture MRR 0.656 → 0.786, nDCG@5 0.542 → 0.643; Bangla MRR 0.95, nDCG@5 0.63). Still missing: "which fields does the model collect" questions (fixture q11, finhealth fh02) do not retrieve the model chunk; look at the BM25 tokenizer (no stemming: "collect" ≠ "collects") and the graph boost.
 3. **Phase 3, the lawyer's workspace** (Nov 9–22). Guide: Phase 3 and 5.4.
    - Upload PDF, DOCX or text (`pdfjs-dist`, `mammoth`), split clauses, mark normative ones.
    - Rule card on the existing rules API: highlighted source, category, values, scope, effective date, questions. Fill values with `checkParserOnly` and, when the workspace has AI on, with the gateway and `checkExtraction`.

@@ -183,7 +183,12 @@ export function buildContextualRagCorpus(
 
   // 3. Contextual Chunks for Polyglot AST Findings (Late Chunking)
   for (const finding of astFindings) {
-    const prefix = `[Anthropic Contextual RAG Prefix | Polyglot AST (${finding.language.toUpperCase()}) | File: ${finding.filePath}:${finding.line}-${finding.endLine} | AST Node: ${finding.astNodeKind} | Construct: ${finding.constructType} | Metadata: ${JSON.stringify(finding.metadata)}]`;
+    // The symbolic summary is a proof artefact; its expression trees would drown the chunk's words.
+    const { symbolic: _symbolic, ...meta } = finding.metadata;
+    void _symbolic;
+    const collected = finding.metadata.collectedPiiFields;
+    const plain = collected?.length ? ` | Collects personal data fields: ${collected.join(', ')} (model fields, request payload)` : '';
+    const prefix = `[Anthropic Contextual RAG Prefix | Polyglot AST (${finding.language.toUpperCase()}) | File: ${finding.filePath}:${finding.line}-${finding.endLine} | AST Node: ${finding.astNodeKind} | Construct: ${finding.constructType}${plain} | Metadata: ${JSON.stringify(meta)}]`;
     const rawChunkText = `${finding.functionName} in ${finding.filePath}:\n${finding.codeSnippet}`;
     const contextualizedText = `${prefix}\n${rawChunkText}`;
 
