@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { createTwoFilesPatch } from 'diff';
 import {
@@ -79,7 +80,7 @@ export async function generateSignedConformityCertificate(
   const algorithmLabel = signer.algorithm === 'Ed25519' ? ('Ed25519 (RFC 8032 PureEdDSA)' as const) : ('ECDSA P-256 / SHA-256 (DER)' as const);
 
   return {
-    certificateId: `CERT-LEX-${report.commitHash.toUpperCase()}-${Date.now().toString().slice(-4)}`,
+    certificateId: `CERT-LEX-${report.commitHash.toUpperCase()}-${crypto.randomUUID().slice(0, 8)}`,
     standard: 'LEXCOMPILER-SELF-ATTESTATION (not an EU AI Act Art. 43 conformity assessment or SOC 2 report)',
     issuedAt: new Date().toISOString(),
     issuer: `LexCompiler attestation key ${signer.keyId} (${signer.algorithm}, ${signer.backend})`,

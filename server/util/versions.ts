@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -28,4 +29,32 @@ export function z3SolverVersion(): string {
 /** Human-readable engine label for reports. z3-solver runs Z3 compiled to WebAssembly. */
 export function z3EngineLabel(): string {
   return `Microsoft Z3 ${z3SolverVersion()} (z3-solver, WebAssembly)`;
+}
+
+let lexcVersion: string | null = null;
+
+/**
+ * The LexCompiler build that produced a scan: the git commit of this checkout, or the package
+ * version when not running from a git checkout. Recorded on every scan for reproducibility.
+ */
+export function lexcompilerVersion(): string {
+  if (lexcVersion) return lexcVersion;
+  const env = process.env.LEXCOMPILER_VERSION?.trim();
+  if (env) return (lexcVersion = env);
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (/^[0-9a-f]{40}$/.test(sha)) {
+      // A modified checkout is not exactly that commit; the record says so.
+      const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: process.cwd(), encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      return (lexcVersion = `git:${sha}${dirty ? '-dirty' : ''}`);
+    }
+  } catch {
+    // Not a git checkout (e.g. a Docker image): fall back to the package version.
+  }
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')) as { version?: string };
+    return (lexcVersion = `pkg:${pkg.version ?? 'unknown'}`);
+  } catch {
+    return (lexcVersion = 'unknown');
+  }
 }

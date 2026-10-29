@@ -7,6 +7,8 @@ export type GlobalRole = 'admin' | 'member';
 export interface Principal {
   sub: string;
   email?: string;
+  /** The provider's `email_verified` claim. Invitations are only matched on verified emails. */
+  emailVerified?: boolean;
   name?: string;
   globalRole: GlobalRole;
   /** How the caller authenticated. */
@@ -59,6 +61,38 @@ const LOGIN_TTL_MS = 10 * 60 * 1000;
 
 const b64url = (buf: Buffer) => buf.toString('base64url');
 
+/** Where signed-in sessions live. The server uses the database, so sessions survive restarts. */
+export interface SessionStore {
+  create(principal: Principal, ttlMs: number): string;
+  get(sessionId: string): Principal | null;
+  delete(sessionId: string): void;
+}
+
+/** In-process sessions, for tests and single-process tools. */
+export class MemorySessionStore implements SessionStore {
+  private readonly sessions = new Map<string, { principal: Principal; expires: number }>();
+
+  create(principal: Principal, ttlMs: number): string {
+    const id = b64url(crypto.randomBytes(32));
+    this.sessions.set(id, { principal, expires: Date.now() + ttlMs });
+    return id;
+  }
+
+  get(sessionId: string): Principal | null {
+    const s = this.sessions.get(sessionId);
+    if (!s) return null;
+    if (s.expires < Date.now()) {
+      this.sessions.delete(sessionId);
+      return null;
+    }
+    return s.principal;
+  }
+
+  delete(sessionId: string): void {
+    this.sessions.delete(sessionId);
+  }
+}
+
 /**
  * OpenID Connect relying party: authorization-code flow with PKCE for the browser (server-side
  * sessions in an HttpOnly cookie), and bearer-token verification (signature via the issuer's
@@ -68,9 +102,11 @@ export class OidcProvider {
   private discovery: Promise<Discovery> | null = null;
   private jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
   private readonly pending = new Map<string, { verifier: string; nonce: string; returnTo: string; expires: number }>();
-  private readonly sessions = new Map<string, { principal: Principal; expires: number }>();
 
-  constructor(readonly config: OidcConfig) {}
+  constructor(
+    readonly config: OidcConfig,
+    private readonly sessions: SessionStore = new MemorySessionStore()
+  ) {}
 
   async metadata(): Promise<Discovery> {
     this.discovery ??= (async () => {
@@ -98,6 +134,7 @@ export class OidcProvider {
     return {
       sub: String(payload.sub),
       email: typeof payload.email === 'string' ? payload.email : undefined,
+      emailVerified: payload.email_verified === true,
       name: typeof payload.name === 'string' ? payload.name : undefined,
       globalRole: roles.includes(this.config.adminRole) ? 'admin' : 'member',
       via,
@@ -169,20 +206,13 @@ export class OidcProvider {
     if (!tokens.id_token) throw new Error('token response has no id_token');
     const payload = await this.verify(tokens.id_token, { audience: [this.config.clientId], nonce: pending.nonce });
     const principal = this.principalFrom(payload, 'oidc-session');
-    const sessionId = b64url(crypto.randomBytes(32));
-    this.sessions.set(sessionId, { principal, expires: Date.now() + SESSION_TTL_MS });
+    const sessionId = this.sessions.create(principal, SESSION_TTL_MS);
     return { sessionId, principal, returnTo: pending.returnTo };
   }
 
   principalFromSession(sessionId: string | undefined): Principal | null {
     if (!sessionId) return null;
-    const s = this.sessions.get(sessionId);
-    if (!s) return null;
-    if (s.expires < Date.now()) {
-      this.sessions.delete(sessionId);
-      return null;
-    }
-    return s.principal;
+    return this.sessions.get(sessionId);
   }
 
   endSession(sessionId: string | undefined): void {

@@ -1,9 +1,12 @@
+import crypto from 'node:crypto';
 import { externalClient, probeExternalMcpServers } from './mcp/externalClients.js';
 import { getAttestationSigner, revocations, revoke, trustedKeys } from './enterprise/attestationSigner.js';
 import { verifyTimestamp } from './enterprise/timestamp.js';
 import { OidcProvider, oidcConfigFromEnv } from './auth/oidc.js';
-import { ProjectStore } from './projects/projectStore.js';
-import { createAccessRouter, createAuthenticator } from './projects/router.js';
+import { getDb } from './db/index.js';
+import { createAuthenticator, createProductRouter } from './product/router.js';
+import { databaseSessionStore, ProductStore } from './product/store.js';
+import { lexcompilerVersion } from './util/versions.js';
 import path from 'node:path';
 import cors from 'cors';
 import express from 'express';
@@ -101,17 +104,15 @@ app.use(
 );
 app.use(express.json({ limit: '5mb' }));
 const oidcConfig = oidcConfigFromEnv();
-const oidcProvider = oidcConfig ? new OidcProvider(oidcConfig) : null;
-const projectStore = new ProjectStore(
-  path.resolve(process.env.LEXCOMPILER_DATA_DIR || path.join(process.cwd(), 'data')),
-  process.env.LEXCOMPILER_PROJECT_REPOS_ROOT || path.join(process.cwd(), 'repos')
-);
-// The single-repository endpoints operate on this project.
-if (!projectStore.get('default')) {
-  projectStore.create({ id: 'default', name: 'Default repository', repoPath: TARGET_REPO_ROOT, owner: 'local', trustedRepoPath: true });
-}
+const productStore = new ProductStore(getDb());
+const oidcProvider = oidcConfig ? new OidcProvider(oidcConfig, databaseSessionStore(productStore)) : null;
+// Expired sessions are also dropped when read; this keeps the table small.
+productStore.purgeExpiredSessions();
+setInterval(() => productStore.purgeExpiredSessions(), 60 * 60 * 1000).unref();
+// Resolve the build id once at startup (one git call), not on the first scan request.
+lexcompilerVersion();
 app.use('/api', createApiGuard(securityConfig, oidcProvider ? createAuthenticator(oidcProvider, securityConfig.apiToken) : undefined));
-app.use('/api', createAccessRouter(projectStore, oidcProvider));
+app.use('/api', createProductRouter(productStore, oidcProvider, { reposRoot: process.env.LEXCOMPILER_PROJECT_REPOS_ROOT || path.join(process.cwd(), 'repos') }));
 
 /**
  * Requests that rewrite target-repo files, commit, or change clauses run one at a time,
@@ -544,7 +545,7 @@ app.post('/api/clauses/compile', async (req, res) => {
         compiled: compiledResult.compiled,
       };
     } else {
-      const newId = clauseId || `CLAUSE-CUSTOM-${Date.now().toString().slice(-4)}`;
+      const newId = clauseId || `CLAUSE-CUSTOM-${crypto.randomUUID().slice(0, 8)}`;
       const newCat: RuleCategory = category || inferRuleCategoryFromProse(rawLegalText);
       const newCit = citation || 'Custom DPA Amendment §4.2';
       const knownFramework =

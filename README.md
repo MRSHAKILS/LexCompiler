@@ -222,11 +222,21 @@ curl -X POST -H 'X-LexCompiler-Client: cli' http://127.0.0.1:3001/api/remediatio
 
 Only a `READY_TO_MERGE` remediation (post-patch Z3 `SAT`) can be opened. Optional: `LEXCOMPILER_GITHUB_BASE` (base branch; defaults to the repository's default branch), `LEXCOMPILER_GITHUB_PATH_PREFIX` (where the scanned files live inside the GitHub repository), and `GITHUB_API_URL` (GitHub Enterprise).
 
-### Sign-in and Projects (OIDC)
+### Sign-in and Workspaces (OIDC)
 
-Set `LEXCOMPILER_OIDC_ISSUER` and `LEXCOMPILER_OIDC_CLIENT_ID` (plus `LEXCOMPILER_OIDC_CLIENT_SECRET` for confidential clients and `LEXCOMPILER_OIDC_REDIRECT_URI`, e.g. `https://lexcompiler.example.com/api/auth/callback`) to require sign-in with your identity provider. Users whose roles claim (`LEXCOMPILER_OIDC_ROLES_CLAIM`, default `roles`) contains `LEXCOMPILER_OIDC_ADMIN_ROLE` (default `lexcompiler-admin`) are administrators. Everyone else gets `LEXCOMPILER_DEFAULT_PROJECT_ROLE` (default `viewer`) on the default repository and their membership role on other projects.
+Set `LEXCOMPILER_OIDC_ISSUER` and `LEXCOMPILER_OIDC_CLIENT_ID` (plus `LEXCOMPILER_OIDC_CLIENT_SECRET` for confidential clients and `LEXCOMPILER_OIDC_REDIRECT_URI`, e.g. `https://lexcompiler.example.com/api/auth/callback`) to require sign-in with your identity provider. Users whose roles claim (`LEXCOMPILER_OIDC_ROLES_CLAIM`, default `roles`) contains `LEXCOMPILER_OIDC_ADMIN_ROLE` (default `lexcompiler-admin`) are administrators. Everyone else gets `LEXCOMPILER_DEFAULT_PROJECT_ROLE` (default `viewer`) on the single-repository demo endpoints, and their membership role inside workspaces.
 
-Projects (`/api/projects`) each have their own repository (inside `LEXCOMPILER_PROJECT_REPOS_ROOT`, default `repos/`), members (`viewer`, `editor`, `owner`), clauses, and scan history.
+Workspaces (`/api/workspaces`) hold one company's members, repositories, counterparties, rules and scans in the database at `data/lexcompiler.db` (SQLite, migrated on start). Sessions are stored there too, so sign-ins survive a restart; only a SHA-256 of each session id is kept. Roles:
+
+| Action | owner | legal | engineer | viewer |
+| :--- | :-: | :-: | :-: | :-: |
+| Connect repositories, invite members | ✓ | | | |
+| Draft, approve, reject and retire rules; decide exceptions | | ✓ | | |
+| Request exceptions, run scans | ✓ | ✓ | ✓ | |
+| Create counterparties and share links | ✓ | ✓ | | |
+| View everything in the workspace | ✓ | ✓ | ✓ | ✓ |
+
+A rule is enforced only after Legal approves a version of it. Each version freezes the compiled clause, and scans record the rule versions, their hashes and the LexCompiler build they ran with. People are invited by email and join at their first sign-in. Local repositories must live inside `LEXCOMPILER_PROJECT_REPOS_ROOT` (default `repos/`). `npm run seed:demo -- --activate-builtins` creates the demo workspace "FinHealth AI" with the four built-in clauses approved as R-1 to R-4.
 
 ### LLM Agents and Framework Adapters
 

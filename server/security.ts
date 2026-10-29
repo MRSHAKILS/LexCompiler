@@ -101,6 +101,11 @@ const ROLE_RANK = { none: 0, viewer: 1, editor: 2, owner: 3 } as const;
 /** Resolves the caller from a bearer token or session cookie (OIDC); null when unauthenticated. */
 export type Authenticator = (req: Request) => Promise<import('./auth/oidc.js').Principal | null>;
 
+/** Paths that check workspace roles themselves; the default-project role does not apply. */
+function isWorkspaceScopedPath(p: string): boolean {
+  return p.startsWith('/workspaces') || p.startsWith('/library/') || p.startsWith('/auth/');
+}
+
 export function createApiGuard(config: ServerSecurityConfig, authenticate?: Authenticator) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (req.path === '/health' || req.method === 'OPTIONS' || (config.oidcEnabled && PUBLIC_AUTH_PATHS.has(req.path))) {
@@ -128,7 +133,7 @@ export function createApiGuard(config: ServerSecurityConfig, authenticate?: Auth
           }
           res.locals.principal = principal;
           // Single-repository endpoints act on the default project.
-          if (!req.path.startsWith('/projects') && !req.path.startsWith('/auth/') && principal.globalRole !== 'admin') {
+          if (!isWorkspaceScopedPath(req.path) && principal.globalRole !== 'admin') {
             const need = req.method === 'GET' ? ROLE_RANK.viewer : ROLE_RANK.editor;
             if (ROLE_RANK[config.defaultProjectRole] < need) {
               res.status(403).json({ error: `Your role on the default project (${config.defaultProjectRole}) does not allow this request.` });

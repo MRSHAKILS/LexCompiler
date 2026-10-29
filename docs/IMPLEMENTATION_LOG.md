@@ -240,6 +240,8 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - repository paths cannot escape the projects root;
   - per-project clause compilation, scans and the ledger work.
 
+> **Superseded:** projects are now database-backed workspaces (`server/db/`, `server/product/`); see [PRODUCT_GUIDE.md](PRODUCT_GUIDE.md), Phase 1.
+
 ### Step 18 · KMS / HSM signing, key rotation, revocation, RFC 3161 timestamps (L-8)
 - **Signers:** `server/enterprise/attestationSigner.ts` defines one signer interface with three backends, selected by `LEXCOMPILER_SIGNER`:
   - `local`: the Ed25519 key file, as before.
