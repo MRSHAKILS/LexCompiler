@@ -1,0 +1,92 @@
+name: LexCompiler Compliance Scan (code scanning)
+
+# Reusable scan for a real repository: proves the caller's clauses against its code with Z3,
+# uploads the SARIF results to GitHub code scanning, then fails if any clause is not proven.
+#
+#   jobs:
+#     compliance:
+#       uses: shahriar-ahmed-seam/LexCompiler/.github/workflows/lexcompiler-scan.yml@main
+#       with:
+#         path: .
+#         clauses-file: compliance/clauses.json
+#       permissions:
+#         contents: read
+#         security-events: write
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Repository subdirectory to scan
+        type: string
+        default: .
+      clauses-file:
+        description: 'JSON array of { rawLegalText, citation, category? } (default is the built-in illustrative clauses)'
+        type: string
+        default: ''
+      lexcompiler-ref:
+        description: LexCompiler git ref to run
+        type: string
+        default: main
+  workflow_dispatch:
+    inputs:
+      path:
+        description: Repository subdirectory to scan
+        default: .
+      clauses-file:
+        description: 'JSON array of { rawLegalText, citation, category? }'
+        default: ''
+      lexcompiler-ref:
+        description: LexCompiler git ref to run
+        default: main
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository to scan
+        uses: actions/checkout@v4
+
+      - name: Checkout LexCompiler
+        uses: actions/checkout@v4
+        with:
+          repository: shahriar-ahmed-seam/LexCompiler
+          ref: ${{ inputs.lexcompiler-ref }}
+          path: .lexcompiler
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install LexCompiler
+        working-directory: .lexcompiler
+        run: npm ci
+
+      - name: Prove clauses and export SARIF
+        working-directory: .lexcompiler
+        env:
+          LEXCOMPILER_TARGET_REPO: ${{ github.workspace }}/${{ inputs.path }}
+          LEXCOMPILER_CLAUSES_FILE: ${{ inputs.clauses-file && format('{0}/{1}', github.workspace, inputs.clauses-file) || '' }}
+          LEXCOMPILER_SARIF_PATH_PREFIX: ${{ inputs.path != '.' && format('{0}/', inputs.path) || '' }}
+        run: npm run sarif -- "$GITHUB_WORKSPACE/lexcompiler.sarif"
+
+      - name: Upload to GitHub code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: lexcompiler.sarif
+          category: lexcompiler
+
+      - name: Compliance gate
+        working-directory: .lexcompiler
+        env:
+          LEXCOMPILER_TARGET_REPO: ${{ github.workspace }}/${{ inputs.path }}
+          LEXCOMPILER_CLAUSES_FILE: ${{ inputs.clauses-file && format('{0}/{1}', github.workspace, inputs.clauses-file) || '' }}
+        run: npm run verify:cli

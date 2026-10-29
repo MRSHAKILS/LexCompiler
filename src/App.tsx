@@ -1,22 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import {
-  BookOpen,
-  Bot,
-  Cpu,
-  Database,
-  Flame,
-  GitBranch,
-  GitPullRequest,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Radio,
-  RotateCcw,
-  Scale,
-  ShieldAlert,
-  ShieldCheck,
-  Sparkles,
-  Zap,
-} from 'lucide-react';
+import { BookOpen, Bot, Cpu, Database, Scale, ShieldCheck, Sparkles, Zap } from 'lucide-react';
+import { AppSidebar, type WorkspaceNavItem } from './components/AppSidebar';
+import { CommandBar } from './components/CommandBar';
 import { ArchitectureGraphCanvas } from './components/ArchitectureGraphCanvas';
 import { EnterpriseStartupSuite } from './components/EnterpriseStartupSuite';
 import { HybridRagStudio } from './components/HybridRagStudio';
@@ -26,6 +11,7 @@ import { LiveDocsAndRubricView } from './components/LiveDocsAndRubricView';
 import { LiveMultiLlmMeshStudio } from './components/LiveMultiLlmMeshStudio';
 import { McpAndAgentsHub } from './components/McpAndAgentsHub';
 import { TokenAndDataLifecycleLab } from './components/TokenAndDataLifecycleLab';
+import { feedItemToClauseRequest } from './feedIngest';
 import type {
   FullComplianceScanReport,
   LiveRegulatoryFeedItem,
@@ -44,6 +30,17 @@ type ActiveWorkspaceTab =
   | 'HYBRID_GRAPH_RAG'
   | 'TOKEN_AND_DATA_STACK'
   | 'LIVE_DOCS_AND_RUBRIC';
+
+/** Ctrl/⌘ + 1–7 open the modules in sidebar order. */
+const TAB_SHORTCUT_ORDER: ActiveWorkspaceTab[] = [
+  'LAW_TO_AST_STUDIO',
+  'MULTI_LLM_SERVICE_MESH',
+  'ENTERPRISE_CLOUD_SUITE',
+  'MCP_AND_AGENTS',
+  'HYBRID_GRAPH_RAG',
+  'TOKEN_AND_DATA_STACK',
+  'LIVE_DOCS_AND_RUBRIC',
+];
 
 export function App() {
   const [workspaceTab, setWorkspaceTab] = useState<ActiveWorkspaceTab>(() => {
@@ -165,7 +162,23 @@ export function App() {
     fetchAllTelemetry();
   }, [fetchAllTelemetry]);
 
-  const handleCompileCustomProse = async (clauseId: string, newProse: string) => {
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      const tab = TAB_SHORTCUT_ORDER[Number(e.key) - 1];
+      if (!tab) return;
+      e.preventDefault();
+      setWorkspaceTab(tab);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const handleCompileCustomProse = async (
+    clauseId: string,
+    newProse: string,
+    extra: Partial<ReturnType<typeof feedItemToClauseRequest>> = {}
+  ) => {
     setIsCompiling(true);
     runShockwaveAnimation('Custom Legal Clause Compilation');
     try {
@@ -176,11 +189,13 @@ export function App() {
           clauseId,
           rawLegalText: newProse,
           amendmentLabel: `Custom Prose Mutation on ${clauseId}`,
+          ...extra,
         }),
       });
       if (res.ok) {
         const updated = (await res.json()) as FullComplianceScanReport;
         setReport(updated);
+        if (updated.clauses.some((c) => c.id === clauseId)) setActiveClauseId(clauseId);
         fetchAllTelemetry();
         triggerToast(
           `Compiled legal prose into SMT-LIB2 & verified against ${updated.files.length} polyglot AST files in ${updated.totalZ3ExecutionMs} ms.`
@@ -321,7 +336,8 @@ export function App() {
   };
 
   const handleIngestLiveFeedItem = async (item: LiveRegulatoryFeedItem) => {
-    await handleCompileCustomProse('CLAUSE-DPA-4.2', item.excerpt);
+    const request = feedItemToClauseRequest(item);
+    await handleCompileCustomProse(request.clauseId, request.rawLegalText, request);
   };
 
   const handleSwitchLocale = async (locale: 'en' | 'bn') => {
@@ -356,8 +372,8 @@ export function App() {
   if (!report) {
     return (
       <div className="min-h-screen bg-[#050609] text-zinc-100 flex items-center justify-center p-6">
-        <div className="flex flex-col items-center gap-3 text-center">
-          <Cpu className="w-8 h-8 text-amber-400 animate-spin" />
+        <div role="status" className="flex flex-col items-center gap-3 text-center">
+          <Cpu className="w-8 h-8 text-amber-400 animate-spin" aria-hidden="true" />
           <div className="text-sm font-mono font-medium text-zinc-300">
             Initializing LexCompiler Neuro-Symbolic Engine (Ollama Multi-LLM + Microsoft Z3 +
             SQLite Vector Ledger)...
@@ -375,26 +391,19 @@ export function App() {
   const activeClause =
     report.clauses.find((c) => c.id === activeClauseId) || report.clauses[0];
 
-  const navItems: Array<{
-    id: ActiveWorkspaceTab;
-    label: string;
-    sublabel: string;
-    shortcut: string;
-    badge?: string;
-    icon: React.ReactNode;
-  }> = [
+  const navItems: WorkspaceNavItem<ActiveWorkspaceTab>[] = [
     {
       id: 'LAW_TO_AST_STUDIO',
       label: 'Law-to-AST Split Studio',
       sublabel: 'Deontic Compiler & Graph',
-      shortcut: '⌘1',
+      shortcutDigit: 1,
       icon: <Scale className="w-4 h-4 text-amber-300" />,
     },
     {
       id: 'MULTI_LLM_SERVICE_MESH',
       label: 'Live Multi-LLM & Services',
       sublabel: 'Ollama · Z3 · SQLite · 384d',
-      shortcut: '⌘2',
+      shortcutDigit: 2,
       badge: `${serviceMeshSummary?.ollamaModels?.length || 3} LLMs`,
       icon: <Cpu className="w-4 h-4 text-emerald-400" />,
     },
@@ -402,14 +411,14 @@ export function App() {
       id: 'ENTERPRISE_CLOUD_SUITE',
       label: 'Enterprise BYOC & Certs',
       sublabel: 'Ed25519 · SARIF · Fine ROI',
-      shortcut: '⌘3',
+      shortcutDigit: 3,
       icon: <ShieldCheck className="w-4 h-4 text-indigo-400" />,
     },
     {
       id: 'MCP_AND_AGENTS',
       label: '12-MCP & 6-Agent Plane',
       sublabel: 'JSON-RPC 2.0 · CrewAI/DSPy',
-      shortcut: '⌘4',
+      shortcutDigit: 4,
       badge: '12 MCP',
       icon: <Bot className="w-4 h-4 text-sky-400" />,
     },
@@ -417,7 +426,7 @@ export function App() {
       id: 'HYBRID_GRAPH_RAG',
       label: 'Contextual + Graph RAG',
       sublabel: 'all-minilm 384d · BM25 · Neo4j',
-      shortcut: '⌘5',
+      shortcutDigit: 5,
       badge: '98%',
       icon: <Database className="w-4 h-4 text-amber-400" />,
     },
@@ -425,7 +434,7 @@ export function App() {
       id: 'TOKEN_AND_DATA_STACK',
       label: 'Token Optimizer & Data',
       sublabel: 'Codeburn · Graphify · Lakehouse',
-      shortcut: '⌘6',
+      shortcutDigit: 6,
       badge: '-89%',
       icon: <Zap className="w-4 h-4 text-emerald-300" />,
     },
@@ -433,251 +442,49 @@ export function App() {
       id: 'LIVE_DOCS_AND_RUBRIC',
       label: 'Architecture & Specs (/docs)',
       sublabel: 'Formal Grammar & Prompts',
-      shortcut: '⌘7',
+      shortcutDigit: 7,
       icon: <BookOpen className="w-4 h-4 text-zinc-300" />,
     },
   ];
 
   return (
     <div className="min-h-screen flex bg-[#050609] text-[#F4F4F6]">
-      {/* LEFT PRECISION NAVIGATION SIDEBAR (Harvey AI × Linear × Palantir Style) */}
-      <aside
-        className={`${
-          sidebarCollapsed ? 'w-16' : 'w-[258px]'
-        } shrink-0 overflow-hidden transition-[width] duration-200 ease-out bg-[#080A0F] border-r border-white/[0.07] flex flex-col justify-between select-none`}
-      >
-        <div>
-          {/* Brand Emblem */}
-          <div
-            className={`py-3 border-b border-white/[0.07] flex ${
-              sidebarCollapsed
-                ? 'flex-col items-center gap-2 px-2'
-                : 'flex-row items-center px-3 gap-2.5'
-            }`}
-          >
-            <div className="w-9 h-9 shrink-0 rounded-xl bg-gradient-to-b from-amber-400/20 to-amber-600/5 border border-amber-400/40 flex items-center justify-center shadow-[0_0_25px_rgba(229,193,88,0.18)]">
-              <Scale className="w-4.5 h-4.5 text-amber-300" />
-            </div>
-            {!sidebarCollapsed && (
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold tracking-tight text-white">
-                    LexCompiler
-                  </span>
-                  <span className="px-1.5 py-0.2 rounded text-[9.5px] font-mono font-semibold bg-amber-400/15 text-amber-300 border border-amber-400/30">
-                    v2.5
-                  </span>
-                </div>
-                <div className="text-[10.5px] font-mono text-zinc-500 truncate">
-                  JusticeSphere · ComplianceOS
-                </div>
-              </div>
-            )}
-            <button
-              type="button"
-              onClick={toggleSidebar}
-              aria-expanded={!sidebarCollapsed}
-              aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              className="shrink-0 w-8 h-8 rounded-lg border border-white/[0.08] bg-white/[0.04] text-zinc-300 hover:text-white hover:bg-white/[0.08] flex items-center justify-center cursor-pointer"
-            >
-              {sidebarCollapsed ? (
-                <PanelLeftOpen className="w-4 h-4" />
-              ) : (
-                <PanelLeftClose className="w-4 h-4" />
-              )}
-            </button>
-          </div>
-
-          {/* Navigation Items */}
-          <div className="p-2 space-y-1">
-            {!sidebarCollapsed && (
-              <div className="px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-widest text-zinc-500">
-                Control Plane Modules
-              </div>
-            )}
-            {navItems.map((item) => {
-              const isActive = workspaceTab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setWorkspaceTab(item.id)}
-                  title={item.label}
-                  aria-label={item.label}
-                  className={`w-full text-left rounded-xl transition-all flex items-center cursor-pointer border ${
-                    sidebarCollapsed ? 'justify-center px-0 py-2.5' : 'justify-between gap-2 px-3 py-2.5'
-                  } ${
-                    isActive
-                      ? 'bg-white/[0.08] border-white/[0.15] text-white shadow-sm'
-                      : 'bg-transparent hover:bg-white/[0.03] border-transparent text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  <div className={`flex items-center min-w-0 ${sidebarCollapsed ? '' : 'gap-2.5'}`}>
-                    {item.icon}
-                    {!sidebarCollapsed && (
-                      <div className="min-w-0">
-                        <div className="text-xs font-semibold truncate">{item.label}</div>
-                        <div className="text-[10px] font-mono text-zinc-500 truncate">
-                          {item.sublabel}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  {!sidebarCollapsed && item.badge && (
-                    <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono font-medium bg-white/[0.06] text-zinc-300 border border-white/[0.08] shrink-0">
-                      {item.badge}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Bottom Live 6-Service Mesh Heartbeat Box */}
-        <div
-          className={`m-2 rounded-xl bg-[#0B0E16] border border-white/[0.07] ${
-            sidebarCollapsed ? 'p-2 flex justify-center' : 'p-3 space-y-2'
-          }`}
-          title="Active service mesh · 6/6 online"
-        >
-          {sidebarCollapsed ? (
-            <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
-          ) : (
-            <>
-              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
-                <span className="flex items-center gap-1.5">
-                  <Radio className="w-3 h-3 text-emerald-400 animate-pulse" />
-                  Active Service Mesh
-                </span>
-                <span className="text-emerald-400">6/6 ONLINE</span>
-              </div>
-
-              <div className="space-y-1.5 text-[10.5px] font-mono">
-                <div className="flex items-center justify-between text-zinc-300">
-                  <span className="truncate">Ollama (:11434)</span>
-                  <span className="text-amber-300">
-                    {serviceMeshSummary?.ollamaModels?.length || 3} Models
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-zinc-400 text-[10px]">
-                  <span className="truncate">dolphin3:8b · qwen2.5 · minilm</span>
-                </div>
-                <div className="flex items-center justify-between text-zinc-300 pt-1 border-t border-white/[0.05]">
-                  <span>Microsoft Z3 SMT</span>
-                  <span className="text-emerald-400">{report.totalZ3ExecutionMs}ms</span>
-                </div>
-                <div className="flex items-center justify-between text-zinc-300">
-                  <span>SQLite + 384d Vec</span>
-                  <span className="text-indigo-300">Persisted</span>
-                </div>
-                <div className="flex items-center justify-between text-zinc-300">
-                  <span>Python 3.12 + Git</span>
-                  <span className="text-zinc-400">@{report.commitHash}</span>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      </aside>
+      <AppSidebar
+        items={navItems}
+        activeId={workspaceTab}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={toggleSidebar}
+        onSelect={setWorkspaceTab}
+        ollamaModelCount={serviceMeshSummary?.ollamaModels?.length || 3}
+        z3ExecutionMs={report.totalZ3ExecutionMs}
+        commitHash={report.commitHash}
+      />
 
       {/* RIGHT MAIN WORKSPACE AREA */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Top Executive Command Bar */}
-        <header className="sticky top-0 z-40 bg-[#07090E]/90 backdrop-blur-md border-b border-white/[0.07] px-5 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            {/* Left: Active Regime, Locale Switcher & Git Telemetry */}
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.04] border border-white/[0.08] text-xs font-mono text-zinc-300">
-                <GitBranch className="w-3.5 h-3.5 text-amber-300" />
-                <span>{report.repositoryName}</span>
-                <span className="text-zinc-600">@</span>
-                <span className="text-amber-300 font-semibold">{report.commitHash}</span>
-              </div>
-
-              {/* Bilingual EN / বাংলা Statutory Corpus Switcher */}
-              <div className="inline-flex items-center rounded-lg bg-white/[0.04] border border-white/[0.1] p-0.5 text-[11px] font-mono">
-                <button
-                  type="button"
-                  onClick={() => handleSwitchLocale('en')}
-                  className={`px-2 py-0.5 rounded-md transition-all cursor-pointer ${
-                    activeLocale === 'en'
-                      ? 'bg-amber-400 text-black font-bold'
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  EN (Global)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSwitchLocale('bn')}
-                  className={`px-2.5 py-0.5 rounded-md transition-all cursor-pointer ${
-                    activeLocale === 'bn'
-                      ? 'bg-emerald-400 text-black font-bold'
-                      : 'text-zinc-300 hover:text-white'
-                  }`}
-                >
-                  বাংলা (BD Laws)
-                </button>
-              </div>
-            </div>
-
-            {/* Center: 3-Step Interactive Demo Scenario Triggers */}
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={handleSet30DayBaseline}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-medium bg-white/[0.04] hover:bg-white/[0.09] text-zinc-200 border border-white/[0.09] transition-all cursor-pointer"
-              >
-                <RotateCcw className="w-3.5 h-3.5 text-emerald-400" />
-                1. Baseline (30d)
-              </button>
-
-              <button
-                type="button"
-                onClick={handleSimulateFlagshipAmendment}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold bg-amber-400 hover:bg-amber-300 text-black shadow-[0_0_20px_rgba(229,193,88,0.28)] transition-all cursor-pointer"
-              >
-                <Flame className="w-3.5 h-3.5 fill-current" />
-                2. Simulate Regulatory Amendment (30d → 72h + KMS)
-              </button>
-
-              <button
-                type="button"
-                disabled={isAllCompliant || isApplyingPatch}
-                onClick={handleApplyFullPR}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 disabled:bg-white/[0.04] disabled:text-zinc-600 text-black shadow-[0_0_20px_rgba(16,185,129,0.28)] border border-emerald-400/50 disabled:border-white/[0.05] transition-all cursor-pointer"
-              >
-                <GitPullRequest className="w-3.5 h-3.5" />
-                3. Auto-Remediate &amp; Prove SAT
-              </button>
-            </div>
-
-            {/* Right: Z3 Formal Verdict Pill */}
-            <div className="flex items-center gap-2.5 text-xs font-mono">
-              {isAllCompliant ? (
-                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/40">
-                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  SAT · 100% COMPLIANT ({report.totalZ3ExecutionMs}ms)
-                </div>
-              ) : (
-                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold bg-rose-500/15 text-rose-300 border border-rose-500/40">
-                  <ShieldAlert className="w-4 h-4 text-rose-400 animate-pulse" />
-                  UNSAT · {report.violatedClausesCount} VIOLATIONS ({report.totalZ3ExecutionMs}ms)
-                </div>
-              )}
-            </div>
-          </div>
-        </header>
+        <CommandBar
+          repositoryName={report.repositoryName}
+          commitHash={report.commitHash}
+          activeLocale={activeLocale}
+          isAllCompliant={isAllCompliant}
+          isApplyingPatch={isApplyingPatch}
+          violatedClausesCount={report.violatedClausesCount}
+          totalZ3ExecutionMs={report.totalZ3ExecutionMs}
+          onSwitchLocale={handleSwitchLocale}
+          onSetBaseline={handleSet30DayBaseline}
+          onSimulateAmendment={handleSimulateFlagshipAmendment}
+          onApplyFullPR={handleApplyFullPR}
+        />
 
         {/* Toast Notification Banner */}
-        {toastMessage && (
-          <div className="fixed bottom-4 right-4 z-50 max-w-md px-4 py-2.5 rounded-xl bg-[#0F131D]/95 border border-amber-400/50 text-zinc-100 text-xs font-mono shadow-2xl flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
-            <span>{toastMessage}</span>
-          </div>
-        )}
+        <div role="status" aria-live="polite" aria-atomic="true" className="fixed bottom-4 right-4 z-50 max-w-md">
+          {toastMessage && (
+            <div className="px-4 py-2.5 rounded-xl bg-[#0F131D]/95 border border-amber-400/50 text-zinc-100 text-xs font-mono shadow-2xl flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+              <span>{toastMessage}</span>
+            </div>
+          )}
+        </div>
 
         {/* VIEW 1: Main Split-Screen "Law-to-Code" Workbench */}
         {workspaceTab === 'LAW_TO_AST_STUDIO' && (

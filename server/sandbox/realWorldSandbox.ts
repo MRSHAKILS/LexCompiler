@@ -1,10 +1,13 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import ts from 'typescript';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { INITIAL_REPO_FILES, TARGET_REPO_IS_FIXTURE, TARGET_REPO_ROOT } from '../analyzer/repoBaseline.js';
+import { resolveSandboxPython } from '../util/python.js';
+import { CONTAINER_WORKDIR, containerRunArgs, containerSandboxFromEnv, describeIsolation } from './container.js';
+import { executeSchemaOnPostgres, type PostgresExecutionReport } from './postgresSandbox.js';
 
 export interface RealWorldSandboxReport {
   executedAt: string;
@@ -15,21 +18,11 @@ export interface RealWorldSandboxReport {
     gitDiffStat: string;
     workingTreeClean: boolean;
   };
-  sqlDatabaseExecution: {
-    engine: string;
-    tablesCreated: string[];
-    patientRecordsColumns: Array<{
-      name: string;
-      type: string;
-      notnull: boolean;
-      defaultValue: string | null;
-    }>;
-    sampleInsertedRow: Record<string, unknown>;
-    hasTenantKmsKeyColumn: boolean;
-    actualDefaultRetentionHours: number;
-  };
+  sqlDatabaseExecution: PostgresExecutionReport;
   pythonFastApiExecution: {
     runtimeVersion: string;
+    frameworks: string;
+    httpStatus: number | null;
     testPayload: Record<string, string>;
     capturedLoggerOutput: string;
     leakedPlaintextSsnInLogs: boolean;
@@ -38,6 +31,8 @@ export interface RealWorldSandboxReport {
   pythonRedisWorkerExecution: {
     capturedSetexKey: string;
     capturedSetexTtlSeconds: number;
+    storedTtlSeconds: number;
+    redisBackend: string;
     capturedSetexTtlHours: number;
     capturedSetexPayload: string;
     purgeWorkerStatus: Record<string, unknown>;
@@ -51,6 +46,8 @@ export interface RealWorldSandboxReport {
     returnedSyncStatus: Record<string, unknown>;
     violatedGdprArt44: boolean;
   };
+  /** Where the code ran: a locked-down container, or a local process with resource limits. */
+  isolation: string;
 }
 
 const execFileAsync = promisify(execFile);
@@ -88,11 +85,18 @@ const pick = (mod, re) => Object.entries(mod).find(([k, v]) => typeof v === 'fun
 })().catch((err) => process.stdout.write(JSON.stringify({ error: String(err) })));
 `;
   fs.writeFileSync(path.join(workDir, 'lexcompiler-ts-runner.cjs'), runner);
-  const { stdout } = await execFileAsync(
-    process.execPath,
-    ['--permission', `--allow-fs-read=${workDir}`, '--max-old-space-size=128', 'lexcompiler-ts-runner.cjs'],
-    { cwd: workDir, env: { PATH: process.env.PATH || '/usr/bin:/bin' }, encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }
-  );
+  const container = containerSandboxFromEnv();
+  const { stdout } = container
+    ? await execFileAsync(
+        container.engine,
+        containerRunArgs(container, workDir, ['node', '--permission', `--allow-fs-read=${CONTAINER_WORKDIR}`, '--max-old-space-size=128', `${CONTAINER_WORKDIR}/lexcompiler-ts-runner.cjs`]),
+        { encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024 }
+      )
+    : await execFileAsync(
+        process.execPath,
+        ['--permission', `--allow-fs-read=${workDir}`, '--max-old-space-size=128', 'lexcompiler-ts-runner.cjs'],
+        { cwd: workDir, env: { PATH: process.env.PATH || '/usr/bin:/bin' }, encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }
+      );
   const result = JSON.parse(stdout) as {
     error?: string;
     aiFn?: string;
@@ -121,61 +125,74 @@ const pick = (mod, re) => Object.entries(mod).find(([k, v]) => typeof v === 'fun
 /** Separate Git dir tracking the demo fixture's history (never the user's own `.git`). */
 const SANDBOX_GIT_DIR = path.resolve(process.env.LEXCOMPILER_SANDBOX_GIT_DIR || path.join(process.cwd(), 'data', 'sandbox-git'));
 
-function runGit(args: string[]): string {
-  try {
-    return execFileSync('git', args, {
-      cwd: TARGET_REPO_ROOT,
-      env: {
-        ...process.env,
-        GIT_DIR: SANDBOX_GIT_DIR,
-        GIT_WORK_TREE: TARGET_REPO_ROOT,
-      },
-      encoding: 'utf8',
-      timeout: 4000,
-    }).trim();
-  } catch {
-    return '';
-  }
+function execGit(args: string[], opts: { cwd?: string; env: NodeJS.ProcessEnv }): Promise<string> {
+  return new Promise((resolve) =>
+    execFile('git', args, { ...opts, encoding: 'utf8', timeout: 4000, windowsHide: true }, (err, stdout) => resolve(err ? '' : stdout.trim()))
+  );
 }
 
-export function ensureTargetRepoGitInitialized(): void {
-  if (!TARGET_REPO_IS_FIXTURE) return;
+function runGitNow(args: string[]): Promise<string> {
+  return execGit(args, { cwd: TARGET_REPO_ROOT, env: { ...process.env, GIT_DIR: SANDBOX_GIT_DIR, GIT_WORK_TREE: TARGET_REPO_ROOT } });
+}
+
+// Sandbox Git work runs one task at a time (as it did when it was synchronous), so concurrent
+// requests never race on the index lock or interleave an add/commit sequence.
+let gitQueue: Promise<unknown> = Promise.resolve();
+function serialGit<T>(task: () => Promise<T>): Promise<T> {
+  const next = gitQueue.then(task, task);
+  gitQueue = next.catch(() => undefined);
+  return next;
+}
+
+async function initSandboxGitNow(): Promise<void> {
   const legacyNestedGit = path.join(TARGET_REPO_ROOT, '.git');
   if (fs.existsSync(legacyNestedGit)) {
     fs.rmSync(legacyNestedGit, { recursive: true, force: true });
   }
   if (!fs.existsSync(SANDBOX_GIT_DIR)) {
     fs.mkdirSync(path.dirname(SANDBOX_GIT_DIR), { recursive: true });
-    runGit(['init']);
-    runGit(['checkout', '-B', 'main']);
-    runGit(['config', 'user.name', 'LexCompiler Autonomous Enforcer']);
-    runGit(['config', 'user.email', 'lexcompiler-bot@justicesphere.ai']);
-    runGit(['add', '.']);
-    runGit(['commit', '-m', 'feat(baseline): initial FinHealth AI polyglot repository (30d TTL)']);
+    await runGitNow(['init']);
+    await runGitNow(['checkout', '-B', 'main']);
+    await runGitNow(['config', 'user.name', 'LexCompiler Autonomous Enforcer']);
+    await runGitNow(['config', 'user.email', 'lexcompiler-bot@justicesphere.ai']);
+    await runGitNow(['add', '.']);
+    await runGitNow(['commit', '-m', 'feat(baseline): initial FinHealth AI polyglot repository (30d TTL)']);
   }
 }
 
-export function commitTargetRepoChanges(commitMessage: string): string {
-  if (!TARGET_REPO_IS_FIXTURE) return '';
-  ensureTargetRepoGitInitialized();
-  runGit(['add', '.']);
-  const status = runGit(['status', '--porcelain']);
-  if (status) {
-    runGit(['commit', '-m', commitMessage]);
-  }
-  return runGit(['rev-parse', '--short', 'HEAD']) || 'HEAD';
+/** Runs one sandbox Git command (after initialising the sandbox history if needed). */
+function runGit(args: string[]): Promise<string> {
+  return serialGit(async () => {
+    await initSandboxGitNow();
+    return runGitNow(args);
+  });
 }
 
-export function resetTargetRepoGitHistory(): void {
-  if (!TARGET_REPO_IS_FIXTURE) return;
-  const legacyNestedGit = path.join(TARGET_REPO_ROOT, '.git');
-  if (fs.existsSync(legacyNestedGit)) {
-    fs.rmSync(legacyNestedGit, { recursive: true, force: true });
-  }
-  if (fs.existsSync(SANDBOX_GIT_DIR)) {
-    fs.rmSync(SANDBOX_GIT_DIR, { recursive: true, force: true });
-  }
-  ensureTargetRepoGitInitialized();
+export function ensureTargetRepoGitInitialized(): Promise<void> {
+  if (!TARGET_REPO_IS_FIXTURE) return Promise.resolve();
+  return serialGit(initSandboxGitNow);
+}
+
+export function commitTargetRepoChanges(commitMessage: string): Promise<string> {
+  if (!TARGET_REPO_IS_FIXTURE) return Promise.resolve('');
+  return serialGit(async () => {
+    await initSandboxGitNow();
+    await runGitNow(['add', '.']);
+    if (await runGitNow(['status', '--porcelain'])) {
+      await runGitNow(['commit', '-m', commitMessage]);
+    }
+    return (await runGitNow(['rev-parse', '--short', 'HEAD'])) || 'HEAD';
+  });
+}
+
+export function resetTargetRepoGitHistory(): Promise<void> {
+  if (!TARGET_REPO_IS_FIXTURE) return Promise.resolve();
+  return serialGit(async () => {
+    if (fs.existsSync(SANDBOX_GIT_DIR)) {
+      fs.rmSync(SANDBOX_GIT_DIR, { recursive: true, force: true });
+    }
+    await initSandboxGitNow();
+  });
 }
 
 /**
@@ -188,70 +205,101 @@ export async function executeRealWorldSandboxVerification(
   if (!TARGET_REPO_IS_FIXTURE) {
     throw new Error('The runtime sandbox only supports the bundled demo fixture, not LEXCOMPILER_TARGET_REPO repositories.');
   }
-  ensureTargetRepoGitInitialized();
-
-  const branch = runGit(['rev-parse', '--abbrev-ref', 'HEAD']) || 'main';
-  const headCommit = runGit(['rev-parse', '--short', 'HEAD']) || 'initial';
-  const logRaw = runGit(['log', '--oneline', '-n', '5']);
+  const branch = (await runGit(['rev-parse', '--abbrev-ref', 'HEAD'])) || 'main';
+  const headCommit = (await runGit(['rev-parse', '--short', 'HEAD'])) || 'initial';
+  const logRaw = await runGit(['log', '--oneline', '-n', '5']);
   const commitLog = logRaw ? logRaw.split('\n') : [];
-  const gitDiffStat = runGit(['show', '--stat', '--oneline', 'HEAD']);
-  const workingTreeClean = runGit(['status', '--porcelain']) === '';
+  const gitDiffStat = await runGit(['show', '--stat', '--oneline', 'HEAD']);
+  const workingTreeClean = (await runGit(['status', '--porcelain'])) === '';
 
   const pyRunnerScript = `
-import resource
+import sys
 
 # Defense in depth only: these limits are not an isolation boundary.
-for _limit, _value in (
-    (resource.RLIMIT_CPU, 5),
-    (resource.RLIMIT_AS, 512 * 1024 * 1024),
-    (resource.RLIMIT_FSIZE, 1024 * 1024),
-    (resource.RLIMIT_NPROC, 0),
-):
-    try:
-        resource.setrlimit(_limit, (_value, _value))
-    except (ValueError, OSError):
-        pass
+if sys.platform == "win32":
+    # No rlimits on Windows: put this process in a Job Object with the same CPU (5 s),
+    # memory (512 MiB) and no-child-process limits. Windows has no per-file size cap.
+    import ctypes
+    from ctypes import wintypes
 
-import json, sys, sqlite3, re, io, logging, asyncio, types
+    class _BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [(_n, ctypes.c_uint64) for _n in ("ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
+
+    class _ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimits),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    _JOB_OBJECT_LIMIT_PROCESS_TIME = 0x2
+    _JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x8
+    _JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x100
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    _JobObjectExtendedLimitInformation = 9
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    _kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _limits = _ExtendedLimits()
+    _limits.BasicLimitInformation.LimitFlags = (
+        _JOB_OBJECT_LIMIT_PROCESS_TIME
+        | _JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        | _JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        | _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    )
+    _limits.BasicLimitInformation.PerProcessUserTimeLimit = 5 * 10_000_000
+    _limits.BasicLimitInformation.ActiveProcessLimit = 1
+    _limits.ProcessMemoryLimit = 512 * 1024 * 1024
+    _job = _kernel32.CreateJobObjectW(None, None)
+    if _job:
+        _kernel32.SetInformationJobObject(_job, _JobObjectExtendedLimitInformation, ctypes.byref(_limits), ctypes.sizeof(_limits))
+        _kernel32.AssignProcessToJobObject(_job, _kernel32.GetCurrentProcess())
+else:
+    import resource
+
+    for _limit, _value in (
+        (resource.RLIMIT_CPU, 5),
+        (resource.RLIMIT_AS, 512 * 1024 * 1024),
+        (resource.RLIMIT_FSIZE, 1024 * 1024),
+        (resource.RLIMIT_NPROC, 0),
+    ):
+        try:
+            resource.setrlimit(_limit, (_value, _value))
+        except (ValueError, OSError):
+            pass
+
+import json, sys, re, io, logging, asyncio, types, os
 
 repo_root = sys.argv[1]
 
-# 1. Execute SQL DDL in real SQLite3 in-memory database engine
-with open(f"{repo_root}/schema/postgres_pii.sql", "r", encoding="utf-8") as f:
-    raw_sql = f.read()
-
-conn = sqlite3.connect(":memory:")
-cur = conn.cursor()
-cur.executescript(raw_sql)
-
-tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-col_info = cur.execute("PRAGMA table_info(patient_records)").fetchall()
-columns = [
-    {"name": c[1], "type": c[2], "notnull": bool(c[3]), "defaultValue": c[4]}
-    for c in col_info
-]
-col_names = [c["name"] for c in columns]
-has_tenant_kms_col = "tenant_kms_key_id" in col_names
-
-if has_tenant_kms_col:
-    cur.execute(
-        "INSERT INTO patient_records (patient_id, tenant_id, tenant_kms_key_id, full_name, email, ssn, diagnosis_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("pat-9921", "tenant-zurich-01", "kms-key-eu-zurich-01", "Dr. Elena Rostova", "elena.rostova@zurich-clinic.ch", "enc_kms::999-42-8810", "ICD10-I21.0")
-    )
-else:
-    cur.execute(
-        "INSERT INTO patient_records (patient_id, tenant_id, full_name, email, ssn, diagnosis_code) VALUES (?, ?, ?, ?, ?, ?)",
-        ("pat-9921", "tenant-zurich-01", "Dr. Elena Rostova", "elena.rostova@zurich-clinic.ch", "enc_shared::999-42-8810", "ICD10-I21.0")
-    )
-conn.commit()
-
-row_values = cur.execute("SELECT * FROM patient_records WHERE patient_id='pat-9921'").fetchone()
-sample_row = dict(zip(col_names, row_values))
-actual_default_ttl = int(sample_row.get("retention_ttl_hours", 720))
-
 # 2. Execute Python FastAPI Intake Module (api/fastapi_intake.py)
-# Provide lightweight shims if fastapi/pydantic are not installed in global python3
-if "fastapi" not in sys.modules:
+# Real FastAPI/Pydantic when installed (npm run setup:sandbox); minimal shims otherwise.
+try:
+    import fastapi, pydantic
+    import httpx
+    real_frameworks = True
+    frameworks = f"FastAPI {fastapi.__version__} + Pydantic {pydantic.VERSION} (HTTP via httpx ASGI transport)"
+except ImportError:
+    real_frameworks = False
+    frameworks = "shimmed FastAPI/Pydantic (run npm run setup:sandbox for the real packages)"
     fa_mod = types.ModuleType("fastapi")
     class DummyFastAPI:
         def __init__(self, **kwargs): pass
@@ -262,8 +310,6 @@ if "fastapi" not in sys.modules:
     fa_mod.Header = lambda default=None: default
     fa_mod.HTTPException = Exception
     sys.modules["fastapi"] = fa_mod
-
-if "pydantic" not in sys.modules:
     pyd_mod = types.ModuleType("pydantic")
     class DummyBaseModel:
         def __init__(self, **kwargs):
@@ -295,7 +341,7 @@ class SandboxKmsClient:
 if "TENANT_KMS_CLIENT" in intake_ns:
     intake_ns["TENANT_KMS_CLIENT"] = SandboxKmsClient()
 
-payload_obj = intake_ns["PatientIntakePayload"](
+payload_dict = dict(
     tenant_id="tenant-zurich-01",
     patient_id="pat-9921",
     full_name="Dr. Elena Rostova",
@@ -304,7 +350,20 @@ payload_obj = intake_ns["PatientIntakePayload"](
     diagnosis_code="ICD10-I21.0"
 )
 
-intake_response = asyncio.run(intake_ns["ingest_patient_pii"](payload_obj, x_tenant_id="tenant-zurich-01"))
+if real_frameworks:
+    # A real HTTP request through FastAPI routing, Pydantic validation and header binding
+    # (in-process ASGI transport: no sockets, no threads).
+    async def _post():
+        transport = httpx.ASGITransport(app=intake_ns["app"])
+        async with httpx.AsyncClient(transport=transport, base_url="http://sandbox") as client:
+            return await client.post("/api/v1/patients/intake", json=payload_dict, headers={"x-tenant-id": "tenant-zurich-01"})
+    http = asyncio.run(_post())
+    intake_response = http.json()
+    http_status = http.status_code
+else:
+    payload_obj = intake_ns["PatientIntakePayload"](**payload_dict)
+    intake_response = asyncio.run(intake_ns["ingest_patient_pii"](payload_obj, x_tenant_id="tenant-zurich-01"))
+    http_status = None
 captured_log = log_stream.getvalue().strip()
 leaked_ssn = ("999-42-8810" in captured_log) or ("elena.rostova@zurich-clinic.ch" in captured_log)
 
@@ -315,32 +374,47 @@ with open(f"{repo_root}/workers/redis_cache_worker.py", "r", encoding="utf-8") a
 redis_ns = {}
 exec(compile(redis_code, f"{repo_root}/workers/redis_cache_worker.py", "exec"), redis_ns)
 
-class MockRedisClient:
-    def __init__(self):
+class RecordingRedis:
+    """Wraps a Redis client and records the last SETEX call."""
+    def __init__(self, inner):
+        self.inner = inner
         self.last_key = ""
         self.last_ttl = 0
         self.last_val = ""
     def setex(self, k, ttl, val):
-        self.last_key = k
-        self.last_ttl = ttl
-        self.last_val = val
+        self.last_key, self.last_ttl, self.last_val = k, int(ttl), val
+        return self.inner.setex(k, ttl, val) if self.inner is not None else True
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
 
-mock_redis = MockRedisClient()
+redis_url = os.environ.get("LEXCOMPILER_REDIS_URL")
+try:
+    if redis_url:
+        import redis as redis_lib
+        inner_redis = redis_lib.Redis.from_url(redis_url)
+        redis_backend = f"Redis server ({redis_url.split('@')[-1]})"
+    else:
+        import fakeredis
+        inner_redis = fakeredis.FakeRedis()
+        redis_backend = f"fakeredis {fakeredis.__version__} (Redis command semantics in-process)"
+except ImportError:
+    inner_redis = None
+    redis_backend = "recording stub (run npm run setup:sandbox for fakeredis)"
+
+mock_redis = RecordingRedis(inner_redis)
 worker = redis_ns["RedisSessionCacheWorker"](mock_redis)
 worker.cache_patient_session("tenant-zurich-01", "pat-9921", {"ssn_token": "999-42-8810", "diagnosis": "ICD10-I21.0"})
 purge_status = worker.enforce_retention_purge()
+# TTL as stored by the Redis engine itself, not just the argument passed to SETEX.
+stored_ttl = int(inner_redis.ttl(mock_redis.last_key)) if inner_redis is not None else mock_redis.last_ttl
+if inner_redis is not None and redis_url:
+    inner_redis.delete(mock_redis.last_key)
 
 print(json.dumps({
-    "sql": {
-        "engine": f"SQLite {sqlite3.sqlite_version} (Executing schema/postgres_pii.sql)",
-        "tablesCreated": tables,
-        "patientRecordsColumns": columns,
-        "sampleInsertedRow": sample_row,
-        "hasTenantKmsKeyColumn": has_tenant_kms_col,
-        "actualDefaultRetentionHours": actual_default_ttl
-    },
     "fastapi": {
         "runtimeVersion": f"Python {sys.version.split()[0]}",
+        "frameworks": frameworks,
+        "httpStatus": http_status,
         "testPayload": {
             "tenant_id": "tenant-zurich-01",
             "patient_id": "pat-9921",
@@ -355,6 +429,8 @@ print(json.dumps({
     "redis": {
         "capturedSetexKey": mock_redis.last_key,
         "capturedSetexTtlSeconds": mock_redis.last_ttl,
+        "storedTtlSeconds": stored_ttl,
+        "redisBackend": redis_backend,
         "capturedSetexTtlHours": int(mock_redis.last_ttl // 3600),
         "capturedSetexPayload": mock_redis.last_val,
         "purgeWorkerStatus": purge_status
@@ -367,20 +443,52 @@ print(json.dumps({
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexcompiler-sandbox-'));
   let stdout: string;
   let tsRun!: Awaited<ReturnType<typeof runTypeScriptServices>>;
+  let sqlRun!: PostgresExecutionReport;
   try {
     for (const relPath of Object.keys(INITIAL_REPO_FILES)) {
       const dest = path.join(workDir, relPath);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(path.join(TARGET_REPO_ROOT, relPath), dest);
     }
-    const { stdout: out } = await execFileAsync('python3', ['-I', '-c', pyRunnerScript, workDir], {
-      cwd: workDir,
-      env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
-      encoding: 'utf8',
-      timeout: 5000,
-      maxBuffer: 2 * 1024 * 1024,
-    });
-    stdout = out;
+    const container = containerSandboxFromEnv();
+    if (container) {
+      // The container runs as nobody: make the (throwaway, read-only mounted) copy readable.
+      const open = (dir: string) => {
+        fs.chmodSync(dir, 0o755);
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          const p = path.join(dir, e.name);
+          if (e.isDirectory()) open(p);
+          else fs.chmodSync(p, 0o644);
+        }
+      };
+      open(workDir);
+      // The image's interpreter (with FastAPI / Pydantic / fakeredis) runs the same script inside the container.
+      const { stdout: out } = await execFileAsync(container.engine, containerRunArgs(container, workDir, ['python', '-I', '-c', pyRunnerScript, CONTAINER_WORKDIR]), {
+        encoding: 'utf8',
+        timeout: 60000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      stdout = out;
+    } else {
+      const python = await resolveSandboxPython();
+      if (!python) throw new Error('No Python >= 3.10 interpreter found (tried LEXCOMPILER_PYTHON, python3, python, py -3)');
+      const { stdout: out } = await execFileAsync(python.command, [...python.prefixArgs, '-I', '-c', pyRunnerScript, workDir], {
+        cwd: workDir,
+        // Windows needs SYSTEMROOT for the interpreter's crypto/random init.
+        env: {
+          PATH: process.env.PATH || '/usr/bin:/bin',
+          LANG: 'C.UTF-8',
+          ...(process.env.LEXCOMPILER_REDIS_URL ? { LEXCOMPILER_REDIS_URL: process.env.LEXCOMPILER_REDIS_URL } : {}),
+          ...(process.platform === 'win32' && process.env.SYSTEMROOT ? { SYSTEMROOT: process.env.SYSTEMROOT } : {}),
+        },
+        windowsHide: true,
+        encoding: 'utf8',
+        timeout: 15000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      stdout = out;
+    }
+    sqlRun = await executeSchemaOnPostgres(fs.readFileSync(path.join(workDir, 'schema/postgres_pii.sql'), 'utf8'));
     tsRun = await runTypeScriptServices(workDir, policy.minAiConfidence ?? 0.85, policy.allowedRegions ?? ['eu-central-1', 'eu-west-1']);
   } finally {
     fs.rmSync(workDir, { recursive: true, force: true });
@@ -396,11 +504,12 @@ print(json.dumps({
       gitDiffStat,
       workingTreeClean,
     },
-    sqlDatabaseExecution: parsed.sql,
+    sqlDatabaseExecution: sqlRun,
     pythonFastApiExecution: parsed.fastapi,
     pythonRedisWorkerExecution: parsed.redis,
     typescriptAiTriageExecution: tsRun.ai,
     typescriptCrossBorderExecution: tsRun.crossBorder,
+    isolation: describeIsolation(containerSandboxFromEnv()),
   };
 }
 
@@ -417,27 +526,22 @@ export interface RepositoryIdentity {
  * demo fixture, or the repository's own `.git` otherwise. Falls back to a content hash
  * (prefixed `content-`) when the directory is not a Git checkout.
  */
-export function resolveRepositoryIdentity(contentFingerprint: string): RepositoryIdentity {
-  const git = (args: string[]): string => {
+export async function resolveRepositoryIdentity(contentFingerprint: string): Promise<RepositoryIdentity> {
+  const git = (args: string[]): Promise<string> => {
     if (TARGET_REPO_IS_FIXTURE) return runGit(args);
-    try {
-      const env = { ...process.env };
-      delete env.GIT_DIR;
-      delete env.GIT_WORK_TREE;
-      return execFileSync('git', ['-C', TARGET_REPO_ROOT, ...args], { encoding: 'utf8', timeout: 4000, env, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    } catch {
-      return '';
-    }
+    const env = { ...process.env };
+    delete env.GIT_DIR;
+    delete env.GIT_WORK_TREE;
+    return execGit(['-C', TARGET_REPO_ROOT, ...args], { env });
   };
-  if (TARGET_REPO_IS_FIXTURE) ensureTargetRepoGitInitialized();
-  const commit = git(['rev-parse', '--short=12', 'HEAD']);
-  const remoteUrl = TARGET_REPO_IS_FIXTURE ? undefined : git(['remote', 'get-url', 'origin']) || undefined;
+  const commit = await git(['rev-parse', '--short=12', 'HEAD']);
+  const remoteUrl = TARGET_REPO_IS_FIXTURE ? undefined : (await git(['remote', 'get-url', 'origin'])) || undefined;
   const remoteName = remoteUrl?.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1];
   return {
     name: TARGET_REPO_IS_FIXTURE ? 'finhealth-ai/core-platform' : remoteName || path.basename(TARGET_REPO_ROOT),
-    branch: git(['rev-parse', '--abbrev-ref', 'HEAD']) || 'unknown',
+    branch: (await git(['rev-parse', '--abbrev-ref', 'HEAD'])) || 'unknown',
     commitHash: commit || `content-${contentFingerprint.slice(0, 12)}`,
     remoteUrl,
-    dirty: commit ? git(['status', '--porcelain']) !== '' : false,
+    dirty: commit ? (await git(['status', '--porcelain'])) !== '' : false,
   };
 }

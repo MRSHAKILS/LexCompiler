@@ -36,6 +36,15 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
+      - name: Install sandbox frameworks (FastAPI, Pydantic, fakeredis)
+        run: npm run setup:sandbox
+
+      - name: Python agent adapter tests (Pydantic-AI, LangGraph, Hermes)
+        run: |
+          python -m venv .venv-agents
+          .venv-agents/bin/pip install -q -r agents/requirements-test.txt
+          .venv-agents/bin/python -m pytest -q agents/tests
+
       - name: Type-check Client & Server
         run: npm run typecheck
 

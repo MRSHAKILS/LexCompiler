@@ -1,20 +1,25 @@
 import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import ts from 'typescript';
 import type {
   ASTFindingNode,
+  SymbolicSummary,
   SourceEditAnchor,
   SQLColumnNode,
   SQLDependentForeignKey,
   SQLTableSchema,
   TargetRepoFile,
 } from '../../shared/types.js';
+import { resolvePython, resolvePythonAsync } from '../util/python.js';
+import { classifyPii, PII_NAME, snakeCase, type PiiEvidence } from './piiClassifier.js';
+import { collectGovernanceFindings } from './governanceFacts.js';
+import { summarizeTypeScriptFunction } from './symbolicTs.js';
 
-/** Identifier is PII when its last `_`-separated token(s) name a personal-data field. */
-const PII_IDENTIFIER =
-  /(^|_)(ssn|email|phone|dob|date_of_birth|birthdate|passport|national_id|tax_id|credit_card|card_number|full_name|diagnosis_code|diagnosis)$/i;
+const PII_IDENTIFIER = PII_NAME;
 const PII_COLUMN_PREFIX = /^(patient_|biometric_)/i;
-const TTL_NAMES = /(ttl|retention|expir|purge)/i;
+// Whole name tokens, so `LOGIN_THROTTLE_*` is not a TTL (it contains "ttl").
+const TTL_NAMES = /(^|_)(ttl|ttls|retention|retain|expiry|expires?|expiration|purge)(_|$)/i;
 const KMS_FLAG_NAMES = /(tenant.*kms|kms.*envelope|tenant_isolated_kms)/i;
 const CIPHER_NAMES = /(encryption_cipher|^cipher$|kms_cipher)/i;
 const CONFIDENCE_NAMES = /(confidence|threshold|auto_approval|min_score|min_conf)/i;
@@ -53,6 +58,34 @@ export function ttlUnitFromName(name: string): { hoursPerUnit: number; unit: str
   if (/(^|_)(d|days?)($|_)/i.test(name)) return { hoursPerUnit: 24, unit: 'days', assumed: false };
   if (/(^|_)(w|wk|wks|weeks?)($|_)/i.test(name)) return { hoursPerUnit: 168, unit: 'weeks', assumed: false };
   return { hoursPerUnit: 1, unit: 'hours', assumed: true };
+}
+
+const COMMENT_UNITS: Array<[RegExp, number, string]> = [
+  [/^(ms|msecs?|millis(econds?)?)$/i, 1 / 3_600_000, 'milliseconds'],
+  [/^(s|secs?|seconds?)$/i, 1 / 3600, 'seconds'],
+  [/^(m|mins?|minutes?)$/i, 1 / 60, 'minutes'],
+  [/^(h|hrs?|hours?)$/i, 1, 'hours'],
+  [/^(d|days?)$/i, 24, 'days'],
+  [/^(w|wks?|weeks?)$/i, 168, 'weeks'],
+];
+
+/**
+ * Unit of a unitless TTL constant from its trailing comment, e.g. `_cache_ttl = 300  # 5 minutes`
+ * (the value is then seconds) or `TTL = 30  # days`. Null when the comment does not settle it.
+ */
+export function ttlUnitFromComment(comment: string, value: number): { hoursPerUnit: number; unit: string } | null {
+  const unitOf = (w: string) => COMMENT_UNITS.find(([re]) => re.test(w));
+  // "N <unit>": pick the unit that makes `value` equal to the stated duration.
+  const stated = /(\d+(?:\.\d+)?)\s*([a-z]+)/i.exec(comment);
+  const statedUnit = stated && unitOf(stated[2]);
+  if (stated && statedUnit) {
+    const hours = Number(stated[1]) * statedUnit[1];
+    const match = COMMENT_UNITS.find(([, perUnit]) => Math.abs(value * perUnit - hours) <= 1e-9 * Math.max(1, hours));
+    if (match) return { hoursPerUnit: match[1], unit: match[2] };
+  }
+  // A bare unit word: "# seconds", "# in minutes".
+  const word = comment.match(/[a-z]+/gi)?.map(unitOf).find(Boolean);
+  return word && !stated ? { hoursPerUnit: word[1], unit: word[2] } : null;
 }
 
 function roundHours(h: number): number {
@@ -344,7 +377,13 @@ function addColumn(parsed: ParsedTable, item: SqlToken[], comments: SqlToken[]):
   }
 
   const ann = annotationsFrom(comments);
-  const inferredPii = isInferredPiiColumn(colName);
+  // String literals inside a column CHECK (...) are validation patterns for the classifier.
+  const checkPatterns: string[] = [];
+  for (let c = item.findIndex((t) => upper(t) === 'CHECK'); c >= 0 && c < item.length; c++) {
+    if (item[c].kind === 'string') checkPatterns.push(item[c].value);
+  }
+  const classified = classifyPii({ name: colName, typeText: dataType, patterns: checkPatterns });
+  const inferredPii = isInferredPiiColumn(colName) || (classified.pii && !classified.evidence.every((e) => e === 'name'));
   const isPII = Boolean(ann.piiClass) || inferredPii;
   // Application-level ciphertext columns (e.g. `ssn_encrypted BYTEA`) count as encrypted at rest.
   const ciphertextColumn = /(_enc|_encrypted|_ciphertext)$/i.test(colName) && /BYTEA|BLOB|BINARY/i.test(dataType);
@@ -392,17 +431,53 @@ function addColumn(parsed: ParsedTable, item: SqlToken[], comments: SqlToken[]):
     isPrimaryKey,
     isNullable: !notNull && !isPrimaryKey,
     isPII,
-    piiClassification: ann.piiClass || (isPII ? 'DIRECT_IDENTIFIER' : 'NONE'),
+    piiClassification: ann.piiClass || (isPII ? piiClassificationFor(classified.category) : 'NONE'),
     encryptedAtRest,
     encryptionAlgorithm: ann.encryptedAlg || (ciphertextColumn ? 'APPLICATION_CIPHERTEXT' : undefined),
     hasTenantKeyIsolation: hasTenantKeyCol,
     foreignKeyReference: fk
       ? { table: fk.parentTable, column: fk.parentColumn, onDeleteCascade: fk.onDelete === 'CASCADE', implicit: fk.onDelete == null }
       : undefined,
-    piiInference: ann.piiClass ? 'ANNOTATION' : inferredPii ? 'NAME_PATTERN' : 'NONE',
+    piiInference: ann.piiClass ? 'ANNOTATION' : inferredPii ? piiInferenceFor(classified.evidence, isInferredPiiColumn(colName)) : 'NONE',
     line: nameTok.line,
   });
   if (fk) parsed.foreignKeys.push(fk);
+}
+
+type SqlPiiClass = NonNullable<SQLColumnNode['piiClassification']>;
+
+function piiClassificationFor(category: string | undefined): SqlPiiClass {
+  if (category === 'health') return 'HEALTH_PHI';
+  if (category === 'card_number' || category === 'iban') return 'FINANCIAL_PCI';
+  if (category === 'biometric') return 'BIOMETRIC';
+  return 'DIRECT_IDENTIFIER';
+}
+
+function piiInferenceFor(evidence: PiiEvidence[], byName: boolean): NonNullable<SQLColumnNode['piiInference']> {
+  if (byName) return 'NAME_PATTERN';
+  if (evidence.includes('type')) return 'TYPE';
+  if (evidence.includes('schema')) return 'SCHEMA';
+  return evidence.includes('value') ? 'VALUE' : 'NAME_PATTERN';
+}
+
+/** `COMMENT ON COLUMN table.column IS '…'`: documentation that can classify an existing column as PII. */
+function applyColumnComment(parsedTables: Map<string, ParsedTable>, code: SqlToken[]): void {
+  const isIdx = code.findIndex((t, i) => i > 2 && upper(t) === 'IS');
+  const text = isIdx > 0 && code[isIdx + 1]?.kind === 'string' ? code[isIdx + 1].value : '';
+  // [schema.]table.column: the last identifier is the column, the one before it the table.
+  const names = code.slice(3, isIdx).filter((t) => t.kind === 'word' || t.kind === 'quoted').map((t) => t.value);
+  if (names.length < 2 || !text) return;
+  const parsed = parsedTables.get(names[names.length - 2].toLowerCase());
+  const col = parsed?.table.columns.find((c) => c.name.toLowerCase() === names[names.length - 1].toLowerCase());
+  if (!parsed || !col || col.isPII) return;
+  const classified = classifyPii({ name: col.name, typeText: col.dataType, description: text });
+  if (!classified.pii) return;
+  col.isPII = true;
+  col.piiClassification = piiClassificationFor(classified.category);
+  col.piiInference = 'SCHEMA';
+  parsed.table.containsPII = true;
+  if (col.encryptedAtRest) parsed.table.encryptedColumnsCount++;
+  else parsed.table.unencryptedPiiColumns.push(col.name);
 }
 
 function addTableConstraint(parsed: ParsedTable, item: SqlToken[]): void {
@@ -560,6 +635,11 @@ export function parseSqlSchemaFile(file: TargetRepoFile): {
       }
       parsedTables.set(tn.name.toLowerCase(), parsed);
       order.push(parsed);
+      continue;
+    }
+
+    if (first === 'COMMENT' && upper(code[1]) === 'ON' && upper(code[2]) === 'COLUMN') {
+      applyColumnComment(parsedTables, code);
       continue;
     }
 
@@ -732,7 +812,7 @@ interface PySpan {
   text: string;
 }
 
-interface ParsedPythonAst {
+export interface ParsedPythonAst {
   syntax_error?: string;
   node_count: number;
   assignments: Array<{
@@ -752,8 +832,20 @@ interface ParsedPythonAst {
     end_lineno: number;
     args: string[];
     decorators: string[];
+    calls?: string[];
+    annotations?: Record<string, string>;
+    body_line?: number;
+    body_col?: number;
   }>;
-  classes: Array<{ name: string; lineno: number; end_lineno: number }>;
+  classes: Array<{
+    name: string;
+    lineno: number;
+    end_lineno: number;
+    bases?: string[];
+    fields?: Array<{ name: string; lineno: number; end_lineno: number; annotation?: string; description?: string; patterns?: string[]; samples?: string[] }>;
+  }>;
+  attr_reads?: string[];
+  symbolic?: Record<string, SymbolicSummary & { lineno: number; end_lineno: number }>;
   sinks: Array<{
     func: string;
     lineno: number;
@@ -782,7 +874,8 @@ interface ParsedPythonAst {
 const PYTHON_AST_SCRIPT = String.raw`
 import ast, json, re, sys
 
-src = sys.stdin.read()
+# Node writes UTF-8; text-mode stdin would decode with the locale code page (cp1252 on Windows).
+src = sys.stdin.buffer.read().decode("utf-8")
 try:
     tree = ast.parse(src)
 except SyntaxError as e:
@@ -916,34 +1009,92 @@ for node in ast.walk(tree):
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         args = [a.arg for a in node.args.args + node.args.kwonlyargs]
         decos = [dotted(d.func) if isinstance(d, ast.Call) else dotted(d) for d in node.decorator_list]
+        calls = sorted({dotted(c.func) for c in ast.walk(node) if isinstance(c, ast.Call) and dotted(c.func)})
+        annotations = {a.arg: dotted(a.annotation) for a in node.args.args + node.args.kwonlyargs if a.annotation is not None and dotted(a.annotation)}
+        body = node.body
+        first = body[1] if (len(body) > 1 and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant) and isinstance(body[0].value.value, str)) else body[0]
         functions.append({"name": node.name, "kind": type(node).__name__, "lineno": node.lineno,
-                          "end_lineno": node.end_lineno, "args": args, "decorators": decos})
+                          "end_lineno": node.end_lineno, "args": args, "decorators": decos,
+                          "calls": calls, "annotations": annotations,
+                          "body_line": first.lineno, "body_col": ccol(first.lineno, first.col_offset)})
     elif isinstance(node, ast.ClassDef):
-        classes.append({"name": node.name, "lineno": node.lineno, "end_lineno": node.end_lineno})
+        fields = []
+        for stmt in node.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                # Type, Field(description=, pattern=, examples=) and literal defaults feed the PII classifier.
+                fld = {"name": stmt.target.id, "lineno": stmt.lineno, "end_lineno": stmt.end_lineno,
+                       "annotation": ast.unparse(stmt.annotation), "samples": [], "patterns": []}
+                v = stmt.value
+                if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                    fld["samples"].append(v.value)
+                elif isinstance(v, ast.Call) and dotted(v.func).split(".")[-1] == "Field":
+                    for a in v.args[:1]:
+                        if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                            fld["samples"].append(a.value)
+                    for kw in v.keywords:
+                        if kw.arg in ("description", "title") and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            fld["description"] = (fld.get("description", "") + " " + kw.value.value).strip()
+                        elif kw.arg in ("pattern", "regex") and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            fld["patterns"].append(kw.value.value)
+                        elif kw.arg in ("default", "example") and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            fld["samples"].append(kw.value.value)
+                        elif kw.arg == "examples" and isinstance(kw.value, (ast.List, ast.Tuple)):
+                            fld["samples"].extend(e.value for e in kw.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str))
+                fields.append(fld)
+        classes.append({"name": node.name, "lineno": node.lineno, "end_lineno": node.end_lineno,
+                        "bases": [dotted(b) for b in node.bases if dotted(b)], "fields": fields})
+
+# Attribute / key reads anywhere in the module (data-minimisation: which collected fields are used).
+attr_reads = sorted({n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load)}
+                    | {n.slice.value for n in ast.walk(tree) if isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)})
 
 # --- PII taint: seeds are PII-named parameters; propagate through assignments to a fixpoint.
+# Keyed by (scope, name): a variable is tainted only in the function that assigned it (module-level
+# names are visible everywhere), so a "response" tainted in one function does not taint every
+# "response" in the file.
 tainted = set()
-origin = {}  # tainted name -> PII field it carries
-for f in functions:
-    for a in f["args"]:
-        if PII.search(a):
-            tainted.add(a)
-            origin[a] = a
+origin = {}  # (scope, name) -> PII field it carries
+def scope_of(n):
+    fn = enclosing_function(n)
+    return id(fn) if fn is not None else None
+for fn_node in ast.walk(tree):
+    if isinstance(fn_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for a in fn_node.args.args + fn_node.args.kwonlyargs:
+            if PII.search(a.arg):
+                tainted.add((id(fn_node), a.arg))
+                origin[(id(fn_node), a.arg)] = a.arg
+def taint_key(n):
+    """The tainted (scope, name) a Name load refers to: its own function's, else a module global."""
+    for key in ((scope_of(n), n.id), (None, n.id)):
+        if key in tainted:
+            return key
+    return None
 
 def is_sanitizer_call(n):
     return isinstance(n, ast.Call) and bool(SANITIZER.search(dotted(n.func).split(".")[-1] or ""))
+
+# Calls whose result carries their arguments' data. Any other call is opaque: its result is
+# tainted only through its receiver (payload.get(...), email.lower()), so the response of an
+# HTTP call that was sent an e-mail is not itself treated as PII.
+TAINT_PRESERVING = {"str", "repr", "format", "format_map", "join", "dumps", "dict", "list", "tuple", "set", "copy",
+                    "deepcopy", "asdict", "vars", "getattr", "lower", "upper", "strip", "lstrip", "rstrip", "title",
+                    "casefold", "replace", "encode", "decode", "model_dump", "model_dump_json", "json", "jsonable_encoder"}
 
 def tainted_leaves(expr):
     out = []
     def visit(n):
         if is_sanitizer_call(n):
             return
+        if isinstance(n, ast.Call) and (dotted(n.func).split(".")[-1] or "") not in TAINT_PRESERVING:
+            if isinstance(n.func, ast.Attribute):
+                visit(n.func.value)
+            return
         if isinstance(n, ast.Attribute) and PII.search(n.attr):
             out.append((n, n.attr)); return
         if isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str) and PII.search(n.slice.value):
             out.append((n, n.slice.value)); return
-        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in tainted:
-            out.append((n, origin.get(n.id, n.id))); return
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and taint_key(n) is not None:
+            out.append((n, origin.get(taint_key(n), n.id))); return
         for c in ast.iter_child_nodes(n):
             visit(c)
     visit(expr)
@@ -957,9 +1108,10 @@ while changed:
         if leaves:
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for t in targets:
-                if isinstance(t, ast.Name) and t.id not in tainted:
-                    tainted.add(t.id)
-                    origin[t.id] = leaves[0][1]
+                key = (scope_of(node), t.id) if isinstance(t, ast.Name) else None
+                if key is not None and key not in tainted:
+                    tainted.add(key)
+                    origin[key] = leaves[0][1]
                     changed = True
 
 def is_log_sink(name):
@@ -1020,11 +1172,228 @@ for node in ast.walk(tree):
             "ttl_refs": refs,
         })
 
+# --- Inter-procedural taint: a module function whose parameter reaches a log sink (directly,
+# through local aliases, or through another such function) is itself a sink for that argument.
+fn_nodes = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+param_sinks = {}  # function name -> {parameter index: description of the inner sink}
+
+def arg_offset(fn, call):
+    params = [a.arg for a in fn.args.args]
+    return 1 if params and params[0] in ("self", "cls") and isinstance(call.func, ast.Attribute) else 0
+
+for _ in range(3):
+    for fname, fn in fn_nodes.items():
+        params = [a.arg for a in fn.args.args]
+        alias = {p: p for p in params}
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Assign):
+                src_param = next((alias[x.id] for x in ast.walk(n.value) if isinstance(x, ast.Name) and x.id in alias), None)
+                if src_param:
+                    for t in n.targets:
+                        if isinstance(t, ast.Name):
+                            alias[t.id] = src_param
+        for c in ast.walk(fn):
+            if not isinstance(c, ast.Call):
+                continue
+            cname = dotted(c.func) or ""
+            callee = cname.split(".")[-1]
+            flows = []
+            if is_log_sink(cname):
+                flows = [(arg, cname) for arg in list(c.args) + [k.value for k in c.keywords]]
+            elif callee in param_sinks and callee != fname:
+                off = arg_offset(fn_nodes[callee], c)
+                flows = [(c.args[i - off], f"{callee} -> {inner}") for i, inner in param_sinks[callee].items() if 0 <= i - off < len(c.args)]
+            for arg, inner in flows:
+                for x in ast.walk(arg):
+                    if isinstance(x, ast.Name) and x.id in alias:
+                        param_sinks.setdefault(fname, {})[params.index(alias[x.id])] = inner
+
+for node in ast.walk(tree):
+    if not isinstance(node, ast.Call):
+        continue
+    cname = dotted(node.func) or ""
+    callee = cname.split(".")[-1]
+    if callee not in param_sinks or is_log_sink(cname):
+        continue
+    off = arg_offset(fn_nodes[callee], node)
+    leaks = []
+    for i, inner in param_sinks[callee].items():
+        if 0 <= i - off < len(node.args):
+            for leaf, field in tainted_leaves(node.args[i - off]):
+                sp = span(leaf)
+                sp["field"] = field
+                leaks.append(sp)
+    if leaks:
+        sinks.append({"func": f"{cname} -> {list(param_sinks[callee].values())[0]}", "lineno": node.lineno, "end_lineno": node.end_lineno,
+                      "col": ccol(node.lineno, node.col_offset), "text": ast.get_source_segment(src, node) or "",
+                      "leaks": leaks, "via": callee})
+
+# --- Path-sensitive symbolic execution of each function (constants folded, parameters free).
+MAX_PATHS = 64
+TRUE = {"k": "bool", "v": True}
+
+def s_and(a, b):
+    if a == TRUE: return b
+    if b == TRUE: return a
+    return {"k": "op", "op": "and", "args": [a, b]}
+
+def s_not(a):
+    if a["k"] == "bool": return {"k": "bool", "v": not a["v"]}
+    return {"k": "op", "op": "not", "args": [a]}
+
+def s_sort(e):
+    k = e["k"]
+    if k in ("num", "bool", "str"): return k
+    if k == "var": return e["sort"]
+    if k == "ite": return s_sort(e["t"])
+    return "num" if e["op"] in ("add", "sub", "mul", "div", "neg") else "bool"
+
+CMP = {ast.Eq: "eq", ast.NotEq: "ne", ast.Lt: "lt", ast.LtE: "le", ast.Gt: "gt", ast.GtE: "ge", ast.Is: "eq", ast.IsNot: "ne"}
+ARITH = {ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "div"}
+
+class SymCtx:
+    def __init__(self, params):
+        self.params = params
+        self.approx = []
+        self.n = 0
+    def havoc(self, node, sort, why):
+        self.approx.append(f"{why}: {(ast.get_source_segment(src, node) or '')[:60]}")
+        self.n += 1
+        return {"k": "var", "name": f"__unknown_{self.n}", "sort": sort}
+
+def s_eval(e, env, ctx, want="num"):
+    if isinstance(e, ast.Constant):
+        v = e.value
+        if isinstance(v, bool): return {"k": "bool", "v": v}
+        if isinstance(v, (int, float)): return {"k": "num", "v": v}
+        if isinstance(v, str): return {"k": "str", "v": v}
+        if v is None: return {"k": "str", "v": "None"}
+    if isinstance(e, ast.Name):
+        if e.id in env: return env[e.id]
+        if e.id in consts and isinstance(consts[e.id], (bool, int, float, str)):
+            v = consts[e.id]
+            return {"k": "bool", "v": v} if isinstance(v, bool) else ({"k": "num", "v": v} if isinstance(v, (int, float)) else {"k": "str", "v": v})
+        if e.id in ctx.params: return {"k": "var", "name": e.id, "sort": want}
+        return ctx.havoc(e, want, "unbound name")
+    if isinstance(e, ast.Attribute):
+        d = dotted(e)
+        if d and d.split(".")[0] in ctx.params: return env.get(d) or {"k": "var", "name": d, "sort": want}
+        return ctx.havoc(e, want, "attribute of a non-parameter object")
+    if isinstance(e, ast.UnaryOp):
+        if isinstance(e.op, ast.Not): return s_not(s_eval(e.operand, env, ctx, "bool"))
+        if isinstance(e.op, ast.USub):
+            v = s_eval(e.operand, env, ctx, "num")
+            return {"k": "num", "v": -v["v"]} if v["k"] == "num" else {"k": "op", "op": "neg", "args": [v]}
+    if isinstance(e, ast.BoolOp):
+        vals = [s_eval(v, env, ctx, "bool") for v in e.values]
+        op = "and" if isinstance(e.op, ast.And) else "or"
+        out = vals[0]
+        for v in vals[1:]:
+            out = {"k": "op", "op": op, "args": [out, v]}
+        return out
+    if isinstance(e, ast.Compare) and all(type(o) in CMP for o in e.ops):
+        parts, left = [], s_eval(e.left, env, ctx, "num")
+        for o, r in zip(e.ops, e.comparators):
+            right = s_eval(r, env, ctx, s_sort(left))
+            # An untyped parameter takes the sort of what it is compared with.
+            if s_sort(left) != s_sort(right) and left["k"] == "var":
+                left = dict(left, sort=s_sort(right))
+            elif s_sort(left) != s_sort(right) and right["k"] == "var":
+                right = dict(right, sort=s_sort(left))
+            if s_sort(left) != s_sort(right):
+                return ctx.havoc(e, "bool", "comparison of different types")
+            parts.append({"k": "op", "op": CMP[type(o)], "args": [left, right]})
+            left = right
+        out = parts[0]
+        for p in parts[1:]: out = {"k": "op", "op": "and", "args": [out, p]}
+        return out
+    if isinstance(e, ast.BinOp) and type(e.op) in ARITH:
+        a, b = s_eval(e.left, env, ctx, "num"), s_eval(e.right, env, ctx, "num")
+        if s_sort(a) == "num" and s_sort(b) == "num":
+            return {"k": "op", "op": ARITH[type(e.op)], "args": [a, b]}
+        return ctx.havoc(e, want, "non-numeric arithmetic")
+    if isinstance(e, ast.IfExp):
+        c = s_eval(e.test, env, ctx, "bool")
+        t = s_eval(e.body, env, ctx, want)
+        f = s_eval(e.orelse, env, ctx, s_sort(t))
+        if c["k"] == "bool": return t if c["v"] else f
+        return {"k": "ite", "c": c, "t": t, "e": f}
+    if isinstance(e, ast.Await):
+        return ctx.havoc(e, want, "awaited value")
+    return ctx.havoc(e, want, "unmodelled expression")
+
+def s_events(node):
+    evs = []
+    for c in ast.walk(node):
+        if isinstance(c, ast.Call):
+            name = dotted(c.func) or ""
+            ev = {"call": name, "line": c.lineno}
+            if is_log_sink(name):
+                ev["leaks"] = sorted({f for arg in list(c.args) + [k.value for k in c.keywords] for _, f in tainted_leaves(arg)})
+            elif name.split(".")[-1] in param_sinks:
+                ev["leaks"] = sorted({f for arg in c.args for _, f in tainted_leaves(arg)})
+            evs.append(ev)
+    return sorted(evs, key=lambda x: x["line"])
+
+def s_exec(stmts, env, pc, events, ctx, out):
+    if len(out) >= MAX_PATHS:
+        ctx.approx.append(f"path limit ({MAX_PATHS}) reached")
+        return
+    if not stmts:
+        out.append({"pc": pc, "returns": {}, "events": events})
+        return
+    st, rest = stmts[0], stmts[1:]
+    if isinstance(st, (ast.Assign, ast.AnnAssign)) and st.value is not None:
+        nxt = dict(env)
+        targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+        for t in targets:
+            if isinstance(t, ast.Name): nxt[t.id] = s_eval(st.value, env, ctx, "bool")
+            else: ctx.approx.append(f"assignment target at line {st.lineno}")
+        return s_exec(rest, nxt, pc, events + s_events(st), ctx, out)
+    if isinstance(st, ast.Expr):
+        return s_exec(rest, env, pc, events + s_events(st), ctx, out)
+    if isinstance(st, ast.If):
+        c = s_eval(st.test, env, ctx, "bool")
+        evs = events + s_events(st.test)
+        if not (c["k"] == "bool" and not c["v"]):
+            s_exec(list(st.body) + rest, env, s_and(pc, c), evs, ctx, out)
+        if not (c["k"] == "bool" and c["v"]):
+            s_exec(list(st.orelse) + rest, env, s_and(pc, s_not(c)), evs, ctx, out)
+        return
+    if isinstance(st, ast.Return):
+        returns = {}
+        v = st.value
+        if isinstance(v, ast.Dict):
+            for k, val in zip(v.keys, v.values):
+                if isinstance(k, ast.Constant) and isinstance(k.value, str): returns[k.value] = s_eval(val, env, ctx, "bool")
+                else: ctx.approx.append(f"non-literal dict key at line {st.lineno}")
+        elif v is not None:
+            returns["value"] = s_eval(v, env, ctx, "bool")
+        out.append({"pc": pc, "returns": returns, "events": events + (s_events(v) if v is not None else [])})
+        return
+    if isinstance(st, ast.Raise):
+        out.append({"pc": pc, "returns": {"__throws": TRUE}, "events": events + s_events(st)})
+        return
+    if isinstance(st, (ast.Pass, ast.Import, ast.ImportFrom)):
+        return s_exec(rest, env, pc, events, ctx, out)
+    ctx.approx.append(f"{type(st).__name__} at line {st.lineno} executed without path splitting")
+    return s_exec(rest, env, pc, events + s_events(st), ctx, out)
+
+symbolic = {}
+for node in ast.walk(tree):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        ctx = SymCtx({a.arg for a in node.args.args + node.args.kwonlyargs})
+        paths = []
+        s_exec(list(node.body), {}, TRUE, [], ctx, paths)
+        symbolic[node.name] = {"functionName": node.name, "paths": paths, "approximations": sorted(set(ctx.approx)), "lineno": node.lineno, "end_lineno": node.end_lineno}
+
 print(json.dumps({
     "node_count": sum(1 for _ in ast.walk(tree)),
     "assignments": assignments,
     "functions": functions,
     "classes": classes,
+    "attr_reads": attr_reads,
+    "symbolic": symbolic,
     "sinks": sinks,
     "encrypt_calls": encrypt_calls,
     "cache_calls": cache_calls,
@@ -1033,12 +1402,14 @@ print(json.dumps({
 
 const pythonAstCache = new Map<string, ParsedPythonAst | null>();
 
-function parsePythonAstCached(content: string): ParsedPythonAst | null {
+export function parsePythonAstCached(content: string): ParsedPythonAst | null {
   const digest = sha256Hex(content);
   if (pythonAstCache.has(digest)) return pythonAstCache.get(digest) ?? null;
   let parsed: ParsedPythonAst | null = null;
+  const python = resolvePython();
+  if (!python) return null;
   try {
-    const stdout = execFileSync('python3', ['-I', '-c', PYTHON_AST_SCRIPT], {
+    const stdout = execFileSync(python.command, [...python.prefixArgs, '-I', '-c', PYTHON_AST_SCRIPT], {
       input: content,
       encoding: 'utf8',
       timeout: 5000,
@@ -1057,9 +1428,14 @@ function parsePythonAstCached(content: string): ParsedPythonAst | null {
 }
 
 /** Parses a Python file in a child process without blocking the event loop. */
-function parsePythonAstAsync(content: string): Promise<ParsedPythonAst | null> {
+async function parsePythonAstAsync(content: string): Promise<ParsedPythonAst | null> {
+  const python = await resolvePythonAsync();
+  if (!python) return null;
   return new Promise((resolve) => {
-    const child = spawn('python3', ['-I', '-c', PYTHON_AST_SCRIPT], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const child = spawn(python.command, [...python.prefixArgs, '-I', '-c', PYTHON_AST_SCRIPT], {
+      stdio: ['pipe', 'pipe', 'ignore'],
+      windowsHide: true,
+    });
     let out = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
     child.stdout.setEncoding('utf8');
@@ -1086,12 +1462,16 @@ function parsePythonAstAsync(content: string): Promise<ParsedPythonAst | null> {
  */
 export async function primePythonAstCache(files: TargetRepoFile[]): Promise<void> {
   const pending = files.filter((f) => f.language === 'python' && !pythonAstCache.has(sha256Hex(f.content)));
-  await Promise.all(
-    pending.map(async (f) => {
+  // At most one interpreter per core: a large repository must not spawn thousands at once.
+  let next = 0;
+  const worker = async () => {
+    while (next < pending.length) {
+      const f = pending[next++];
       const parsed = await parsePythonAstAsync(f.content);
       if (parsed) pythonAstCache.set(sha256Hex(f.content), parsed);
-    })
-  );
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(pending.length, Math.max(2, os.availableParallelism())) }, worker));
 }
 
 function anchorFromSpan(
@@ -1148,11 +1528,24 @@ export function parsePythonAstFile(file: TargetRepoFile): {
     f.decorators.some((d) => /\b(app|router|api|bp|blueprint)\.(post|put|patch|get|delete|route)$/i.test(d))
   );
   const piiFns = py.functions.filter((f) => f.args.some((a) => isPiiIdentifier(a) || /payload|patient|pii/i.test(a)));
-  const primaryFn = routeFns[0] || piiFns[0];
+  // A routed handler processes PII only if it takes a PII argument or a model with PII fields,
+  // or logs PII; a health check or config route in the same app does not.
+  const piiModels = new Set(
+    py.classes
+      .filter((c) => (c.fields || []).some((f) => classifyPii({ name: f.name, typeText: f.annotation, description: f.description, patterns: f.patterns, samples: f.samples }).pii))
+      .map((c) => c.name)
+  );
+  const piiRouteFns = routeFns.filter(
+    (f) =>
+      piiFns.includes(f) ||
+      Object.values(f.annotations || {}).some((t) => piiModels.has(t)) ||
+      leakingSinks.some((s) => s.lineno >= f.lineno && s.lineno <= f.end_lineno)
+  );
+  const primaryFn = piiRouteFns[0] || piiFns[0] || routeFns[0];
   const isCacheFile = py.cache_calls.length > 0 || /\bredis\b|\bcache\b/i.test(file.content);
   // A cache worker's envelope flag belongs to the cache finding, not to an endpoint.
   const isPiiEndpoint =
-    routeFns.length > 0 ||
+    piiRouteFns.length > 0 ||
     py.encrypt_calls.length > 0 ||
     (kmsFlags.length > 0 && !isCacheFile) ||
     (logsPlaintextPii && piiFns.length > 0);
@@ -1186,7 +1579,7 @@ export function parsePythonAstFile(file: TargetRepoFile): {
       column: 1,
       language: 'python',
       astNodeKind: primaryFn?.kind || 'Module',
-      constructType: routeFns.length > 0 ? 'FASTAPI_ENDPOINT' : 'PII_PROCESSING_FUNCTION',
+      constructType: piiRouteFns.length > 0 ? 'FASTAPI_ENDPOINT' : 'PII_PROCESSING_FUNCTION',
       functionName: primaryFn?.name || 'module',
       codeSnippet: snippet(lines, Math.max(1, fnStart - 1), fnEnd),
       metadata: {
@@ -1221,10 +1614,25 @@ export function parsePythonAstFile(file: TargetRepoFile): {
     });
   }
 
-  // Retention: every TTL/retention constant (with unit from its name), plus literal cache TTLs.
+  // Retention: every TTL/retention constant (unit from its name, else from its comment), plus
+  // literal cache TTLs, when the constant or its module concerns PII. A schema or HTTP cache in a
+  // module that never touches personal data is not PII retention.
   const envelopeFlag = kmsFlags.find((a) => /envelope|cache/i.test(a.name)) || kmsFlags[0];
+  const piiNamed = (n: string) => isPiiIdentifier(n) || /(^|_)(pii|phi|personal|patient)(_|$)/i.test(n);
+  const moduleHandlesPii =
+    py.functions.some((f) => f.args.some(piiNamed)) ||
+    py.assignments.some((a) => isPiiIdentifier(a.name)) ||
+    (py.attr_reads || []).some(piiNamed) ||
+    py.classes.some((c) => (c.fields || []).some((f) => classifyPii({ name: f.name, typeText: f.annotation, description: f.description, patterns: f.patterns, samples: f.samples }).pii)) ||
+    py.sinks.some((s) => s.leaks.length > 0);
   const ttlAssigns = py.assignments.filter(
-    (a) => TTL_NAMES.test(a.name) && typeof a.value === 'number' && a.span && a.scope !== '' && !CONFIDENCE_NAMES.test(a.name)
+    (a) =>
+      TTL_NAMES.test(snakeCase(a.name)) &&
+      typeof a.value === 'number' &&
+      a.span &&
+      a.scope !== '' &&
+      !CONFIDENCE_NAMES.test(a.name) &&
+      (moduleHandlesPii || piiNamed(a.name))
   );
   const retentionEntries: Array<{
     key: string;
@@ -1235,7 +1643,10 @@ export function parsePythonAstFile(file: TargetRepoFile): {
     line: number;
   }> = [];
   for (const a of ttlAssigns) {
-    const unit = ttlUnitFromName(a.name);
+    const named = ttlUnitFromName(a.name);
+    const comment = lines[a.lineno - 1]?.split('#').slice(1).join('#') ?? '';
+    const fromComment = named.assumed && comment ? ttlUnitFromComment(comment, a.value as number) : null;
+    const unit = fromComment ? { ...fromComment, assumed: false } : named;
     retentionEntries.push({
       key: a.name,
       hours: roundHours((a.value as number) * unit.hoursPerUnit),
@@ -1249,7 +1660,7 @@ export function parsePythonAstFile(file: TargetRepoFile): {
     });
   }
   for (const c of py.cache_calls) {
-    if (c.ttl_seconds == null || !c.ttl_span) continue;
+    if (c.ttl_seconds == null || !c.ttl_span || !moduleHandlesPii) continue;
     if (c.ttl_refs.some((r) => ttlAssigns.some((a) => a.name === r))) continue;
     retentionEntries.push({
       key: `${c.func}@${c.lineno}`,
@@ -1541,6 +1952,33 @@ export function checkSourceSyntax(file: TargetRepoFile): { passed: boolean; mess
   return syntaxError ? { passed: false, message: syntaxError } : { passed: true };
 }
 
+/** checkSourceSyntax with Python parsing done off the event loop. */
+export async function checkSourceSyntaxAsync(file: TargetRepoFile): Promise<{ passed: boolean; message?: string }> {
+  await primePythonAstCache([file]);
+  return checkSourceSyntax(file);
+}
+
+const SYMBOLIC_TYPES = new Set<ASTFindingNode['constructType']>(['LOGGER_CALL', 'PII_ENTRYPOINT', 'LLM_INFERENCE_CALL', 'CROSS_BORDER_EGRESS']);
+
+/** Adds the symbolic execution of each finding's enclosing function (see symbolicTs / the Python script). */
+function attachSymbolicSummaries(files: TargetRepoFile[], findings: ASTFindingNode[]): void {
+  const byPath = new Map(files.map((f) => [f.path, f]));
+  for (const f of findings) {
+    if (!SYMBOLIC_TYPES.has(f.constructType) || f.metadata.symbolic) continue;
+    const file = byPath.get(f.filePath);
+    if (!file) continue;
+    if (file.language === 'python') {
+      const py = parsePythonAstCached(file.content);
+      const fns = Object.values(py?.symbolic || {}).filter((s) => s.lineno <= f.line && f.line <= s.end_lineno);
+      const inner = fns.sort((a, b) => b.lineno - a.lineno)[0];
+      if (inner) f.metadata.symbolic = { functionName: inner.functionName, paths: inner.paths, approximations: inner.approximations };
+    } else if (file.language === 'typescript') {
+      const summary = summarizeTypeScriptFunction(file.content, file.path, f.functionName);
+      if (summary) f.metadata.symbolic = summary;
+    }
+  }
+}
+
 /** analyzeFullRepository with Python parsing done off the event loop. */
 export async function analyzeFullRepositoryAsync(files: TargetRepoFile[]): Promise<ReturnType<typeof analyzeFullRepository>> {
   await primePythonAstCache(files);
@@ -1574,6 +2012,8 @@ export function analyzeFullRepository(files: TargetRepoFile[]): {
       enrichedFiles.push(file);
     }
   }
+  astFindings.push(...collectGovernanceFindings(files, astFindings));
+  attachSymbolicSummaries(files, astFindings);
 
   return { sqlTables, astFindings, enrichedFiles };
 }

@@ -1,5 +1,7 @@
+import { fetchEurLexAmendments, fetchEurLexArticle } from '../regulations/eurLex.js';
 import type {
   CompiledPolicyArtifacts,
+  ComplianceFrameworkId,
   DeonticExtraction,
   DeonticExtractionProvenance,
   LegalClause,
@@ -24,6 +26,11 @@ function regoBounds(b: ExtractedDeonticBounds): RegoBounds {
     requireImmutableAuditLog: true,
     requireCascadeErasure: b.requireCascadeErasure,
     allowedDataRegions: b.allowedDataRegions,
+    requireConsentCheck: b.requireConsentCheck,
+    maxBreachNotificationHours: b.maxBreachNotificationHours,
+    requireDpia: b.requireDpia,
+    forbidUnusedPiiFields: b.forbidUnusedPiiFields,
+    allowedProcessingPurposes: b.allowedProcessingPurposes,
   };
 }
 
@@ -59,6 +66,11 @@ export interface ExtractedDeonticBounds {
   requireHumanOversightGate: boolean;
   allowedDataRegions: string[];
   requireEncryptionAtRest: boolean;
+  requireConsentCheck: boolean;
+  maxBreachNotificationHours: number;
+  requireDpia: boolean;
+  forbidUnusedPiiFields: boolean;
+  allowedProcessingPurposes: string[];
   provenance: DeonticExtractionProvenance;
 }
 
@@ -151,39 +163,78 @@ export function extractTemporalHoursFromProse(lower: string): {
   return { hours: chosen.hours, hit: true, evidence: [`${chosen.label}:${chosen.text}`], reviewNotes };
 }
 
+/** Display names for clauses created from free text or the regulatory feed. */
+export const FRAMEWORK_DISPLAY_NAMES: Record<ComplianceFrameworkId, string> = {
+  ENTERPRISE_DPA: 'Enterprise DPA',
+  GDPR: 'EU General Data Protection Regulation',
+  EU_AI_ACT: 'EU Artificial Intelligence Act',
+  HIPAA: 'HIPAA',
+  CCPA_CPRA: 'CCPA / CPRA',
+};
+
 export function inferRuleCategoryFromProse(
   rawText: string,
   fallback: RuleCategory = 'RETENTION_AND_TENANT_KMS'
 ): RuleCategory {
   const { lower } = normalizeLegalProse(rawText);
-  if (
-    /prohibit|shall not log|never log|plaintext.*log|unredacted|pii.?log|লগ.*নিষিদ্ধ/.test(lower)
-  ) {
-    return 'PII_LOGGING_BAN';
+  // Governance categories first: their trigger phrases are specific.
+  if (/personal data breach|breach notification|notify the supervisory authority|article 33\b/.test(lower)) return 'BREACH_NOTIFICATION';
+  if (/impact assessment|\bdpia\b|article 35\b/.test(lower)) return 'DPIA_REQUIRED';
+  if (/data minimi[sz]ation|adequate, relevant and limited|article 5\s*\(1\)\s*\(c\)/.test(lower)) return 'DATA_MINIMISATION';
+  if (/purpose limitation|specified, explicit and legitimate purposes?|article 5\s*\(1\)\s*\(b\)|only for the purposes? of/.test(lower)) return 'PURPOSE_LIMITATION';
+  if (/\bconsent\b|lawful basis|legal basis|article 6\b|article 7\b/.test(lower)) return 'CONSENT_LAWFUL_BASIS';
+
+  // The six code-checkable categories share vocabulary ("prohibited", "logging", "মুছে ফেলতে হবে"),
+  // so a single matching word must not decide. Each category collects weighted evidence and the
+  // strongest wins; ties keep the order below.
+  let best: RuleCategory | null = null;
+  let bestScore = 0;
+  for (const [category, score] of scoreCoreCategories(lower)) {
+    if (score > bestScore) {
+      best = category;
+      bestScore = score;
+    }
   }
-  if (
-    /human[- ]in[- ]the[- ]loop|human oversight|confidence|article 14|মানব তদারকি/.test(lower)
-  ) {
-    return 'AI_HUMAN_IN_THE_LOOP';
-  }
-  if (
-    /cross[- ]border|transfer|us-east|sovereign|article 44|দেশের বাইরে|স্থানান্তর/.test(lower)
-  ) {
-    return 'CROSS_BORDER_TRANSFER';
-  }
-  if (
-    /right to (be )?forgotten|erasure|cascade|article 17|মুছে ফেলতে হবে/.test(lower) &&
-    !/purged within|retention/.test(lower)
-  ) {
-    return 'RIGHT_TO_ERASURE_CASCADE';
-  }
-  if (
-    /encrypt(?:ed|ion)? at rest|aes-256|column.?encrypt/.test(lower) &&
-    !/purged within|retention|ttl|tenant[- ]isolated/.test(lower)
-  ) {
-    return 'ENCRYPTION_AT_REST';
-  }
-  return fallback;
+  return best ?? fallback;
+}
+
+/**
+ * Weighted keyword evidence (English and Bangla) for the code-checkable categories, in tie-break
+ * order. `lower` is normalized prose: lower case, Bangla digits converted to ASCII.
+ */
+function scoreCoreCategories(lower: string): Array<[RuleCategory, number]> {
+  const has = (re: RegExp) => re.test(lower);
+  const mentionsLogging = has(/\blog(?:s|ged|ging|gers?)?\b|stdout|observability|লগ/);
+  const forbids = has(/prohibit|forbid|shall not|must not|may not|never|নিষিদ্ধ|যাবে না/);
+  const plaintext = has(/unredacted|plain ?text|redact|\bmask|রিড্যাক্ট|অরক্ষিত/);
+  const retention = has(/retention|retain|purge|deleted within|erased within|\bttl\b|রিটেনশন|মধ্যে[^।]{0,80}মুছে/);
+  const duration = extractTemporalHoursFromProse(lower).hit;
+  const encryption = has(/encrypt(?:ed|ion)? at rest|aes-?256|column.?encrypt|এনক্রিপ্ট/);
+  const tenantKeys = has(
+    /tenant[- ]isolated|tenant[- ]specific|per[- ]tenant|customer[- ]managed\s+key|tenant_kms|টেন্যান্ট|পৃথক\s*কী|আইসোলেটেড\s*কী|কেএমএস/
+  );
+  return [
+    ['PII_LOGGING_BAN', mentionsLogging ? 2 + (forbids ? 1 : 0) + (plaintext ? 2 : 0) : 0],
+    [
+      'AI_HUMAN_IN_THE_LOOP',
+      (has(/human[- ]in[- ]the[- ]loop|human oversight|human review|overseen by natural persons|মানব তদারকি|হিউম্যান/) ? 3 : 0) +
+        (has(/article 14\b|\bai act\b|high-risk ai|অনুচ্ছেদ 14/) ? 2 : 0) +
+        (has(/confidence|automated decision|autonomous|আত্মবিশ্বাস|স্বয়ংক্রিয়/) ? 1 : 0),
+    ],
+    [
+      'CROSS_BORDER_TRANSFER',
+      (has(/cross[- ]border|third[- ]countr|article 44\b|chapter v\b|আন্তঃসীমান্ত|দেশের বাইরে|তৃতীয় দেশ/) ? 3 : 0) +
+        (has(/transfer|replicat|স্থানান্তর|রেপ্লিকেশন/) ? 1 : 0) +
+        (has(/\b[a-z]{2}-[a-z]+-\d\b|\beea\b|sovereign|residency|রিজিয়ন|সার্বভৌম/) ? 1 : 0),
+    ],
+    [
+      'RIGHT_TO_ERASURE_CASCADE',
+      (has(/right to (?:be )?forgotten|right to erasure|erasure of personal data|cascad|delete all linked|article 17\b/) ? 3 : 0) +
+        (has(/erasure|\berase\b|মুছে ফেল/) ? 1 : 0),
+    ],
+    ['RETENTION_AND_TENANT_KMS', (retention ? 2 : 0) + (duration ? 2 : 0) + (tenantKeys ? 1 : 0)],
+    ['ENCRYPTION_AT_REST', encryption && !retention && !duration ? 2 : 0],
+  ];
 }
 
 /** "need not", "not required", "optional", "may (be)" directly governing a phrase. */
@@ -203,6 +254,16 @@ const TENANT_KMS_RE =
 const LOG_BAN_RE =
   /prohibit|shall not log|never log|forbid|unredacted|plaintext.*log|mask|redact|লগ.*নিষিদ্ধ|লগিং.*নিষিদ্ধ|অরক্ষিত.*লগ|প্রকাশ করা যাবে না|রিড্যাক্ট/i;
 const LOG_PERMITTED_RE = /(logging|log|logged)[^.;]{0,60}\b(is|are)\s+(permitted|allowed)|\bmay\s+(be\s+)?log/i;
+
+/** Permitted purposes: quoted names, or the list after "only for (the purposes of)". */
+export function extractPurposes(text: string): string[] {
+  const slug = (p: string) => p.trim().toLowerCase().replace(/^(the|a|an)\s+/, '').replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  const quoted = [...text.matchAll(/["“']([A-Za-z][A-Za-z0-9 _-]{2,40})["”']/g)].map((m) => slug(m[1]));
+  if (quoted.length) return [...new Set(quoted)];
+  const m = /only for (?:the )?(?:purposes? of )?([^.;]+)/i.exec(text);
+  if (!m) return [];
+  return [...new Set(m[1].split(/,|\band\b|\bor\b/).map(slug).filter((p) => p.length > 2))];
+}
 
 export function extractDeonticBoundsFromProse(
   rawText: string,
@@ -286,11 +347,25 @@ export function extractDeonticBoundsFromProse(
     }
   }
 
+  // "may be processed only with consent" is a condition, not a permission: only explicit
+  // waivers ("consent is not required", "need not obtain consent") negate the obligation.
+  const consentWaived = /(?:need not|not required to|no need to)\s+(?:\w+\s+){0,3}(?:consent|lawful basis)|(?:consent|lawful basis)\s+(?:is|are)\s+(?:not required|optional|not needed)|without (?:requiring|the need for) (?:consent|a lawful basis)/i.test(lower);
+  const requireConsentCheck = category === 'CONSENT_LAWFUL_BASIS' && !consentWaived;
+  if (category === 'CONSENT_LAWFUL_BASIS' && !requireConsentCheck) reviewNotes.push('The consent requirement appears negated; no consent check was required.');
+  const maxBreachNotificationHours = category === 'BREACH_NOTIFICATION' && temporal.hit ? temporal.hours : 72;
+  const requireDpia = category === 'DPIA_REQUIRED' || /impact assessment|\bdpia\b/i.test(lower);
+  const forbidUnusedPiiFields = category === 'DATA_MINIMISATION';
+  const allowedProcessingPurposes = category === 'PURPOSE_LIMITATION' ? extractPurposes(normalized) : [];
+  if (category === 'PURPOSE_LIMITATION' && allowedProcessingPurposes.length === 0) {
+    reviewNotes.push('No list of permitted purposes was found; only a declared processing purpose is required.');
+  }
+
   const needsNumeric =
-    category === 'RETENTION_AND_TENANT_KMS' || category === 'AI_HUMAN_IN_THE_LOOP';
+    category === 'RETENTION_AND_TENANT_KMS' || category === 'AI_HUMAN_IN_THE_LOOP' || category === 'BREACH_NOTIFICATION';
   const missingNumeric =
     (category === 'RETENTION_AND_TENANT_KMS' && !temporal.hit) ||
-    (category === 'AI_HUMAN_IN_THE_LOOP' && !confidenceHit);
+    (category === 'AI_HUMAN_IN_THE_LOOP' && !confidenceHit) ||
+    (category === 'BREACH_NOTIFICATION' && !temporal.hit);
 
   return {
     maxRetentionHours,
@@ -306,6 +381,11 @@ export function extractDeonticBoundsFromProse(
     requireHumanOversightGate,
     allowedDataRegions,
     requireEncryptionAtRest,
+    requireConsentCheck,
+    maxBreachNotificationHours,
+    requireDpia,
+    forbidUnusedPiiFields,
+    allowedProcessingPurposes,
     provenance: {
       method: needsNumeric && missingNumeric ? 'DETERMINISTIC_DEFAULT' : 'DETERMINISTIC_PARSER',
       evidence: [...temporal.evidence, ...(confidenceHit ? [`confidence:${minAiConfidenceThreshold}`] : [])],
@@ -681,6 +761,9 @@ function compileFromBounds(
     return { deontic, compiled };
   }
 
+  const governance = compileGovernanceCategory(bounds, category, clauseId, citation);
+  if (governance) return governance;
+
   // CROSS_BORDER_TRANSFER (explicit branch; never a silent fallthrough for other categories)
   const allowsUsEast = allowedDataRegions.includes('us-east-1');
   const deontic: DeonticExtraction = {
@@ -721,6 +804,100 @@ function compileFromBounds(
   };
 
   return { deontic, compiled };
+}
+
+/** Deontic text, FOL and SMT-LIB2 summary for the GDPR governance categories. */
+function compileGovernanceCategory(
+  bounds: ExtractedDeonticBounds,
+  category: RuleCategory,
+  clauseId: string,
+  citation: string
+): { deontic: DeonticExtraction; compiled: CompiledPolicyArtifacts } | null {
+  const b = bounds;
+  const header = `; LexCompiler SMT-LIB2 Synthesis for ${citation} (${clauseId})
+(set-logic QF_LIA)
+(set-option :produce-models true)
+(set-option :produce-unsat-cores true)
+`;
+  const spec: Record<string, { modality: DeonticExtraction['modality']; op: DeonticExtraction['deonticOperatorSymbol']; actor: string; action: string; scope: string[]; condition: string; formula: string; fol: string; smt: string; params: DeonticExtraction['extractedParameters'] }> = {
+    CONSENT_LAWFUL_BASIS: {
+      modality: 'OBLIGATION', op: 'O(φ)', actor: 'Data Controller / Request Handlers',
+      action: 'Verify consent or another lawful basis before processing personal data (GDPR Art. 6–7)',
+      scope: ['pii_entrypoints'], condition: '∀ h ∈ PIIEntryPoints : ConsentChecked(h)',
+      formula: 'O(∀h ∈ PIIEntryPoints : ConsentChecked(h))', fol: '∀h : ProcessesPII(h) → ConsentChecked(h)',
+      smt: `(declare-const statutory_requires_consent Bool)
+(declare-const handler_checks_consent Bool)
+(assert (! (= statutory_requires_consent ${b.requireConsentCheck}) :named law_gdpr_art6_lawful_basis))
+(assert (! (=> statutory_requires_consent handler_checks_consent) :named inv_consent_checked))`,
+      params: { requireConsentCheck: b.requireConsentCheck },
+    },
+    BREACH_NOTIFICATION: {
+      modality: 'OBLIGATION', op: 'O(φ)', actor: 'Data Controller / Incident Response',
+      action: `Notify the supervisory authority of a personal-data breach within ${b.maxBreachNotificationHours} hours (GDPR Art. 33)`,
+      scope: ['breach_notification_policy'], condition: `Configured(BreachDeadline) ∧ BreachDeadline ≤ ${b.maxBreachNotificationHours}h`,
+      formula: `O(Notify(SA) within ${b.maxBreachNotificationHours}h)`, fol: '∃p ∈ Policies : BreachDeadline(p) ∧ ∀p : Hours(p) ≤ Max',
+      smt: `(declare-const law_max_breach_notification_minutes Int)
+(declare-const configured_breach_notification_minutes Int)
+(assert (! (= law_max_breach_notification_minutes ${Math.round(b.maxBreachNotificationHours * 60)}) :named law_gdpr_art33_deadline))
+(assert (! (<= configured_breach_notification_minutes law_max_breach_notification_minutes) :named inv_breach_deadline_within_limit))`,
+      params: { maxBreachNotificationHours: b.maxBreachNotificationHours },
+    },
+    DPIA_REQUIRED: {
+      modality: 'OBLIGATION', op: 'O(φ)', actor: 'Data Controller / High-Risk Processing',
+      action: 'Carry out a data protection impact assessment before high-risk processing (GDPR Art. 35)',
+      scope: ['ai_decision_nodes', 'dpia_records'], condition: '∀ n ∈ HighRiskNodes : ∃ d ∈ DPIARecords : Exists(d)',
+      formula: 'O(HighRisk(n) → DPIA)', fol: '∀n : HighRisk(n) → ∃d : DPIA(d) ∧ OnRecord(d)',
+      smt: `(declare-const statutory_requires_dpia Bool)
+(declare-const dpia_on_record Bool)
+(assert (! (= statutory_requires_dpia ${b.requireDpia}) :named law_gdpr_art35_dpia))
+(assert (! (=> statutory_requires_dpia dpia_on_record) :named inv_dpia_on_record))`,
+      params: { requireDpia: b.requireDpia },
+    },
+    DATA_MINIMISATION: {
+      modality: 'PROHIBITION', op: 'F(φ)', actor: 'Data Controller / Intake Models',
+      action: 'Collect only personal data that is used (GDPR Art. 5(1)(c))',
+      scope: ['pii_collection_models'], condition: '∀ m ∈ Models : UnusedPIIFields(m) = ∅',
+      formula: 'F(∃m, f : Collects(m, f) ∧ ¬Used(f))', fol: '∀m ∀f : Collects(m, f) ∧ PII(f) → Used(f)',
+      smt: `(declare-const statutory_forbids_unused_pii Bool)
+(declare-const model_unused_pii_fields Int)
+(assert (! (= statutory_forbids_unused_pii ${b.forbidUnusedPiiFields}) :named law_gdpr_art5_1c_minimisation))
+(assert (! (=> statutory_forbids_unused_pii (= model_unused_pii_fields 0)) :named inv_no_unused_pii_fields))`,
+      params: { forbidUnusedPiiFields: b.forbidUnusedPiiFields },
+    },
+    PURPOSE_LIMITATION: {
+      modality: 'OBLIGATION', op: 'O(φ)', actor: 'Data Controller / Request Handlers',
+      action: `Process personal data only for declared, permitted purposes${b.allowedProcessingPurposes.length ? ` (${b.allowedProcessingPurposes.join(', ')})` : ''} (GDPR Art. 5(1)(b))`,
+      scope: ['pii_entrypoints'], condition: `∀ h ∈ PIIEntryPoints : Purpose(h) ∈ {${b.allowedProcessingPurposes.join(', ') || 'declared'}}`,
+      formula: 'O(∀h : Purpose(h) ∈ Permitted)', fol: '∀h : ProcessesPII(h) → Declared(Purpose(h)) ∧ Permitted(Purpose(h))',
+      smt: `(declare-const handler_declares_purpose Bool)
+(declare-const handler_purpose_permitted Bool)
+(assert (! (= handler_declares_purpose true) :named inv_purpose_declared))
+(assert (! (=> handler_declares_purpose handler_purpose_permitted) :named inv_purpose_permitted))`,
+      params: { allowedProcessingPurposes: b.allowedProcessingPurposes },
+    },
+  };
+  const g = spec[category];
+  if (!g) return null;
+  return {
+    deontic: {
+      modality: g.modality,
+      deonticOperatorSymbol: g.op,
+      actor: g.actor,
+      regulatedAction: g.action,
+      targetDataScope: g.scope,
+      normativeCondition: g.condition,
+      formalPredicateSummary: g.formula,
+      extractedParameters: g.params,
+      extractionProvenance: b.provenance,
+    },
+    compiled: {
+      deonticFormula: g.formula,
+      firstOrderLogic: g.fol,
+      smtLib2Snippet: `${header}\n${g.smt}`,
+      opaRegoRule: regoPolicyFor(category, regoBounds(b), citation),
+      astPatternQuery: treeSitterQueriesFor(category),
+    },
+  };
 }
 
 export function compileLegalProseToFormalPolicy(
@@ -1050,8 +1227,47 @@ export function getMutationPresets(): RegulatoryMutationPreset[] {
  * Fetches live regulatory updates from the official US Federal Register API
  * plus curated EUR-Lex Official Journal statutes.
  */
-export async function fetchLiveRegulatoryFeed(): Promise<LiveRegulatoryFeedItem[]> {
-  const curatedEurLex: LiveRegulatoryFeedItem[] = [
+const TRACKED_ARTICLES: Record<string, { celex: string; article: number }> = {
+  'EURLEX-32024R1689-ART14': { celex: '32024R1689', article: 14 },
+  'EURLEX-32016R0679-ART17': { celex: '32016R0679', article: 17 },
+};
+
+/**
+ * Replaces curated excerpts with the official article text from EUR-Lex and adds the acts
+ * CELLAR lists as amending or correcting the tracked regulations. Unreachable sources leave
+ * the curated (illustrative) items in place.
+ */
+async function withOfficialEurLexText(items: LiveRegulatoryFeedItem[], fetchImpl: typeof fetch): Promise<LiveRegulatoryFeedItem[]> {
+  const official = await Promise.all(
+    items.map(async (item) => {
+      const tracked = TRACKED_ARTICLES[item.id];
+      if (!tracked) return item;
+      const art = await fetchEurLexArticle(tracked.celex, tracked.article, fetchImpl).catch(() => null);
+      return art
+        ? { ...item, title: `${item.documentNumber} — ${art.title}`, agencyOrBody: 'EUR-Lex (official text)', excerpt: art.text.slice(0, 1200), url: art.url, illustrative: false }
+        : item;
+    })
+  );
+  const amendments = await fetchEurLexAmendments(['32016R0679', '32024R1689'], fetchImpl).catch(() => []);
+  return [
+    ...official,
+    ...amendments.map((a): LiveRegulatoryFeedItem => ({
+      id: `EURLEX-${a.relation.toUpperCase()}-${a.celex}`,
+      source: 'EUR_LEX',
+      documentNumber: `CELEX:${a.celex}`,
+      title: `CELEX:${a.celex} ${a.relation} CELEX:${a.targetCelex}`,
+      publicationDate: a.date || '',
+      agencyOrBody: 'Publications Office of the EU (CELLAR SPARQL)',
+      excerpt: `Act ${a.celex} ${a.relation} ${a.targetCelex}; review the clauses compiled from ${a.targetCelex}.`,
+      url: a.url,
+      suggestedFramework: a.targetCelex === '32024R1689' ? 'EU_AI_ACT' : 'GDPR',
+      kind: 'CHANGE_NOTICE',
+    })),
+  ];
+}
+
+export async function fetchLiveRegulatoryFeed(fetchImpl: typeof fetch = fetch): Promise<LiveRegulatoryFeedItem[]> {
+  const curated: LiveRegulatoryFeedItem[] = [
     {
       id: 'EURLEX-32024R1689-ART14',
       source: 'EUR_LEX',
@@ -1080,12 +1296,13 @@ export async function fetchLiveRegulatoryFeed(): Promise<LiveRegulatoryFeedItem[
     },
   ];
 
+  const curatedEurLex = await withOfficialEurLexText(curated, fetchImpl);
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3500);
     const url =
       'https://www.federalregister.gov/api/v1/documents.json?per_page=3&order=newest&conditions%5Bterm%5D=privacy+cybersecurity+encryption';
-    const resp = await fetch(url, { signal: controller.signal });
+    const resp = await fetchImpl(url, { signal: controller.signal });
     clearTimeout(timeout);
 
     if (resp.ok) {

@@ -113,7 +113,7 @@ export const LiveMultiLlmMeshStudio: React.FC<LiveMultiLlmMeshStudioProps> = ({
               REAL MULTI-SERVICE &amp; MULTI-LLM INFERENCE MESH
             </span>
             <span className="text-xs font-mono text-zinc-400">
-              Ollama (:11434) · Microsoft Z3 (v4.13.4) · SQLite3 Ledger · Python 3.12 AST · 12 MCPs
+              Ollama (:11434) · Microsoft Z3 · SQLite3 Ledger · Python 3.12 AST · 12 MCPs
             </span>
           </div>
           <h2 className="text-xl font-semibold tracking-tight text-white">
@@ -209,7 +209,7 @@ export const LiveMultiLlmMeshStudio: React.FC<LiveMultiLlmMeshStudioProps> = ({
                       {m.parameterSize} · {m.quantizationLevel} · {m.sizeFormatted}
                     </span>
                   </div>
-                  <div className="text-[10.5px] font-mono text-zinc-500">
+                  <div className="text-[10.5px] font-mono text-zinc-400">
                     SHA-256 Digest: {m.digest}… · Family: {m.family}
                   </div>
                   <p className="text-xs text-zinc-300">{m.roleInLexCompiler}</p>

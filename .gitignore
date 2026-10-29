@@ -8,3 +8,9 @@ video-build/
 /*.mp4
 .env
 INTERNAL_AUDIT.md
+repos/
+.venv-agents/
+.venv-llmlingua/
+mcp-servers.json
+__pycache__/
+*.py[cod]

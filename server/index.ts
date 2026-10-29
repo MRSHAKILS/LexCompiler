@@ -1,4 +1,9 @@
-import { execFile } from 'node:child_process';
+import { externalClient, probeExternalMcpServers } from './mcp/externalClients.js';
+import { getAttestationSigner, revocations, revoke, trustedKeys } from './enterprise/attestationSigner.js';
+import { verifyTimestamp } from './enterprise/timestamp.js';
+import { OidcProvider, oidcConfigFromEnv } from './auth/oidc.js';
+import { ProjectStore } from './projects/projectStore.js';
+import { createAccessRouter, createAuthenticator } from './projects/router.js';
 import path from 'node:path';
 import cors from 'cors';
 import express from 'express';
@@ -7,7 +12,6 @@ import {
   getPromptLibraryCatalog,
 } from './agents/multiAgentOrchestrator.js';
 import { analyzeFullRepositoryAsync } from './analyzer/astAnalyzer.js';
-import { runTreeSitterQueries } from './analyzer/treeSitter.js';
 import {
   ensureTargetRepoFilesExist,
   readTargetRepoFiles,
@@ -23,8 +27,8 @@ import {
   getBanglaInitialClauses,
   getInitialClauses,
   getMutationPresets,
+  FRAMEWORK_DISPLAY_NAMES,
   inferRuleCategoryFromProse,
-  sha256Hex,
 } from './compiler/legalCompiler.js';
 import { getMcpServersCatalog, handleMcpMessage, invokeMcpTool } from './mcp/mcpSuite.js';
 import { loadActiveClauseState, saveActiveClauseState } from './state.js';
@@ -33,11 +37,11 @@ import {
   compressRepoToGraphifySExpr,
   countTokens,
   pruneCodeWithCodeburn,
-  runTokenOptimizationBenchmark,
+  runTokenOptimizationBenchmarkAsync,
 } from './optimization/tokenOptimizer.js';
 import { verifyRepositoryAgainstClauses, z3SelfTest } from './prover/z3Engine.js';
 import {
-  executeHybridRagQuery,
+  executeStoreBackedRagQuery,
   executeRealNeuralRagQuery,
 } from './rag/hybridRagEngine.js';
 import { GitHubPrError, githubPrOptionsFromEnv, openGitHubPullRequest } from './remediation/githubPr.js';
@@ -55,12 +59,10 @@ import {
   generateSignedConformityCertificate,
   verifyEd25519CertificateSignature,
 } from './enterprise/enterpriseSuite.js';
-import { getAttestationSigningKey } from './enterprise/signingKey.js';
 import {
   computeRealNeuralEmbedding,
   ensurePersistentSqliteDb,
   getLiveServiceMeshTelemetry,
-  recordScanToPersistentSqlite,
   runRealLlmInference,
 } from './services/realAiServiceMesh.js';
 import {
@@ -69,6 +71,8 @@ import {
   isOriginAllowed,
   resolveServerSecurityConfig,
 } from './security.js';
+import { resolvePythonAsync } from './util/python.js';
+import { buildComplianceReport } from './report.js';
 import type {
   ComplianceFrameworkId,
   FullComplianceScanReport,
@@ -96,7 +100,18 @@ app.use(
   })
 );
 app.use(express.json({ limit: '5mb' }));
-app.use('/api', createApiGuard(securityConfig));
+const oidcConfig = oidcConfigFromEnv();
+const oidcProvider = oidcConfig ? new OidcProvider(oidcConfig) : null;
+const projectStore = new ProjectStore(
+  path.resolve(process.env.LEXCOMPILER_DATA_DIR || path.join(process.cwd(), 'data')),
+  process.env.LEXCOMPILER_PROJECT_REPOS_ROOT || path.join(process.cwd(), 'repos')
+);
+// The single-repository endpoints operate on this project.
+if (!projectStore.get('default')) {
+  projectStore.create({ id: 'default', name: 'Default repository', repoPath: TARGET_REPO_ROOT, owner: 'local', trustedRepoPath: true });
+}
+app.use('/api', createApiGuard(securityConfig, oidcProvider ? createAuthenticator(oidcProvider, securityConfig.apiToken) : undefined));
+app.use('/api', createAccessRouter(projectStore, oidcProvider));
 
 /**
  * Requests that rewrite target-repo files, commit, or change clauses run one at a time,
@@ -126,7 +141,9 @@ app.post(
 
 // Ensure real target repository files, Git repo & SQLite ledger exist on disk
 ensureTargetRepoFilesExist();
-ensureTargetRepoGitInitialized();
+// Off the event loop at startup; Git work is queued and Python is resolved once, before requests need them.
+void ensureTargetRepoGitInitialized();
+void resolvePythonAsync();
 ensurePersistentSqliteDb();
 
 const persistedState = loadActiveClauseState();
@@ -143,84 +160,11 @@ let commitCounter = 1;
 async function buildFullComplianceReport(
   options: { recordToLedger?: boolean } = {}
 ): Promise<FullComplianceScanReport> {
-  const rawFiles = readTargetRepoFiles();
-  const { sqlTables, astFindings, enrichedFiles } = await analyzeFullRepositoryAsync(rawFiles);
-  const { proofs, architectureGraph, totalZ3ExecutionMs, merkleAuditRoot } =
-    await verifyRepositoryAgainstClauses(activeClauses, sqlTables, astFindings);
-
-  const remediationPR = await synthesizeRemediationPullRequest(
-    activeClauses,
-    enrichedFiles,
-    proofs
-  );
-
-  const compliantClausesCount = proofs.filter((p) => p.status === 'SAT_COMPLIANT').length;
-  const violatedClausesCount = proofs.filter((p) => p.status === 'UNSAT_VIOLATION').length;
-  const overallComplianceScore = Math.round(
-    (compliantClausesCount / Math.max(1, proofs.length)) * 100
-  );
-
-  const identity = resolveRepositoryIdentity(
-    sha256Hex(enrichedFiles.map((f) => `${f.path}\n${f.content}`).join('\n'))
-  );
-  const commitHash = `${identity.commitHash}${identity.dirty ? '-dirty' : ''}`;
-  const scanId = `SCAN-${Date.now().toString().slice(-6)}`;
-
-  // Only state-changing requests append to the audit ledger; reads stay side-effect free.
-  if (options.recordToLedger) {
-    recordScanToPersistentSqlite({
-      scanId,
-      commitHash,
-      compliantCount: compliantClausesCount,
-      violatedCount: violatedClausesCount,
-      z3SolveMs: totalZ3ExecutionMs,
-      merkleRoot: merkleAuditRoot,
-    });
-  }
-
-  const structuralQueryMatches: FullComplianceScanReport['structuralQueryMatches'] = {};
-  for (const clause of activeClauses) {
-    try {
-      structuralQueryMatches[clause.id] = await runTreeSitterQueries(clause.compiled.astPatternQuery, enrichedFiles);
-    } catch {
-      structuralQueryMatches[clause.id] = [];
-    }
-  }
-
-  return {
-    scanId,
-    timestamp: new Date().toISOString(),
-    repositoryName: identity.name,
-    repositoryBranch: identity.branch,
-    commitHash,
-    z3EngineVersion: 'Microsoft Z3 v4.13.4 (WASM/Native SMT-LIB2)',
-    activeAmendmentLabel,
-    totalClausesEvaluated: activeClauses.length,
-    compliantClausesCount,
-    violatedClausesCount,
-    overallComplianceScore,
-    totalZ3ExecutionMs,
-    merkleAuditRoot,
-    clauses: activeClauses,
-    sqlTables,
-    astFindings,
-    architectureGraph,
-    proofs,
-    remediationPR,
-    mutationPresets: getMutationPresets(),
-    structuralQueryMatches,
-    files: enrichedFiles,
-  };
+  return buildComplianceReport(activeClauses, activeAmendmentLabel, options);
 }
 
-let python3Version: Promise<string | null> | null = null;
-function checkPython3(): Promise<string | null> {
-  python3Version ??= new Promise((resolve) => {
-    execFile('python3', ['--version'], { timeout: 3000 }, (err, stdout, stderr) =>
-      resolve(err ? null : `${stdout || stderr}`.trim())
-    );
-  });
-  return python3Version;
+async function checkPython3(): Promise<string | null> {
+  return (await resolvePythonAsync())?.version ?? null;
 }
 
 /** Checks the dependencies scans need; 503 when Z3 or python3 is unavailable. */
@@ -274,10 +218,19 @@ app.get('/api/regulations/live-feed', async (_req, res) => {
 // 6+ MCP SERVERS CONTROL PLANE (JSON-RPC 2.0 + SSE + STDIO)
 // ============================================================================
 
-app.get('/api/mcp/servers', (_req, res) => {
+app.get('/api/mcp/servers', async (_req, res) => {
+  // External servers count as integrated only when they answer initialize + tools/list.
+  const live = await probeExternalMcpServers();
+  const withStatus = <T extends { id: string }>(entries: T[]) => [
+    ...entries.map((e) => {
+      const st = live.find((l) => l.id === e.id);
+      return { ...e, status: st ? st.status : 'NOT_CONFIGURED', ...(st ? { liveTools: st.tools, serverInfo: st.serverInfo, error: st.error } : {}) };
+    }),
+    ...live.filter((l) => !entries.some((e) => e.id === l.id)).map((l) => ({ id: l.id, name: l.serverInfo?.name || l.id, transport: l.transport, purpose: 'Configured in mcp-servers.json', status: l.status, liveTools: l.tools, serverInfo: l.serverInfo, error: l.error })),
+  ];
   res.json({
     servers: getMcpServersCatalog(),
-    integratedExternalMcpServers: [
+    integratedExternalMcpServers: withStatus([
       {
         id: 'postgres-pgvector-mcp',
         name: 'PostgreSQL + pgvector Schema & Vector Store MCP',
@@ -314,8 +267,18 @@ app.get('/api/mcp/servers', (_req, res) => {
         transport: 'streamable-http / sse',
         purpose: 'Dispatches real-time regulatory shockwave alerts and CI/CD compliance gates',
       },
-    ],
+    ]),
   });
+});
+
+/** Calls a tool on a configured external MCP server. */
+app.post('/api/mcp/external/:serverId/call', async (req, res) => {
+  try {
+    const client = await externalClient(String(req.params.serverId));
+    res.json(await client.callTool(String(req.body?.name || ''), (req.body?.arguments as Record<string, unknown>) || {}));
+  } catch (err) {
+    res.status(502).json({ error: (err as Error).message });
+  }
 });
 
 /** MCP Streamable HTTP transport: one JSON-RPC message per POST; notifications get 202. */
@@ -416,14 +379,14 @@ app.get('/api/ai-heavy/overview', async (_req, res) => {
       pr
     );
 
-    const tokenBenchmark = runTokenOptimizationBenchmark(
+    const tokenBenchmark = await runTokenOptimizationBenchmarkAsync(
       activeClauses,
       enrichedFiles,
       sqlTables,
       astFindings
     );
 
-    const defaultRagReport = executeHybridRagQuery(
+    const defaultRagReport = await executeStoreBackedRagQuery(
       'Which SQL tables and Python endpoints violate GDPR Art. 17 72-hour retention and tenant-isolated KMS encryption?',
       activeClauses,
       sqlTables,
@@ -538,6 +501,7 @@ app.post('/api/clauses/compile', async (req, res) => {
       frameworkId,
       category,
       amendmentLabel,
+      sourceUrl,
     } = req.body as {
       clauseId?: string;
       rawLegalText: string;
@@ -546,10 +510,15 @@ app.post('/api/clauses/compile', async (req, res) => {
       frameworkId?: ComplianceFrameworkId;
       category?: RuleCategory;
       amendmentLabel?: string;
+      sourceUrl?: string;
     };
 
     if (!rawLegalText || !rawLegalText.trim()) {
       res.status(400).json({ error: 'rawLegalText is required' });
+      return;
+    }
+    if (clauseId !== undefined && (typeof clauseId !== 'string' || !/^[A-Za-z0-9._-]{1,120}$/.test(clauseId))) {
+      res.status(400).json({ error: 'clauseId may only contain letters, digits, ".", "_" and "-" (max 120)' });
       return;
     }
 
@@ -578,6 +547,10 @@ app.post('/api/clauses/compile', async (req, res) => {
       const newId = clauseId || `CLAUSE-CUSTOM-${Date.now().toString().slice(-4)}`;
       const newCat: RuleCategory = category || inferRuleCategoryFromProse(rawLegalText);
       const newCit = citation || 'Custom DPA Amendment §4.2';
+      const knownFramework =
+        typeof frameworkId === 'string' && Object.hasOwn(FRAMEWORK_DISPLAY_NAMES, frameworkId)
+          ? frameworkId
+          : undefined;
       const compiledResult = await compileLegalProseToFormalPolicyAsync(
         rawLegalText,
         newCat,
@@ -587,8 +560,11 @@ app.post('/api/clauses/compile', async (req, res) => {
 
       activeClauses.unshift({
         id: newId,
-        frameworkId: frameworkId || 'ENTERPRISE_DPA',
-        frameworkName: 'Custom Enterprise DPA / Regulatory Statute',
+        frameworkId: knownFramework ?? 'ENTERPRISE_DPA',
+        frameworkName: knownFramework
+          ? FRAMEWORK_DISPLAY_NAMES[knownFramework]
+          : 'Custom Enterprise DPA / Regulatory Statute',
+        ...(typeof sourceUrl === 'string' && /^https?:\/\//.test(sourceUrl) ? { sourceUrl } : {}),
         citation: newCit,
         title: title || 'Custom Compiled Neuro-Symbolic Legal Obligation',
         severity: 'CRITICAL',
@@ -624,7 +600,7 @@ app.post('/api/clauses/mutate-preset', async (req, res) => {
 
     if (resetRepoFiles) {
       resetTargetRepoToBaseline();
-      resetTargetRepoGitHistory();
+      await resetTargetRepoGitHistory();
       commitCounter++;
     }
 
@@ -699,7 +675,7 @@ app.post('/api/remediation/apply-node', async (req, res) => {
     for (const patch of matchingPatches) {
       writeTargetRepoFile(patch.filePath, patch.patchedContent);
     }
-    commitTargetRepoChanges(
+    await commitTargetRepoChanges(
       `fix(compliance): apply LexCompiler AST patch for ${nodeId || filePath}`
     );
     commitCounter++;
@@ -729,7 +705,7 @@ app.post('/api/remediation/apply-pr', async (_req, res) => {
       for (const patch of pr.filePatches) {
         writeTargetRepoFile(patch.filePath, patch.patchedContent);
       }
-      commitTargetRepoChanges(
+      await commitTargetRepoChanges(
         `fix(compliance): merge LexCompiler Auto-PR #${pr.prNumber} (${pr.filePatches.length} Z3-verified files)`
       );
       commitCounter++;
@@ -785,7 +761,7 @@ app.post('/api/repo/update-file', async (req, res) => {
     }
 
     writeTargetRepoFile(filePath, content);
-    commitTargetRepoChanges(`chore(repo): manual edit to ${filePath}`);
+    await commitTargetRepoChanges(`chore(repo): manual edit to ${filePath}`);
     commitCounter++;
 
     const updatedReport = await buildFullComplianceReport({ recordToLedger: true });
@@ -803,7 +779,7 @@ app.post('/api/repo/reset', async (req, res) => {
   try {
     const { mode } = (req.body || {}) as { mode?: 'LEGACY_30D_COMPLIANT_DPA' | 'AMENDED_72H' };
     resetTargetRepoToBaseline();
-    resetTargetRepoGitHistory();
+    await resetTargetRepoGitHistory();
     activeClauses = getInitialClauses();
     commitCounter++;
 
@@ -855,7 +831,7 @@ app.post('/api/clauses/switch-locale', async (req, res) => {
     };
     if (resetRepo) {
       resetTargetRepoToBaseline();
-      resetTargetRepoGitHistory();
+      await resetTargetRepoGitHistory();
       commitCounter++;
     }
     if (locale === 'bn') {
@@ -1004,40 +980,56 @@ app.post('/api/llm/multi-model-pipeline', async (req, res) => {
 app.get('/api/enterprise/certificate', async (_req, res) => {
   try {
     const report = await buildFullComplianceReport();
-    const cert = generateSignedConformityCertificate(report);
+    const cert = await generateSignedConformityCertificate(report);
     res.json(cert);
   } catch (err) {
     sendError(res, err);
   }
 });
 
-app.get('/api/enterprise/public-key', (_req, res) => {
-  const key = getAttestationSigningKey();
-  res.json({ algorithm: 'Ed25519', publicKeyPem: key.publicKeyPem, fingerprintSha256: key.fingerprintSha256 });
-});
-
-app.post('/api/enterprise/verify-signature', (req, res) => {
+app.get('/api/enterprise/public-key', async (_req, res) => {
   try {
-    const { canonicalPayloadJson, signatureHex, publicKeyPem } = (req.body || {}) as {
-      canonicalPayloadJson: string;
-      signatureHex: string;
-      publicKeyPem?: string;
-    };
-    const result = verifyEd25519CertificateSignature(
-      canonicalPayloadJson,
-      signatureHex,
-      publicKeyPem
-    );
-    res.json(result);
+    const signer = await getAttestationSigner();
+    res.json({ keyId: signer.keyId, algorithm: signer.algorithm, backend: signer.backend, publicKeyPem: signer.publicKeyPem, trustedKeys: trustedKeys(), revocations: revocations() });
   } catch (err) {
     sendError(res, err);
   }
 });
 
+app.post('/api/enterprise/verify-signature', async (req, res) => {
+  try {
+    const { canonicalPayloadJson, signatureHex, publicKeyPem, keyId, certificateId, timestamp } = (req.body || {}) as {
+      canonicalPayloadJson: string;
+      signatureHex: string;
+      publicKeyPem?: string;
+      keyId?: string;
+      certificateId?: string;
+      timestamp?: { tokenBase64: string };
+    };
+    const result = verifyEd25519CertificateSignature(canonicalPayloadJson, signatureHex, publicKeyPem, { keyId, certificateId });
+    const ts = timestamp?.tokenBase64 ? await verifyTimestamp(timestamp.tokenBase64, Buffer.from(signatureHex, 'hex')) : undefined;
+    res.json({ ...result, ...(ts ? { timestamp: ts, verified: result.verified && ts.valid } : {}) });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.post('/api/enterprise/revoke', (req, res) => {
+  const who = res.locals.principal as { globalRole?: string } | undefined;
+  if (who?.globalRole !== 'admin') return void res.status(403).json({ error: 'Only administrators can revoke attestations.' });
+  try {
+    res.json(revoke({ certificateId: req.body?.certificateId, keyId: req.body?.keyId, reason: req.body?.reason }));
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.get('/api/enterprise/revocations', (_req, res) => res.json(revocations()));
+
 app.get('/api/enterprise/sarif', async (_req, res) => {
   try {
     const report = await buildFullComplianceReport();
-    const identity = resolveRepositoryIdentity(report.merkleAuditRoot);
+    const identity = await resolveRepositoryIdentity(report.merkleAuditRoot);
     // Paths in SARIF are relative to the checkout the report is uploaded from.
     const rel = path.relative(process.cwd(), TARGET_REPO_ROOT);
     const uriPrefix = TARGET_REPO_IS_FIXTURE && rel && !rel.startsWith('..') ? `${rel.split(path.sep).join('/')}/` : '';
