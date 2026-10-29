@@ -6,7 +6,8 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { importSPKI, jwtVerify } from 'jose';
-import { create as createTar } from 'tar';
+import zlib from 'node:zlib';
+import { create as createTar, Header } from 'tar';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { INITIAL_REPO_FILES } from './analyzer/repoBaseline.js';
 import { getInitialClauses } from './compiler/legalCompiler.js';
@@ -74,7 +75,11 @@ const LOANS_FIXED = LOANS.replace(
 
 const fixture = Object.fromEntries(Object.entries(INITIAL_REPO_FILES).map(([p, spec]) => [p, spec.content]));
 
-async function targz(files: Record<string, string>, root: string, extra?: (dir: string) => void): Promise<Buffer> {
+/**
+ * A .tar.gz with one top-level folder, like GitHub's archives. `symlinks` (path → target) are
+ * written as tar entries, because creating a symlink on disk needs extra privileges on Windows.
+ */
+async function targz(files: Record<string, string>, root: string, extra?: (dir: string) => void, symlinks: Record<string, string> = {}): Promise<Buffer> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexc-tar-'));
   try {
     for (const [rel, content] of Object.entries(files)) {
@@ -85,12 +90,21 @@ async function targz(files: Record<string, string>, root: string, extra?: (dir: 
     extra?.(path.join(dir, root));
     const chunks: Buffer[] = [];
     await new Promise<void>((resolve, reject) => {
-      const stream = createTar({ gzip: true, cwd: dir, portable: true }, [root]);
+      const stream = createTar({ cwd: dir, portable: true }, [root]);
       stream.on('data', (c: Buffer) => chunks.push(c));
       stream.on('end', () => resolve());
       stream.on('error', reject);
     });
-    return Buffer.concat(chunks);
+    let tar = Buffer.concat(chunks);
+    // Drop the end-of-archive zero blocks, append the symlink headers, then end the archive again.
+    const zero = Buffer.alloc(512);
+    while (tar.length >= 512 && tar.subarray(tar.length - 512).equals(zero)) tar = tar.subarray(0, tar.length - 512);
+    const links = Object.entries(symlinks).map(([rel, target]) => {
+      const block = Buffer.alloc(512);
+      new Header({ path: `${root}/${rel}`, type: 'SymbolicLink', linkpath: target, mode: 0o777, size: 0, mtime: new Date(0) }).encode(block, 0);
+      return block;
+    });
+    return zlib.gzipSync(Buffer.concat([tar, ...links, Buffer.alloc(1024)]));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -233,6 +247,8 @@ beforeAll(async () => {
 afterAll(() => {
   api?.close();
   fake?.server.close();
+  // Windows cannot delete an open database file.
+  store?.db.close();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -277,10 +293,12 @@ describe('GitHub App', () => {
   });
 
   it('reads only source files from a repository archive, in memory', async () => {
-    const archive = await targz({ 'api/app.py': 'x = 1\n', 'node_modules/pkg/evil.py': 'x = 2\n', '.github/hidden.py': 'x = 3\n', 'types.d.ts': 'export {}\n', 'README.md': '# hi' }, 'acme-repo-abc1234', (root) => {
-      fs.symlinkSync('/etc/passwd', path.join(root, 'api', 'link.py'));
-      fs.writeFileSync(path.join(root, 'api', 'big.py'), 'x = 1\n'.repeat(200_000));
-    });
+    const archive = await targz(
+      { 'api/app.py': 'x = 1\n', 'node_modules/pkg/evil.py': 'x = 2\n', '.github/hidden.py': 'x = 3\n', 'types.d.ts': 'export {}\n', 'README.md': '# hi' },
+      'acme-repo-abc1234',
+      (root) => fs.writeFileSync(path.join(root, 'api', 'big.py'), 'x = 1\n'.repeat(200_000)),
+      { 'api/link.py': '/etc/passwd' }
+    );
     const sources = await readTarballSources(archive);
     expect(sources.files.map((f) => f.path)).toEqual(['api/app.py']);
     expect(sources.skippedLargeFiles).toEqual(['api/big.py']);
