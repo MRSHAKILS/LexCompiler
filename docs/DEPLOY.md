@@ -17,7 +17,7 @@ Whichever you use, go through the checklist at the end before anyone else signs 
 | `LEXCOMPILER_API_TOKEN`, `LEXCOMPILER_OIDC_*` | A public server needs sign-in or a token. OIDC sessions and the token both pass the `/api` guard. |
 | `LEXCOMPILER_ALLOWED_ORIGINS`, `LEXCOMPILER_ALLOWED_HOSTS` | The public origin and host name. |
 | `LEXCOMPILER_RATE_LIMITS` | Requests per minute per client: `webhooks=600,share=120,signin=30` (the defaults). `/mcp` has its own limit per token (60 a minute). |
-| `LEXCOMPILER_BACKUP_DIR` | Turns on the daily backup: a `VACUUM INTO` copy of the database plus the signing key, trusted keys, revocations and GitHub App credentials, in a dated folder; the newest 14 are kept. `npm run backup` makes one now. |
+| `LEXCOMPILER_BACKUP_DIR` | Turns on the daily backup: a `VACUUM INTO` copy of the database plus the signing keys (the server's and each workspace's, `workspace-keys/`), trusted keys, revocations and GitHub App credentials, in a dated folder; the newest 14 are kept. `npm run backup` makes one now. |
 | `LEXCOMPILER_SCHEDULER` | `off` stops the daily jobs (regulation feed, scans of every default branch, backup, timestamps). |
 | `LEXCOMPILER_TSA_URL` | An RFC 3161 Time-Stamp Authority (for example `https://freetsa.org/tsr`). Once a day it vouches for each workspace's newest evidence header; share pages show it, and evidence packs carry the token and the header for `openssl ts -verify`. |
 

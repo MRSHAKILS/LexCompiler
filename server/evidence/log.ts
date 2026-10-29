@@ -93,14 +93,15 @@ export class EvidenceLog {
 
   constructor(
     readonly db: Db,
-    private readonly signer: () => Promise<AttestationSigner>,
+    /** The key that signs a workspace's records (one per workspace: `workspaceSigners`). */
+    private readonly signer: (workspaceId: string) => Promise<AttestationSigner>,
     private readonly now: () => Date = () => new Date()
   ) {}
 
   /** Appends a signed record and returns its sequence number and header hash. */
   append(workspaceId: string, type: EvidenceType, body: EvidenceSubjects & Record<string, unknown>): Promise<{ seq: number; headerSha256: string; at: string }> {
     const run = this.queue.then(async () => {
-      const signer = await this.signer();
+      const signer = await this.signer(workspaceId);
       const bodyText = canonicalJson(body);
       const prev = this.db.prepare('SELECT seq, header_sha256 FROM evidence WHERE workspace_id = ? ORDER BY seq DESC LIMIT 1').get(workspaceId) as Row | undefined;
       const header: EvidenceHeader = {
@@ -167,15 +168,18 @@ export class EvidenceLog {
 
   /** Every key that signed this workspace's records, plus the current one. */
   async publicKeys(workspaceId: string, known: Array<{ keyId: string; algorithm: AttestationAlgorithm; publicKeyPem: string; firstUsedAt: string }>, revokedKeyIds: Map<string, string>): Promise<PublicKeyEntry[]> {
-    const current = await this.signer();
-    const used = new Set((this.db.prepare('SELECT DISTINCT json_extract(header, \'$.key_id\') AS k FROM evidence WHERE workspace_id = ?').all(workspaceId) as Row[]).map((r) => String(r.k)));
-    used.add(current.keyId);
+    const current = await this.signer(workspaceId);
+    // Each key that signed here, with the time of its first record in this workspace.
+    const firstUse = new Map(
+      (this.db.prepare('SELECT json_extract(header, \'$.key_id\') AS k, MIN(json_extract(header, \'$.at\')) AS at FROM evidence WHERE workspace_id = ? GROUP BY k').all(workspaceId) as Row[]).map((r) => [String(r.k), String(r.at)])
+    );
+    const used = new Set([...firstUse.keys(), current.keyId]);
     const byId = new Map(known.map((k) => [k.keyId, k]));
     if (!byId.has(current.keyId)) byId.set(current.keyId, { keyId: current.keyId, algorithm: current.algorithm, publicKeyPem: current.publicKeyPem, firstUsedAt: this.now().toISOString() });
     return [...used]
       .map((id) => byId.get(id))
       .filter((k): k is NonNullable<typeof k> => !!k)
-      .map((k) => ({ keyId: k.keyId, algorithm: k.algorithm, publicKeyPem: k.publicKeyPem, validFrom: k.firstUsedAt, validTo: revokedKeyIds.get(k.keyId) ?? null }));
+      .map((k) => ({ keyId: k.keyId, algorithm: k.algorithm, publicKeyPem: k.publicKeyPem, validFrom: firstUse.get(k.keyId) ?? k.firstUsedAt, validTo: revokedKeyIds.get(k.keyId) ?? null }));
   }
 }
 
