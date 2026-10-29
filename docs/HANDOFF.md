@@ -25,6 +25,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | MRSHAKILS/LexCompiler #4, #5 | Windows test fixes (4 Vitest workers); RAG: stemmed BM25 with identifier parts; graph seeds and HyDE only from evidenced categories |
 | MRSHAKILS/LexCompiler #6 | Phase 3: the lawyer's workspace at `/legal` (documents, clauses, rule cards, approval rescans `main`) |
 | MRSHAKILS/LexCompiler #7 | Phase 4: exceptions ("Request exception" on the check, API, Legal inbox, re-run after a decision, expiry job) |
+| MRSHAKILS/LexCompiler #8 | Phase 4a: the workspace MCP endpoint `POST /mcp` (personal access tokens, six tools, 2026-07-28 and 2025-06-18), the `/settings` page |
 
 | Phase | Status |
 |---|---|
@@ -32,7 +33,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | 2a AI foundation | Done. RAG eval now has a Bangla set and a set for the test repo (see Evals) |
 | 3 Lawyer's workspace | Done and tested locally (`/legal`). The GitHub part of the guide's test needs this machine's App credentials (see Open questions) |
 | 4 Fixes and exceptions | Exceptions done and tested against a fake GitHub; the live test on finhealth-core-platform PR #1 needs the App credentials. Fix PRs and suggested changes (guide items 1–2) are not started |
-| 4a MCP for coding assistants | Not started. The six demo MCP servers work |
+| 4a MCP for coding assistants | Done; tested in-process and live over HTTP (guide 5.9 results). Claude Code connects but its CLI here isn't signed in; Cursor and VS Code not tried; OAuth not started |
 | 5 Evidence and auditor | Not started. The `evidence`, `shares` and `share_views` tables exist, nothing writes to them |
 | 6, 7 | Not started |
 
@@ -65,7 +66,13 @@ This file says where the work stands, how to run it, and what to do next. The fu
 - **Extraction checks** (`server/ai/extraction.ts`): a model's value is used only when its quote is in the clause and our parser reads the same value from the quote and the whole clause. Otherwise the rule card asks Legal. Phase 3 should use `checkExtraction` and `checkParserOnly` as they are.
 - **Extraction eval** on 45 labelled clauses, with no wrong value in any checked mode. The table is in the product guide, section 5.3. Both local models add no correct value the parser lacks, so measure a cloud model before relying on AI drafting.
 - **RAG** with Ollama `all-minilm` through `POST /api/rag/query` and the MCP tool `hybrid_contextual_graph_rag_query`.
-- **MCP**: six demo servers over HTTP (`POST /api/mcp/<server>/rpc`) and stdio. Section 5.9 of the guide has configurations for Kiro, VS Code, Claude Code, Claude Desktop, Cursor, Codex and Antigravity. None has been tried in a client yet.
+- **Workspace MCP endpoint** (Phase 4a): `POST /mcp` (`server/mcp/workspaceServer.ts`, tools in `workspaceTools.ts`).
+  - Personal access tokens: `lexc_pat_` + 32 random bytes, SHA-256 stored (`api_tokens`, migration 6). One user, one workspace, that user's current role; 90 days by default (at most 366); revocable; `last_used_at` recorded. A token stops working when its user leaves the workspace. API: `GET/POST /api/workspaces/<id>/tokens`, `POST …/tokens/<tokenId>/revoke`. The page is `/settings` ("Connect a coding assistant"), with a ready configuration for each client in guide 5.9.
+  - Protocol: 2026-07-28 (`_meta` protocol version, `MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name` must match the body, else 400 with -32020; `server/discover`; unknown method 404) and the 2025-06-18 / 2025-03-26 `initialize` handshake. No sessions; `resultType: "complete"`; GET and DELETE get 405.
+  - Tools, in this order: `list_rules`, `check_changes`, `explain_finding`, `suggest_fix`, `request_exception` (the only one that writes; engineer or higher; lands in the Legal inbox as "from a coding assistant" with the requested end date), `search_obligations` (BM25 over approved rules and document clauses). Prompt: `check-before-commit`.
+  - `check_changes` lays the sent files over the latest scanned default-branch commit (GitHub: downloaded once per commit and kept in memory; local repos: the folder), scans in memory, and classifies against that commit's findings and the active exceptions. 200 files and 2 MB per call. Sent code is not stored.
+  - Security: `Origin` outside the allowlist gets 403; missing, revoked or expired tokens get 401; 60 calls a minute per token (429); every request is logged in `mcp_calls` with paths and fingerprints only (`GET /api/workspaces/<id>/mcp/calls`, owners).
+- **Demo MCP**: six demo servers over HTTP (`POST /api/mcp/<server>/rpc`) and stdio, unchanged.
 
 ## Run it
 
@@ -124,7 +131,9 @@ Dates are from the schedule in the product guide, section 7.
 4. **Phase 4.** Exceptions are done (#7). Still to do:
    - The live test on finhealth-core-platform PR #1 (guide, Phase 4 test, scene 4 steps 2–4 and Expiry). It needs the App credentials on this machine.
    - Guide items 1–2: fix PRs through the Git Data API with the installation token, and review comments with `suggestion` blocks for findings on lines the PR changed.
-5. **Phase 4a, the `/mcp` endpoint** (Nov 30–Dec 6): tokens and the six tools in guide 5.8. Then fill in the client test table in 5.9.
+5. **Phase 4a.** Done (#8). Still to do:
+   - Sign in to the Claude Code CLI and finish its row in the 5.9 results. Run the client test in Cursor and VS Code (GUI; the configurations are on `/settings`), and in Kiro, Codex, Antigravity and Claude Desktop where they're installed.
+   - OAuth (`/.well-known/oauth-protected-resource`, RFC 8414 metadata, dynamic client registration), which Claude Desktop's custom connectors need. Until then Claude Desktop goes through `mcp-remote`.
 6. **Phase 5, evidence and the auditor** (Dec 7–13): `appendEvidence`, share links, `verify.mjs`. The guide has the code.
 7. **Phases 6 and 7** (Dec 14–19), then a freeze from Dec 20 to 25.
 

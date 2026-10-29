@@ -24,6 +24,7 @@ import {
 import { analyzeFullRepositoryAsync } from './analyzer/astAnalyzer.js';
 import {
   ensureTargetRepoFilesExist,
+  readRepositoryFilesAt,
   readTargetRepoFiles,
   resetTargetRepoToBaseline,
   TARGET_REPO_IS_FIXTURE,
@@ -41,6 +42,8 @@ import {
   inferRuleCategoryFromProse,
 } from './compiler/legalCompiler.js';
 import { getMcpServersCatalog, handleMcpMessage, invokeMcpTool } from './mcp/mcpSuite.js';
+import { createWorkspaceMcpRouter } from './mcp/workspaceServer.js';
+import { readTarballSources } from './github/tarball.js';
 import { loadActiveClauseState, saveActiveClauseState } from './state.js';
 import {
   compressLegalProseCaveman,
@@ -131,6 +134,21 @@ const jobQueue = new JobQueue(
 // The webhook needs the raw body to check GitHub's signature, so it is registered before
 // express.json() and the /api guard (GitHub sends no browser headers).
 app.post('/api/github/webhooks', express.raw({ type: () => true, limit: '25mb' }), createWebhookHandler({ store: productStore, getApp: getGitHubApp, queue: jobQueue, relayReencoded: process.env.LEXCOMPILER_GITHUB_WEBHOOK_RELAY === 'smee' }));
+// The workspace MCP endpoint for coding assistants (Phase 4a). It authenticates with personal
+// access tokens and checks Origin itself, so it sits outside the /api guard, with its own body limit.
+app.use(
+  '/mcp',
+  createWorkspaceMcpRouter({
+    store: productStore,
+    security: securityConfig,
+    readRepoFiles: async (repo, sha) => {
+      if (repo.source === 'local' && repo.localPath) return readRepositoryFilesAt(repo.localPath);
+      const gh = getGitHubApp();
+      if (!gh || repo.installationId === null) throw new Error('The GitHub App is not configured on this server, so the default branch cannot be read.');
+      return (await readTarballSources(await gh.downloadTarball(repo.installationId, repo.fullName, sha))).files;
+    },
+  })
+);
 app.use(express.json({ limit: '5mb' }));
 const oidcProvider = oidcConfig ? new OidcProvider(oidcConfig, databaseSessionStore(productStore)) : null;
 // Expired sessions are also dropped when read; this keeps the table small.
@@ -149,6 +167,7 @@ app.use(
         ? enqueueScan({ queue: jobQueue }, { githubRepoId: repo.githubRepoId, installationId: repo.installationId, kind: 'push', trigger: 'rule_approved' }, `rule:${version.id}:${repo.id}`)
         : null,
     onExceptionDecided: (exception) => rerunCheckForException({ store: productStore, queue: jobQueue }, exception),
+    mcpUrl: `${publicUrl}/mcp`,
   })
 );
 // Expires exceptions whose date has passed. Scans already ignore them; this keeps the inbox and

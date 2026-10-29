@@ -52,6 +52,8 @@ export interface ProductRouterOptions {
   enqueueBranchScan?: (repo: Repo, version: RuleVersion) => string | null;
   /** Re-runs the pull request check an exception was requested on, after Legal decides it. */
   onExceptionDecided?: (exception: ExceptionRecord) => string | null;
+  /** The workspace MCP endpoint, shown on the settings page (default http://localhost:3001/mcp). */
+  mcpUrl?: string;
 }
 
 const EXCEPTION_STATUSES: ExceptionStatus[] = ['requested', 'approved', 'rejected', 'expired', 'revoked'];
@@ -546,6 +548,30 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
       .flatMap((rule) => rule.versions.filter((v) => v.status === 'draft').map((v) => ({ ruleId: rule.id, ruleKey: rule.key, title: rule.title, versionId: v.id, version: v.version, createdAt: v.createdAt })));
     res.json({ exceptionRequests: store.listExceptions(wid(req), { status: 'requested' }), ruleDrafts: drafts, feedDrafts: [] });
   });
+
+  // ---------------------------------------------------------------- personal access tokens (Phase 4a)
+
+  /** The caller's own tokens for the MCP endpoint, and the endpoint's address. */
+  r.get('/workspaces/:workspaceId/tokens', need('view'), (req, res) => {
+    res.json({ mcpUrl: options.mcpUrl ?? 'http://localhost:3001/mcp', tokens: store.listApiTokens(wid(req), userOf(res).id) });
+  });
+  /** { name, days? } → the token, shown once. It acts as the caller, with the caller's role. */
+  r.post(
+    '/workspaces/:workspaceId/tokens',
+    need('view'),
+    handle((req, res) => {
+      const days = req.body?.days === undefined ? undefined : Number(req.body.days);
+      const { token, record } = store.createApiToken(wid(req), userOf(res).id, String(req.body?.name ?? ''), days);
+      res.status(201).json({ ...record, token });
+    })
+  );
+  r.post(
+    '/workspaces/:workspaceId/tokens/:tokenId/revoke',
+    need('view'),
+    handle((req, res) => res.json(store.revokeApiToken(wid(req), userOf(res).id, String(req.params.tokenId))))
+  );
+  /** The MCP call log: time, token, tool, repository, outcome and duration. */
+  r.get('/workspaces/:workspaceId/mcp/calls', need('manageWorkspace'), (req, res) => res.json(store.listMcpCalls(wid(req), Number(req.query.limit) || 50)));
 
   // ---------------------------------------------------------------- scans
 
