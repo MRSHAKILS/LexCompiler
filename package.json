@@ -12,6 +12,7 @@
     "start": "node dist-server/server/index.js",
     "test": "vitest run",
     "verify:cli": "tsx server/cli-verify.ts",
+    "backup": "tsx server/cli/backup.ts",
     "verify:realworld": "tsx server/cli-realworld-demo.ts",
     "start:tsx": "tsx server/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",

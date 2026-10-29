@@ -3,7 +3,7 @@ import { externalClient, probeExternalMcpServers } from './mcp/externalClients.j
 import { getAttestationSigner, revocations, revoke, trustedKeys } from './enterprise/attestationSigner.js';
 import { verifyTimestamp } from './enterprise/timestamp.js';
 import { OidcProvider, oidcConfigFromEnv } from './auth/oidc.js';
-import { getDb } from './db/index.js';
+import { dataDir, getDb } from './db/index.js';
 import { createAuthenticator, createProductRouter } from './product/router.js';
 import { databaseSessionStore, ProductStore, type Repo } from './product/store.js';
 import { lexcompilerVersion } from './util/versions.js';
@@ -85,8 +85,11 @@ import {
 import {
   assertSafeBindConfig,
   createApiGuard,
+  httpsOnly,
   isOriginAllowed,
+  rateLimit,
   resolveServerSecurityConfig,
+  trustProxySetting,
 } from './security.js';
 import { resolvePythonAsync } from './util/python.js';
 import { buildComplianceReport } from './report.js';
@@ -111,6 +114,10 @@ const securityConfig = resolveServerSecurityConfig();
 assertSafeBindConfig(securityConfig);
 
 const app = express();
+// Behind a reverse proxy or tunnel (Phase 7): trust its X-Forwarded-* headers so req.ip, req.secure
+// and rate limits see the real client. LEXCOMPILER_TRUST_PROXY=loopback for Caddy on the same host.
+const trustProxy = trustProxySetting(process.env.LEXCOMPILER_TRUST_PROXY);
+if (trustProxy !== undefined) app.set('trust proxy', trustProxy);
 app.use(
   cors({
     origin: (origin, callback) => callback(null, isOriginAllowed(securityConfig, origin)),
@@ -121,6 +128,24 @@ const productStore = new ProductStore(getDb());
 
 // GitHub App: credentials from the environment or data/github-app.json (written by /github/register).
 const publicUrl = (process.env.LEXCOMPILER_PUBLIC_URL || `http://localhost:${securityConfig.port}`).replace(/\/+$/, '');
+// HTTPS only when the public URL is https (redirect plain HTTP, send HSTS). Needs the proxy to be
+// trusted, or every request would look like plain HTTP.
+if (publicUrl.startsWith('https://')) {
+  if (trustProxy === undefined) console.warn('[security] LEXCOMPILER_PUBLIC_URL is https but LEXCOMPILER_TRUST_PROXY is not set; HTTPS redirects are off.');
+  else app.use(httpsOnly(publicUrl));
+}
+// Per-IP limits on the routes anyone can reach (Phase 7): webhooks, share pages and keys, sign-in.
+// LEXCOMPILER_RATE_LIMITS="webhooks=600,share=120,signin=30" (requests per minute) overrides them.
+const limits = Object.fromEntries(
+  (process.env.LEXCOMPILER_RATE_LIMITS || '')
+    .split(',')
+    .map((p) => p.split('=').map((s) => s.trim()))
+    .filter(([k, v]) => k && Number(v) > 0)
+    .map(([k, v]) => [k, Number(v)])
+) as Record<string, number>;
+app.use('/api/github/webhooks', rateLimit({ name: 'webhooks', windowMs: 60_000, max: limits.webhooks ?? 600 }));
+app.use(['/api/share', '/.well-known/lexcompiler'], rateLimit({ name: 'share links', windowMs: 60_000, max: limits.share ?? 120 }));
+app.use(['/api/auth/login', '/api/auth/callback'], rateLimit({ name: 'sign-in', windowMs: 60_000, max: limits.signin ?? 30 }));
 const ghUrls = githubUrls();
 let githubApp: GitHubApp | null = null;
 try {
@@ -202,6 +227,8 @@ if (process.env.LEXCOMPILER_SCHEDULER !== 'off') {
     runDueJobs({
       store: productStore,
       evidence,
+      // LEXCOMPILER_BACKUP_DIR turns on the daily backup (keep it on another disk or volume).
+      backup: process.env.LEXCOMPILER_BACKUP_DIR ? { dataDir: dataDir(), backupDir: path.resolve(process.env.LEXCOMPILER_BACKUP_DIR) } : undefined,
       enqueueGithubScan: (repo, dedupeKey) =>
         repo.githubRepoId !== null && repo.installationId !== null
           ? enqueueScan({ queue: jobQueue }, { githubRepoId: repo.githubRepoId, installationId: repo.installationId, kind: 'push', trigger: 'scheduled' }, dedupeKey)
