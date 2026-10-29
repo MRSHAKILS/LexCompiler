@@ -19,8 +19,11 @@ import type {
   RuleCategory,
 } from '../../shared/types.js';
 
+type McpServerSpec = Omit<McpServerDescriptor, 'toolsCount' | 'resourcesCount' | 'promptsCount'>;
+
+/** The six built-in servers. Counts are derived from what each server actually exposes. */
 export function getMcpServersCatalog(): McpServerDescriptor[] {
-  return [
+  const servers: McpServerSpec[] = [
     {
       id: 'lex-statute-ingest-mcp',
       name: 'LexStatute Ingest & Horizon Scanner MCP',
@@ -33,9 +36,6 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       status: 'ONLINE',
       description:
         'Custom MCP server for scraping EUR-Lex CELEX statutes, querying the live U.S. Federal Register REST API, parsing enterprise DPA PDFs/XML/JSON, and normalizing legal clauses.',
-      toolsCount: 4,
-      resourcesCount: 6,
-      promptsCount: 3,
       tools: [
         {
           name: 'fetch_live_regulatory_feed',
@@ -79,9 +79,6 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       status: 'ONLINE',
       description:
         'Compiles natural-language legal obligations O(φ), prohibitions F(φ), and permissions P(φ) into First-Order Logic, Microsoft Z3 SMT-LIB2 scripts, and OPA Rego policies.',
-      toolsCount: 4,
-      resourcesCount: 4,
-      promptsCount: 4,
       tools: [
         {
           name: 'compile_prose_to_smt_and_rego',
@@ -116,9 +113,6 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       status: 'ONLINE',
       description:
         'Parses live Python 3 ASTs, TypeScript Compiler ASTs, and PostgreSQL DDL schemas into a unified Compliance Intermediate Representation & Data-Flow Knowledge Graph.',
-      toolsCount: 5,
-      resourcesCount: 5,
-      promptsCount: 2,
       tools: [
         {
           name: 'scan_polyglot_repository_ast',
@@ -145,9 +139,6 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       status: 'ONLINE',
       description:
         'Executes the Microsoft Z3 SMT Solver over compiled statutory axioms and AST facts, extracting minimal UNSAT Cores, Counterexample Witnesses, and SHA-256 Merkle Provenance proofs.',
-      toolsCount: 4,
-      resourcesCount: 4,
-      promptsCount: 2,
       tools: [
         {
           name: 'prove_repository_compliance_z3',
@@ -174,9 +165,6 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       status: 'ONLINE',
       description:
         'Exposes Anthropic-style Contextual RAG, Semantic/Late Chunking, pgvector + BM25 RRF Hybrid Search, Neo4j Knowledge Graph traversal, HyDE query expansion, and RAGAS telemetry.',
-      toolsCount: 4,
-      resourcesCount: 8,
-      promptsCount: 3,
       tools: [
         {
           name: 'hybrid_contextual_graph_rag_query',
@@ -209,9 +197,6 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       status: 'ONLINE',
       description:
         'Synthesizes drop-in AST/SQL diffs for UNSAT violations, executes a Pre-PR Z3 Sandbox Verification Gate, opens automated remediation PRs, and triggers n8n/Slack compliance webhooks.',
-      toolsCount: 4,
-      resourcesCount: 3,
-      promptsCount: 2,
       tools: [
         {
           name: 'synthesize_and_verify_remediation_pr',
@@ -227,6 +212,13 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       ],
     },
   ];
+  return servers.map((server) => ({
+    ...server,
+    toolsCount: server.tools.length,
+    resourcesCount: resourcesFor(server.id).length,
+    // No server implements prompts/list, so none are advertised.
+    promptsCount: 0,
+  }));
 }
 
 /** MCP protocol revisions this server speaks, newest first. */

@@ -1,12 +1,22 @@
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { getInitialClauses } from './compiler/legalCompiler.js';
-import { handleMcpMessage, MCP_PROTOCOL_VERSIONS } from './mcp/mcpSuite.js';
+import { getMcpServersCatalog, handleMcpMessage, MCP_PROTOCOL_VERSIONS } from './mcp/mcpSuite.js';
 
 const clauses = getInitialClauses();
 const call = (message: unknown, serverId = 'lex-z3-prover-mcp') => handleMcpMessage(serverId, message, clauses);
 
 describe('MCP JSON-RPC 2.0', () => {
+  it('advertises exactly the tools and resources each server serves', async () => {
+    for (const server of getMcpServersCatalog()) {
+      const tools = (await call({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, server.id))?.result as { tools: unknown[] };
+      const resources = (await call({ jsonrpc: '2.0', id: 2, method: 'resources/list' }, server.id))?.result as { resources: unknown[] };
+      expect(server.toolsCount, server.id).toBe(tools.tools.length);
+      expect(server.toolsCount, server.id).toBe(server.tools.length);
+      expect(server.resourcesCount, server.id).toBe(resources.resources.length);
+      expect(server.promptsCount, server.id).toBe(0);
+    }
+  });
   it('negotiates the protocol version on initialize', async () => {
     const res = await call({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } });
     expect(res?.id).toBe(1);

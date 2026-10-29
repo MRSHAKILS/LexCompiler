@@ -424,6 +424,15 @@ function unavailableLlmResult(model: string, t0: number, reason: string): RealLl
 /**
  * Returns live health and telemetry across all 6 distinct services powering LexCompiler.
  */
+/** "N tools on M built-in servers", from the MCP catalog itself. Imported lazily: mcpSuite
+ * depends on the compiler, which depends on this module. */
+async function mcpCatalogSummary(): Promise<string> {
+  const { getMcpServersCatalog } = await import('../mcp/mcpSuite.js');
+  const servers = getMcpServersCatalog();
+  const tools = servers.reduce((n, s) => n + s.toolsCount, 0);
+  return `${tools} tools on ${servers.length} built-in MCP servers`;
+}
+
 export async function getLiveServiceMeshTelemetry(): Promise<{
   services: LiveServiceNodeStatus[];
   ollamaModels: InstalledOllamaModel[];
@@ -486,7 +495,7 @@ export async function getLiveServiceMeshTelemetry(): Promise<{
       endpointOrPath: '/api/mcp/:serverId/rpc + /sse + stdio',
       status: 'ONLINE',
       latencyMs: 0.9,
-      telemetrySummary: '6 Custom MCP Servers (25 Tools) + 6 Integrated Ecosystem MCPs',
+      telemetrySummary: await mcpCatalogSummary(),
       details: { transports: ['streamable-http', 'sse', 'stdio'] },
     },
     {

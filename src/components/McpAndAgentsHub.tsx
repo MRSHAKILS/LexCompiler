@@ -166,7 +166,7 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
               6 Custom-Built Model Context Protocol (MCP) Servers (Live JSON-RPC 2.0)
             </h2>
             <span className="text-xs font-mono text-emerald-400 flex items-center gap-1">
-              <Radio className="w-3.5 h-3.5 animate-pulse" /> All 25 MCP Endpoints Online
+              <Radio className="w-3.5 h-3.5 animate-pulse" /> {mcpServers.reduce((n, s) => n + s.toolsCount, 0)} tools on {mcpServers.length} servers
             </span>
           </div>
 
