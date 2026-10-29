@@ -22,6 +22,9 @@ import { createWebhookHandler } from './github/webhooks.js';
 import { JobQueue } from './jobs/queue.js';
 import { compileClauseSync } from './product/clauses.js';
 import { ProductStore } from './product/store.js';
+import { keyIdFor } from './enterprise/attestationSigner.js';
+import { EvidenceLog, verifyRecords } from './evidence/log.js';
+import { EvidenceRecorder } from './evidence/records.js';
 
 const APP_ID = '123';
 const INSTALLATION = 7;
@@ -193,6 +196,7 @@ let store: ProductStore;
 let queue: JobQueue;
 let workspaceId: string;
 let getApp: () => GitHubApp;
+let evidenceLog: EvidenceLog;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexc-github-'));
 
 beforeAll(async () => {
@@ -234,7 +238,11 @@ beforeAll(async () => {
   );
   getApp = () => githubApp;
   const publicUrl = 'http://lexc.test';
-  queue = new JobQueue(db, { scan: createScanJobHandler({ store, getApp, publicUrl }), github_comment: createCommentJobHandler({ getApp }) }, { maxAttempts: 1 });
+  const evKeys = crypto.generateKeyPairSync('ed25519');
+  const evPem = evKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  evidenceLog = new EvidenceLog(db, async () => ({ keyId: keyIdFor(evPem), algorithm: 'Ed25519', publicKeyPem: evPem, backend: 'test', sign: async (d) => crypto.sign(null, d, evKeys.privateKey) }));
+  const evidence = new EvidenceRecorder(evidenceLog, store);
+  queue = new JobQueue(db, { scan: createScanJobHandler({ store, getApp, publicUrl, evidence }), github_comment: createCommentJobHandler({ getApp }) }, { maxAttempts: 1 });
   const auth: BrowserAuth = {
     async principal(req) {
       const sub = req.header('x-test-user');
@@ -374,6 +382,13 @@ describe('GitHub App', () => {
     // The baseline was reused from the default-branch scan, not downloaded again.
     expect(fake.tarballRequests).toEqual([BASE, HEAD1]);
     expect(lastRun().create.details_url).toMatch(/^http:\/\/lexc\.test\/scans\/[0-9a-f-]{36}$/);
+    // The run names the signed evidence record of this scan (guide, Phase 5 test, step 5).
+    const scanId = String(lastRun().create.details_url).split('/').pop()!;
+    const ev = store.scanEvidence(scanId)!;
+    expect((patch as unknown as { output: { summary: string } }).output.summary).toContain(`Evidence record #${ev.seq} · header SHA-256 \`${ev.headerSha256}\``);
+    const record = evidenceLog.records(workspaceId).find((r) => r.seq === ev.seq)!;
+    expect(JSON.parse(record.body)).toMatchObject({ scanId, pullRequest: 5, commit: HEAD1, conclusion: 'failure', results: expect.arrayContaining([expect.objectContaining({ ruleKey: 'R-1', new: [expect.any(String)] })]) });
+    expect(verifyRecords(evidenceLog.records(workspaceId), await evidenceLog.publicKeys(workspaceId, [], new Map()))).toEqual([]);
   });
 
   it('re-checks a pushed fix and a re-run request', async () => {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import { FileText, Scale, Upload } from 'lucide-react';
+import { SharesPanel } from './SharesPanel';
 
 /**
  * The lawyer's workspace (product guide, Phase 3): upload a contract or regulation, see its
@@ -679,6 +680,8 @@ export function LegalWorkspace() {
               {rules.length === 0 && <li className="text-sm text-zinc-400">No rules yet.</li>}
             </ul>
           </section>
+
+          {ws && ['owner', 'legal', 'admin'].includes(ws.role) && <SharesPanel key={workspaceId} base={base} rules={rules} counterparties={counterparties} />}
         </section>
       </div>
     </div>

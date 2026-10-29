@@ -233,6 +233,24 @@ export interface McpCallRecord {
   createdAt: string;
 }
 
+/** A read-only link for an auditor (product guide, Phase 5). Only the token's SHA-256 is stored. */
+export const SHARE_TOKEN_PREFIX = 'lexc_share_';
+export interface ShareRecord {
+  id: string;
+  workspaceId: string;
+  label: string | null;
+  counterpartyId: string | null;
+  counterpartyName: string | null;
+  ruleIds: string[];
+  periodFrom: string;
+  periodTo: string;
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string;
+  revokedAt: string | null;
+  views: number;
+}
+
 export class ProductStore {
   constructor(readonly db: Db) {}
 
@@ -257,6 +275,11 @@ export class ProductStore {
 
   getUserBySub(sub: string): User | undefined {
     const r = this.db.prepare('SELECT * FROM users WHERE oidc_sub = ?').get(sub) as Row | undefined;
+    return r ? { id: String(r.id), oidcSub: String(r.oidc_sub), email: str(r.email), emailVerified: Number(r.email_verified) === 1, name: str(r.name) } : undefined;
+  }
+
+  getUserById(id: string): User | undefined {
+    const r = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as Row | undefined;
     return r ? { id: String(r.id), oidcSub: String(r.oidc_sub), email: str(r.email), emailVerified: Number(r.email_verified) === 1, name: str(r.name) } : undefined;
   }
 
@@ -1152,8 +1175,15 @@ export class ProductStore {
 
   /** Marks approved exceptions whose expiry has passed as expired; returns how many. Scans ignore them either way. */
   expireExceptions(at: string = nowIso()): number {
-    const r = this.db.prepare("UPDATE exceptions SET status = 'expired' WHERE status = 'approved' AND expires_at IS NOT NULL AND expires_at <= ?").run(at);
-    return Number(r.changes);
+    return this.expireExceptionRecords(at).length;
+  }
+
+  /** As expireExceptions, returning the exceptions that just expired (for the evidence log). */
+  expireExceptionRecords(at: string = nowIso()): ExceptionRecord[] {
+    const ids = (this.db.prepare("SELECT id FROM exceptions WHERE status = 'approved' AND expires_at IS NOT NULL AND expires_at <= ?").all(at) as Row[]).map((r) => String(r.id));
+    if (ids.length === 0) return [];
+    this.db.prepare(`UPDATE exceptions SET status = 'expired' WHERE id IN (${ids.map(() => '?').join(', ')})`).run(...ids);
+    return ids.map((id) => this.exceptionFrom(this.db.prepare(`${ProductStore.EXCEPTION_SELECT} WHERE e.id = ?`).get(id) as Row));
   }
 
   /** The scan a check run reported, found from GitHub's check run id. */
@@ -1162,6 +1192,120 @@ export class ProductStore {
       .prepare('SELECT s.*, p.full_name FROM scans s JOIN repos p ON p.id = s.repo_id WHERE s.check_run_id = ? ORDER BY s.created_at DESC LIMIT 1')
       .get(checkRunId) as Row | undefined;
     return r ? this.scanFrom(r) : undefined;
+  }
+
+  /** The signed evidence record of a completed scan (Phase 5). */
+  setScanEvidence(scanId: string, seq: number, headerSha256: string): void {
+    this.db.prepare('UPDATE scans SET evidence_seq = ?, evidence_header_sha256 = ? WHERE id = ?').run(seq, headerSha256, scanId);
+  }
+
+  scanEvidence(scanId: string): { seq: number; headerSha256: string } | null {
+    const r = this.db.prepare('SELECT evidence_seq, evidence_header_sha256 FROM scans WHERE id = ?').get(scanId) as Row | undefined;
+    return r?.evidence_seq == null ? null : { seq: Number(r.evidence_seq), headerSha256: String(r.evidence_header_sha256) };
+  }
+
+  /** Completed scans (not baselines) of the given repositories that finished within the period, oldest first. */
+  scansInPeriod(repoIds: string[], from: string, to: string): ScanRecord[] {
+    if (repoIds.length === 0) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT s.*, r.full_name FROM scans s JOIN repos r ON r.id = s.repo_id
+         WHERE s.repo_id IN (${repoIds.map(() => '?').join(', ')}) AND s.status = 'completed' AND s.trigger <> 'baseline' AND s.finished_at >= ? AND s.finished_at <= ?
+         ORDER BY s.finished_at`
+      )
+      .all(...repoIds, from, to) as Row[];
+    return rows.map((r) => this.scanFrom(r));
+  }
+
+  // ---------------------------------------------------------------- share links (Phase 5)
+
+  private shareFrom(r: Row): ShareRecord {
+    return {
+      id: String(r.id),
+      workspaceId: String(r.workspace_id),
+      label: str(r.label),
+      counterpartyId: str(r.counterparty_id),
+      counterpartyName: str(r.counterparty_name),
+      ruleIds: JSON.parse(String(r.rule_ids_json)) as string[],
+      periodFrom: String(r.period_from),
+      periodTo: String(r.period_to),
+      createdBy: String(r.created_by),
+      createdAt: String(r.created_at),
+      expiresAt: String(r.expires_at),
+      revokedAt: str(r.revoked_at),
+      views: Number(r.views ?? 0),
+    };
+  }
+
+  private static readonly SHARE_SELECT = `SELECT s.*, c.name AS counterparty_name, (SELECT COUNT(*) FROM share_views v WHERE v.share_id = s.id) AS views
+    FROM shares s LEFT JOIN counterparties c ON c.id = s.counterparty_id`;
+
+  /**
+   * Creates a share of some rules over a period, optionally for one counterparty (whose scope
+   * picks the repositories). Returns the token once; only its SHA-256 is stored.
+   */
+  createShare(
+    input: { workspaceId: string; label?: string | null; counterpartyId?: string | null; ruleIds: string[]; periodFrom: string; periodTo: string; expiresAt: string; createdBy: string },
+    now: Date = new Date()
+  ): { token: string; share: ShareRecord } {
+    const ruleIds = [...new Set(input.ruleIds)];
+    if (ruleIds.length === 0) throw new StoreError('a share needs at least one rule');
+    for (const id of ruleIds) if (!this.db.prepare('SELECT 1 FROM rules WHERE id = ? AND workspace_id = ?').get(id, input.workspaceId)) throw new StoreError(`unknown rule ${id}`, 404);
+    if (input.counterpartyId && !this.db.prepare('SELECT 1 FROM counterparties WHERE id = ? AND workspace_id = ?').get(input.counterpartyId, input.workspaceId)) throw new StoreError('unknown counterparty', 404);
+    const from = new Date(input.periodFrom);
+    const to = new Date(input.periodTo);
+    const expires = new Date(input.expiresAt);
+    if ([from, to, expires].some((d) => Number.isNaN(d.getTime()))) throw new StoreError('periodFrom, periodTo and expiresAt must be dates');
+    if (to.getTime() < from.getTime()) throw new StoreError('the period ends before it starts');
+    if (expires.getTime() <= now.getTime()) throw new StoreError('expiresAt must be in the future');
+    if (expires.getTime() > now.getTime() + 366 * 24 * 3600 * 1000) throw new StoreError('a share link can last at most one year');
+    const token = SHARE_TOKEN_PREFIX + crypto.randomBytes(32).toString('base64url');
+    const id = newId();
+    this.db
+      .prepare('INSERT INTO shares (id, workspace_id, token_sha256, label, counterparty_id, rule_ids_json, period_from, period_to, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, input.workspaceId, sha256Hex(token), input.label?.trim().slice(0, 200) || null, input.counterpartyId || null, JSON.stringify(ruleIds), from.toISOString(), to.toISOString(), input.createdBy, now.toISOString(), expires.toISOString());
+    return { token, share: this.getShare(input.workspaceId, id)! };
+  }
+
+  getShare(workspaceId: string, id: string): ShareRecord | undefined {
+    const r = this.db.prepare(`${ProductStore.SHARE_SELECT} WHERE s.id = ? AND s.workspace_id = ?`).get(id, workspaceId) as Row | undefined;
+    return r ? this.shareFrom(r) : undefined;
+  }
+
+  listShares(workspaceId: string): ShareRecord[] {
+    return (this.db.prepare(`${ProductStore.SHARE_SELECT} WHERE s.workspace_id = ? ORDER BY s.created_at DESC`).all(workspaceId) as Row[]).map((r) => this.shareFrom(r));
+  }
+
+  /** The share a token opens, or null when it is unknown, revoked or expired. */
+  shareByToken(token: string, at: Date = new Date()): ShareRecord | null {
+    if (!token.startsWith(SHARE_TOKEN_PREFIX)) return null;
+    const r = this.db.prepare(`${ProductStore.SHARE_SELECT} WHERE s.token_sha256 = ?`).get(sha256Hex(token)) as Row | undefined;
+    if (!r || r.revoked_at || String(r.expires_at) <= at.toISOString()) return null;
+    return this.shareFrom(r);
+  }
+
+  revokeShare(workspaceId: string, id: string): ShareRecord {
+    const share = this.getShare(workspaceId, id);
+    if (!share) throw new StoreError('unknown share', 404);
+    if (share.revokedAt) throw new StoreError('this share is already revoked', 409);
+    this.db.prepare('UPDATE shares SET revoked_at = ? WHERE id = ?').run(nowIso(), id);
+    return this.getShare(workspaceId, id)!;
+  }
+
+  recordShareView(shareId: string, ip: string | null, userAgent: string | null): void {
+    this.db.prepare('INSERT INTO share_views (share_id, at, ip, user_agent) VALUES (?, ?, ?, ?)').run(shareId, nowIso(), ip?.slice(0, 100) ?? null, userAgent?.slice(0, 500) ?? null);
+  }
+
+  listShareViews(shareId: string): Array<{ at: string; ip: string | null; userAgent: string | null }> {
+    return (this.db.prepare('SELECT at, ip, user_agent FROM share_views WHERE share_id = ? ORDER BY at DESC').all(shareId) as Row[]).map((r) => ({ at: String(r.at), ip: str(r.ip), userAgent: str(r.user_agent) }));
+  }
+
+  /** Repositories a counterparty's scope covers (every repository when there is no counterparty). */
+  reposForCounterparty(workspaceId: string, counterpartyId: string | null): Repo[] {
+    const repos = this.listRepos(workspaceId);
+    if (!counterpartyId) return repos;
+    const ids = new Set((this.db.prepare('SELECT DISTINCT repo_id FROM counterparty_scope WHERE counterparty_id = ?').all(counterpartyId) as Row[]).map((r) => String(r.repo_id)));
+    return repos.filter((r) => ids.has(r.id));
   }
 
   // ---------------------------------------------------------------- API tokens and MCP calls (Phase 4a)

@@ -43,6 +43,9 @@ import {
 } from './compiler/legalCompiler.js';
 import { getMcpServersCatalog, handleMcpMessage, invokeMcpTool } from './mcp/mcpSuite.js';
 import { createWorkspaceMcpRouter } from './mcp/workspaceServer.js';
+import { EvidenceLog } from './evidence/log.js';
+import { EvidenceRecorder } from './evidence/records.js';
+import { createPublicEvidenceRouter } from './evidence/share.js';
 import { readTarballSources } from './github/tarball.js';
 import { loadActiveClauseState, saveActiveClauseState } from './state.js';
 import {
@@ -126,14 +129,21 @@ try {
   console.error(`[github] ${err instanceof Error ? err.message : String(err)}`);
 }
 const getGitHubApp = () => githubApp;
+// The signed evidence log (Phase 5): the server's attestation key (local file, Cloud KMS or AWS KMS).
+const evidenceLog = new EvidenceLog(getDb(), getAttestationSigner);
+const evidence = new EvidenceRecorder(evidenceLog, productStore);
+const keysFor = (workspaceId: string) =>
+  evidenceLog.publicKeys(workspaceId, trustedKeys(), new Map(revocations().keys.map((k) => [k.keyId, k.revokedAt])));
 const jobQueue = new JobQueue(
   getDb(),
-  { scan: createScanJobHandler({ store: productStore, getApp: getGitHubApp, publicUrl }), github_comment: createCommentJobHandler({ getApp: getGitHubApp }) },
+  { scan: createScanJobHandler({ store: productStore, getApp: getGitHubApp, publicUrl, evidence }), github_comment: createCommentJobHandler({ getApp: getGitHubApp }) },
   { onError: (err, job) => console.error(`[jobs] ${job.kind} ${job.id} attempt ${job.attempt} failed: ${err instanceof Error ? err.message : String(err)}`) }
 );
 // The webhook needs the raw body to check GitHub's signature, so it is registered before
 // express.json() and the /api guard (GitHub sends no browser headers).
 app.post('/api/github/webhooks', express.raw({ type: () => true, limit: '25mb' }), createWebhookHandler({ store: productStore, getApp: getGitHubApp, queue: jobQueue, relayReencoded: process.env.LEXCOMPILER_GITHUB_WEBHOOK_RELAY === 'smee' }));
+// Share links and public keys for auditors (Phase 5): no account, so outside the /api guard.
+app.use(createPublicEvidenceRouter({ store: productStore, log: evidenceLog, keysFor, publicUrl }));
 // The workspace MCP endpoint for coding assistants (Phase 4a). It authenticates with personal
 // access tokens and checks Origin itself, so it sits outside the /api guard, with its own body limit.
 app.use(
@@ -168,12 +178,17 @@ app.use(
         : null,
     onExceptionDecided: (exception) => rerunCheckForException({ store: productStore, queue: jobQueue }, exception),
     mcpUrl: `${publicUrl}/mcp`,
+    evidence,
+    publicUrl,
   })
 );
 // Expires exceptions whose date has passed. Scans already ignore them; this keeps the inbox and
 // the evidence accurate.
-productStore.expireExceptions();
-setInterval(() => productStore.expireExceptions(), 60 * 60 * 1000).unref();
+const expireAndRecord = async () => {
+  for (const e of productStore.expireExceptionRecords()) await evidence.exceptionChanged(e);
+};
+void expireAndRecord().catch((err) => console.error(`[evidence] ${err instanceof Error ? err.message : String(err)}`));
+setInterval(() => void expireAndRecord().catch((err) => console.error(`[evidence] ${err instanceof Error ? err.message : String(err)}`)), 60 * 60 * 1000).unref();
 app.use('/api', createGitHubApiRouter(getGitHubApp));
 
 /**

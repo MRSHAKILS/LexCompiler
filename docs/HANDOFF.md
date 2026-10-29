@@ -26,6 +26,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | MRSHAKILS/LexCompiler #6 | Phase 3: the lawyer's workspace at `/legal` (documents, clauses, rule cards, approval rescans `main`) |
 | MRSHAKILS/LexCompiler #7 | Phase 4: exceptions ("Request exception" on the check, API, Legal inbox, re-run after a decision, expiry job) |
 | MRSHAKILS/LexCompiler #8 | Phase 4a: the workspace MCP endpoint `POST /mcp` (personal access tokens, six tools, 2026-07-28 and 2025-06-18), the `/settings` page |
+| MRSHAKILS/LexCompiler #9 | Phase 5: the signed evidence log, share links for auditors (`/share/<token>`), the evidence pack with `verify.mjs`, public keys under `/.well-known` |
 
 | Phase | Status |
 |---|---|
@@ -34,7 +35,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | 3 Lawyer's workspace | Done and tested locally (`/legal`). The GitHub part of the guide's test needs this machine's App credentials (see Open questions) |
 | 4 Fixes and exceptions | Exceptions done and tested against a fake GitHub; the live test on finhealth-core-platform PR #1 needs the App credentials. Fix PRs and suggested changes (guide items 1–2) are not started |
 | 4a MCP for coding assistants | Done; tested in-process and live over HTTP (guide 5.9 results). Claude Code connects but its CLI here isn't signed in; Cursor and VS Code not tried; OAuth not started |
-| 5 Evidence and auditor | Not started. The `evidence`, `shares` and `share_views` tables exist, nothing writes to them |
+| 5 Evidence and auditor | Done and tested (the pack verifies; the three tamper cases are caught). Not done: RFC 3161 timestamps of each day's last header, per-workspace keys |
 | 6, 7 | Not started |
 
 ## What works today
@@ -57,6 +58,14 @@ This file says where the work stands, how to run it, and what to do next. The fu
   - After a decision, the PR's check runs again (`rerunCheckForException`). A waived finding is a notice, and the summary says "1 finding waived until 30 Nov 2026".
   - An hourly job (`expireExceptions`) marks past exceptions expired; scans ignore them either way.
   - `GET /api/workspaces/<id>/inbox` lists exception requests and rule drafts; `/legal` shows it as the Legal inbox.
+- **Evidence and auditors** (Phase 5):
+  - `server/evidence/log.ts`: append-only, hash-chained, signed records per workspace (`evidence` table; triggers refuse UPDATE and DELETE). The header (seq, time, type, previous header's SHA-256, body's SHA-256, key id) is canonical JSON signed with the server's attestation key (`getAttestationSigner`: local Ed25519 file, Cloud KMS or AWS KMS). Appends run one at a time.
+  - Records (`server/evidence/records.ts`): `scan.completed` (repo, commit, PR, rule versions with hashes, fingerprints per rule and state, waived ones, check run URL), `rule.approved`, `rule.retired`, `exception.approved`/`rejected`/`expired`, `share.created`/`revoked`. Bodies hold fingerprints, never code.
+  - The check run summary ends with "Evidence record #n · header SHA-256 …", so GitHub keeps a timestamped copy of each scan's hash (`scans.evidence_seq`, migration 7).
+  - Share links: Legal or the owner picks rules, an optional counterparty (its scope picks the repositories), a period and an expiry (at most a year) in the "Share with an auditor" panel on `/legal`. API: `GET/POST /api/workspaces/<id>/shares`, `POST …/shares/<shareId>/revoke`, `GET …/shares/<shareId>/views` (time, IP, browser), `GET …/evidence`. The token (`lexc_share_` + 32 random bytes) is shown once; only its SHA-256 is stored.
+  - The auditor's page `/share/<token>` needs no account: summary, rule history with approvers, checks over time with their evidence numbers, findings of the latest default-branch check (no code), exceptions, the pack, and "Verify signatures in this browser" (Web Crypto). Data: `GET /api/share/<token>` and `…/pack.zip`, outside the `/api` guard, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`.
+  - The pack: `headers.jsonl` (every header of the period), `bodies.jsonl` (only the bodies about the shared rules and repositories), `rules/`, `exceptions.json`, `sarif/`, `keys.json`, `verify.mjs`, `report.html`, `README.txt`. Zipped by `server/evidence/zip.ts` (Node's zlib; no fflate dependency).
+  - Public keys: `GET /.well-known/lexcompiler/<workspaceId>/keys.json` (every key that signed the workspace's records, with validity dates). Auditors should take them from the company's own site, not from LexCompiler.
 - **Rules API** (Phase 1): `POST /api/workspaces/<id>/rules` creates a draft, `POST .../rule-versions/<versionId>/approve` and `.../reject` decide it (Legal only), `GET .../rules-in-effect` lists what scans use.
 - **AI gateway** (`server/ai/gateway.ts`), the only code that calls a model:
   - A workspace's AI is `off` until the owner sets `local` or `cloud` with `PUT /api/workspaces/<id>/ai`, which also sets a daily token budget.
@@ -127,14 +136,17 @@ Dates are from the schedule in the product guide, section 7.
    - Pick the cloud model provider, put its key in `.env`, and run `npm run eval:extract -- --model cloud`.
    - Decide whether to restore PR #15's files (below).
 2. ~~**Finish 2a.**~~ Done: `dataset.bn.json` and `dataset.finhealth.json`. The collection-model miss (q11, fh02) is fixed: BM25 stems words and splits identifiers, and a question with no category evidence no longer gets the retention clause's graph seeds and HyDE text. Both models are now in the top 5, at ranks 3 and 4.
-3. ~~**Phase 3, the lawyer's workspace.**~~ Done (#6). Left for later: the library screen (templates are served by `GET /api/library/templates` but have no screen yet), similar-rule links (guide 5.4 item 6), an LLM rephrasing of the plain reading, and the evidence record on approval (Phase 5).
+3. ~~**Phase 3, the lawyer's workspace.**~~ Done (#6). Left for later: the library screen (templates are served by `GET /api/library/templates` but have no screen yet), similar-rule links (guide 5.4 item 6), an LLM rephrasing of the plain reading. The evidence record on approval is written since #9.
 4. **Phase 4.** Exceptions are done (#7). Still to do:
    - The live test on finhealth-core-platform PR #1 (guide, Phase 4 test, scene 4 steps 2–4 and Expiry). It needs the App credentials on this machine.
    - Guide items 1–2: fix PRs through the Git Data API with the installation token, and review comments with `suggestion` blocks for findings on lines the PR changed.
 5. **Phase 4a.** Done (#8). Still to do:
    - Sign in to the Claude Code CLI and finish its row in the 5.9 results. Run the client test in Cursor and VS Code (GUI; the configurations are on `/settings`), and in Kiro, Codex, Antigravity and Claude Desktop where they're installed.
    - OAuth (`/.well-known/oauth-protected-resource`, RFC 8414 metadata, dynamic client registration), which Claude Desktop's custom connectors need. Until then Claude Desktop goes through `mcp-remote`.
-6. **Phase 5, evidence and the auditor** (Dec 7–13): `appendEvidence`, share links, `verify.mjs`. The guide has the code.
+6. **Phase 5.** Done (#9). Still to do:
+   - The guide's Phase 5 test on GitHub (step 5: the hash in PR #1's check run). It needs the App credentials on this machine; the fake-GitHub test checks the same thing.
+   - Optional: RFC 3161 timestamps of each day's last header (`timestamp.ts`), and one key per workspace instead of the server's key.
+   - `verify.mjs` can't see records removed from before the first or after the last header of a period. Cross-check the numbers with the check runs on GitHub.
 7. **Phases 6 and 7** (Dec 14–19), then a freeze from Dec 20 to 25.
 
 ## Open questions for the owner
