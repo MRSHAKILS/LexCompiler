@@ -1,7 +1,7 @@
 import express from 'express';
 import type { Request, Response } from 'express';
 import type { ProductStore, ShareRecord, StoredFinding } from '../product/store.js';
-import type { EvidenceLog, EvidenceRecord, PublicKeyEntry } from './log.js';
+import type { EvidenceLog, EvidenceRecord, EvidenceTimestamp, PublicKeyEntry } from './log.js';
 import { bodyInScope } from './records.js';
 import { VERIFY_MJS } from './verifyScript.js';
 import { buildZip } from './zip.js';
@@ -43,6 +43,8 @@ export interface ShareView {
     headers: Array<{ seq: number; header: string; headerSha256: string; signature: string }>;
     /** Sequence numbers whose bodies are in this share. */
     bodySeqs: number[];
+    /** Headers a Time-Stamp Authority (RFC 3161) vouched for; the tokens are in the pack. */
+    timestamps?: Array<{ seq: number; headerSha256: string; tsaUrl: string; genTime: string }>;
   };
   keysUrl: string;
 }
@@ -133,7 +135,14 @@ export function buildShareView(store: ProductStore, log: EvidenceLog, share: Sha
     scans,
     openFindings,
     exceptions,
-    evidence: { headers: records.map((r) => ({ seq: r.seq, header: r.header, headerSha256: r.headerSha256, signature: r.signature })), bodySeqs: bodies.map((r) => r.seq) },
+    evidence: {
+      headers: records.map((r) => ({ seq: r.seq, header: r.header, headerSha256: r.headerSha256, signature: r.signature })),
+      bodySeqs: bodies.map((r) => r.seq),
+      timestamps: log
+        .timestamps(ws)
+        .filter((t) => records.some((r) => r.seq === t.seq && r.headerSha256 === t.headerSha256))
+        .map(({ seq, headerSha256, tsaUrl, genTime }) => ({ seq, headerSha256, tsaUrl, genTime })),
+    },
     keysUrl: `${publicUrl}/.well-known/lexcompiler/${ws}/keys.json`,
   };
   return { view, records, bodies };
@@ -175,7 +184,7 @@ export function renderReportHtml(view: ShareView): string {
 </head><body>
 <h1>Compliance evidence: ${esc(view.workspace.name)}</h1>
 <p>${view.counterparty ? `For ${esc(view.counterparty)}. ` : ''}Period ${day(view.period.from)} to ${day(view.period.to)}. Repositories: ${esc(view.repos.join(', ') || 'none')}.</p>
-<p>Evidence records #${first?.seq ?? '—'} to #${last?.seq ?? '—'} (${view.evidence.headers.length} signed headers, ${view.evidence.bodySeqs.length} bodies in this pack). Check them with <code>node verify.mjs . keys.json</code>, using keys.json from ${esc(view.workspace.name)}'s own website.</p>
+<p>Evidence records #${first?.seq ?? '—'} to #${last?.seq ?? '—'} (${view.evidence.headers.length} signed headers, ${view.evidence.bodySeqs.length} bodies in this pack${view.evidence.timestamps?.length ? `; ${view.evidence.timestamps.length} timestamped by a Time-Stamp Authority` : ''}). Check them with <code>node verify.mjs . keys.json</code>, using keys.json from ${esc(view.workspace.name)}'s own website.</p>
 <h2>Rules</h2>
 ${view.rules
   .map(
@@ -203,9 +212,10 @@ ${view.exceptions.length === 0 ? '<p>None.</p>' : `<table><tr><th>Rule</th><th>W
 }
 
 /** The evidence pack: signed headers, bodies in scope, rules, exceptions, SARIF, keys, verify.mjs and report.html. */
-export function buildEvidencePack(view: ShareView, records: EvidenceRecord[], bodies: EvidenceRecord[], keys: PublicKeyEntry[]): Buffer {
+export function buildEvidencePack(view: ShareView, records: EvidenceRecord[], bodies: EvidenceRecord[], keys: PublicKeyEntry[], timestamps: EvidenceTimestamp[] = []): Buffer {
   const slug = (s: string) => s.replace(/[^A-Za-z0-9._-]+/g, '_');
-  const files: Array<{ name: string; data: string }> = [
+  const stamped = timestamps.filter((t) => records.some((r) => r.seq === t.seq && r.headerSha256 === t.headerSha256));
+  const files: Array<{ name: string; data: string | Buffer }> = [
     {
       name: 'README.txt',
       data: [
@@ -222,8 +232,21 @@ export function buildEvidencePack(view: ShareView, records: EvidenceRecord[], bo
         '  node verify.mjs . keys-from-their-website.json',
         'It prints OK when every header is signed, none is missing between the first and the last, and every body matches its header.',
         '',
+        ...(stamped.length
+          ? [
+              'timestamps/    RFC 3161 tokens from a Time-Stamp Authority over some headers (<seq>.tsr) and those headers\' exact text (<seq>.header).',
+              '               verify.mjs checks each .header matches headers.jsonl. Check a token with OpenSSL and the TSA\'s CA certificate:',
+              '  openssl ts -verify -token_in -in timestamps/<seq>.tsr -data timestamps/<seq>.header -CAfile <the TSA CA certificate>',
+              `TSA: ${[...new Set(stamped.map((t) => t.tsaUrl))].join(', ')}`,
+              '',
+            ]
+          : []),
       ].join('\n'),
     },
+    ...stamped.flatMap((t) => [
+      { name: `timestamps/${t.seq}.tsr`, data: Buffer.from(t.tokenBase64, 'base64') },
+      { name: `timestamps/${t.seq}.header`, data: records.find((r) => r.seq === t.seq)!.header },
+    ]),
     { name: 'headers.jsonl', data: records.map((r) => JSON.stringify({ seq: r.seq, header: r.header, signature: r.signature })).join('\n') + '\n' },
     { name: 'bodies.jsonl', data: bodies.map((r) => JSON.stringify({ seq: r.seq, body: r.body })).join('\n') + (bodies.length ? '\n' : '') },
     ...view.rules.map((r) => ({ name: `rules/${slug(r.key)}.json`, data: JSON.stringify(r, null, 2) + '\n' })),
@@ -273,7 +296,7 @@ export function createPublicEvidenceRouter(options: PublicEvidenceOptions) {
     if (!share) return;
     try {
       const { view, records, bodies } = buildShareView(store, log, share, options.publicUrl);
-      const zip = buildEvidencePack(view, records, bodies, await options.keysFor(share.workspaceId));
+      const zip = buildEvidencePack(view, records, bodies, await options.keysFor(share.workspaceId), log.timestamps(share.workspaceId));
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Disposition', `attachment; filename="lexcompiler-evidence-${share.periodFrom.slice(0, 10)}-${share.periodTo.slice(0, 10)}.zip"`);
       res.send(zip);

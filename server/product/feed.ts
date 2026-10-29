@@ -35,7 +35,12 @@ const DAY = 24 * 60 * 60 * 1000;
  * Call it on start-up and then hourly.
  */
 export async function runDueJobs(
-  deps: NightlyDeps & { fetchFeed?: () => Promise<LiveRegulatoryFeedItem[]>; backup?: { dataDir: string; backupDir: string; keep?: number } },
+  deps: NightlyDeps & {
+    fetchFeed?: () => Promise<LiveRegulatoryFeedItem[]>;
+    backup?: { dataDir: string; backupDir: string; keep?: number };
+    /** RFC 3161 Time-Stamp Authority for the newest evidence header of each workspace (LEXCOMPILER_TSA_URL). */
+    timestamps?: { tsaUrl: string; fetchImpl?: typeof fetch };
+  },
   now: Date = new Date()
 ): Promise<string[]> {
   const done: string[] = [];
@@ -43,6 +48,19 @@ export async function runDueJobs(
   if (deps.backup && deps.store.claimScheduledRun('backup', DAY, now)) {
     const b = backupDataDir(deps.store.db, deps.backup.dataDir, deps.backup.backupDir, { now, keep: deps.backup.keep });
     done.push(`backup: ${b.files.length} files in ${b.folder}`);
+  }
+  // After the backup, before the scans: the timestamp covers yesterday's last record (Phase 5).
+  if (deps.timestamps && deps.evidence && deps.store.claimScheduledRun('evidence-timestamp', DAY, now)) {
+    let stamped = 0;
+    const failed: string[] = [];
+    for (const ws of deps.store.listWorkspaces()) {
+      try {
+        if (await deps.evidence.log.timestampLatest(ws.id, deps.timestamps.tsaUrl, deps.timestamps.fetchImpl)) stamped++;
+      } catch (err) {
+        failed.push(`${ws.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    done.push(`timestamps: ${stamped} headers${failed.length ? `, failed: ${failed.join('; ')}` : ''}`);
   }
   if (deps.store.claimScheduledRun('regulatory-feed', DAY, now)) {
     done.push(`feed: ${await refreshRegulatoryFeed(deps.store, deps.fetchFeed)} new items`);

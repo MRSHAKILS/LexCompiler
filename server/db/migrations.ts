@@ -461,4 +461,23 @@ CREATE TABLE pr_suggestions (
 );
 `,
   },
+  {
+    id: 10,
+    name: 'RFC 3161 timestamps of evidence headers',
+    sql: `
+-- A Time-Stamp Authority's token over the exact text of an evidence header (the newest one of
+-- the day), so an outside party vouches for when the chain reached it.
+CREATE TABLE evidence_timestamps (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  header_sha256 TEXT NOT NULL,
+  tsa_url TEXT NOT NULL,
+  gen_time TEXT NOT NULL,
+  serial TEXT NOT NULL,
+  token_base64 TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, seq)
+);
+`,
+  },
 ];

@@ -30,6 +30,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | MRSHAKILS/LexCompiler #10 | Phase 6: rules proven only on their scope's paths, future effective dates ("Coming up", PR warnings), the regulation feed with "Draft rule change", daily jobs |
 | MRSHAKILS/LexCompiler #11 | Phase 7 preparation: proxy trust, HTTPS only, rate limits, daily backups, `deploy/` (Caddy + compose), `docs/DEPLOY.md` |
 | MRSHAKILS/LexCompiler #12 | Phase 4 items 1–2: "Open fix PR" (one verified commit through the Git Data API) and `suggestion` review comments on pull requests |
+| MRSHAKILS/LexCompiler #13 | Phase 5 item 2: daily RFC 3161 timestamps of the evidence chain (`LEXCOMPILER_TSA_URL`), in share pages and packs |
 
 | Phase | Status |
 |---|---|
@@ -38,7 +39,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | 3 Lawyer's workspace | Done and tested locally (`/legal`). The GitHub part of the guide's test needs this machine's App credentials (see Open questions) |
 | 4 Fixes and exceptions | Done and tested against a fake GitHub: exceptions (#7), fix PRs and suggested changes (#12). The live test on finhealth-core-platform needs the App credentials |
 | 4a MCP for coding assistants | Done; tested in-process and live over HTTP (guide 5.9 results). Claude Code connects but its CLI here isn't signed in; Cursor and VS Code not tried; OAuth not started |
-| 5 Evidence and auditor | Done and tested (the pack verifies; the three tamper cases are caught). Not done: RFC 3161 timestamps of each day's last header, per-workspace keys |
+| 5 Evidence and auditor | Done and tested (the pack verifies; the three tamper cases are caught), with daily RFC 3161 timestamps since #13. Not done: one key per workspace |
 | 6 Contract and regulation changes | Done and tested (scenes 5 and 6 through the API on the fixture, and the PR warning against a fake GitHub). The live GitHub run needs the App credentials. "Open fix PR" (scene 5 step 4) works since #12 |
 | 7 Online for outside testers | Code and configuration ready (#11, `docs/DEPLOY.md`); not deployed. Needs a tunnel or a VPS with a domain, and the GitHub App credentials. The Docker image wasn't rebuilt here (Docker Desktop was off) |
 
@@ -159,7 +160,8 @@ Dates are from the schedule in the product guide, section 7.
    - OAuth (`/.well-known/oauth-protected-resource`, RFC 8414 metadata, dynamic client registration), which Claude Desktop's custom connectors need. Until then Claude Desktop goes through `mcp-remote`.
 6. **Phase 5.** Done (#9). Still to do:
    - The guide's Phase 5 test on GitHub (step 5: the hash in PR #1's check run). It needs the App credentials on this machine; the fake-GitHub test checks the same thing.
-   - Optional: RFC 3161 timestamps of each day's last header (`timestamp.ts`), and one key per workspace instead of the server's key.
+   - ~~RFC 3161 timestamps~~ done (#13): with `LEXCOMPILER_TSA_URL`, a daily job has the TSA vouch for each workspace's newest header (`evidence_timestamps`, migration 10). Share pages list them; packs carry `timestamps/<seq>.tsr` and `<seq>.header` (check with `openssl ts -verify`), and `verify.mjs` checks the stamped header is the one in the chain. Checked against https://freetsa.org/tsr: a token was issued, verifies over the data, and is rejected for other data (the tests use a fake TSA).
+   - Optional: one key per workspace instead of the server's key.
    - `verify.mjs` can't see records removed from before the first or after the last header of a period. Cross-check the numbers with the check runs on GitHub.
 7. **Phase 6.** Done (#10). Per-tenant settings inside code (a TTL per tenant) are a later analyzer feature; until then the fix is the strictest value.
 8. **Phase 7.** Ready to deploy (#11). Still to do, with the owner:
