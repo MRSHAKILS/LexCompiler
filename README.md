@@ -252,7 +252,7 @@ The DuckDB server runs in memory; it reads the SQLite ledger with `ATTACH 'data/
 ```yaml
 jobs:
   compliance:
-    uses: mrshakils/lexcompiler/.github/workflows/lexcompiler-scan.yml@main
+    uses: shahriar-ahmed-seam/LexCompiler/.github/workflows/lexcompiler-scan.yml@main
     with:
       clauses-file: compliance/clauses.json   # [{ "rawLegalText": "...", "citation": "GDPR Art. 6" }]
     permissions:

@@ -5,7 +5,7 @@ name: LexCompiler Compliance Scan (code scanning)
 #
 #   jobs:
 #     compliance:
-#       uses: mrshakils/lexcompiler/.github/workflows/lexcompiler-scan.yml@main
+#       uses: shahriar-ahmed-seam/LexCompiler/.github/workflows/lexcompiler-scan.yml@main
 #       with:
 #         path: .
 #         clauses-file: compliance/clauses.json
@@ -54,7 +54,7 @@ jobs:
       - name: Checkout LexCompiler
         uses: actions/checkout@v4
         with:
-          repository: mrshakils/lexcompiler
+          repository: shahriar-ahmed-seam/LexCompiler
           ref: ${{ inputs.lexcompiler-ref }}
           path: .lexcompiler
 
