@@ -1,6 +1,7 @@
 import { fetchEurLexAmendments, fetchEurLexArticle } from '../regulations/eurLex.js';
 import type {
   CompiledPolicyArtifacts,
+  ComplianceFrameworkId,
   DeonticExtraction,
   DeonticExtractionProvenance,
   LegalClause,
@@ -162,6 +163,15 @@ export function extractTemporalHoursFromProse(lower: string): {
   return { hours: chosen.hours, hit: true, evidence: [`${chosen.label}:${chosen.text}`], reviewNotes };
 }
 
+/** Display names for clauses created from free text or the regulatory feed. */
+export const FRAMEWORK_DISPLAY_NAMES: Record<ComplianceFrameworkId, string> = {
+  ENTERPRISE_DPA: 'Enterprise DPA',
+  GDPR: 'EU General Data Protection Regulation',
+  EU_AI_ACT: 'EU Artificial Intelligence Act',
+  HIPAA: 'HIPAA',
+  CCPA_CPRA: 'CCPA / CPRA',
+};
+
 export function inferRuleCategoryFromProse(
   rawText: string,
   fallback: RuleCategory = 'RETENTION_AND_TENANT_KMS'
@@ -173,34 +183,58 @@ export function inferRuleCategoryFromProse(
   if (/data minimi[sz]ation|adequate, relevant and limited|article 5\s*\(1\)\s*\(c\)/.test(lower)) return 'DATA_MINIMISATION';
   if (/purpose limitation|specified, explicit and legitimate purposes?|article 5\s*\(1\)\s*\(b\)|only for the purposes? of/.test(lower)) return 'PURPOSE_LIMITATION';
   if (/\bconsent\b|lawful basis|legal basis|article 6\b|article 7\b/.test(lower)) return 'CONSENT_LAWFUL_BASIS';
-  if (
-    /prohibit|shall not log|never log|plaintext.*log|unredacted|pii.?log|লগ.*নিষিদ্ধ/.test(lower)
-  ) {
-    return 'PII_LOGGING_BAN';
+
+  // The six code-checkable categories share vocabulary ("prohibited", "logging", "মুছে ফেলতে হবে"),
+  // so a single matching word must not decide. Each category collects weighted evidence and the
+  // strongest wins; ties keep the order below.
+  let best: RuleCategory | null = null;
+  let bestScore = 0;
+  for (const [category, score] of scoreCoreCategories(lower)) {
+    if (score > bestScore) {
+      best = category;
+      bestScore = score;
+    }
   }
-  if (
-    /human[- ]in[- ]the[- ]loop|human oversight|confidence|article 14|মানব তদারকি/.test(lower)
-  ) {
-    return 'AI_HUMAN_IN_THE_LOOP';
-  }
-  if (
-    /cross[- ]border|transfer|us-east|sovereign|article 44|দেশের বাইরে|স্থানান্তর/.test(lower)
-  ) {
-    return 'CROSS_BORDER_TRANSFER';
-  }
-  if (
-    /right to (be )?forgotten|erasure|cascade|article 17|মুছে ফেলতে হবে/.test(lower) &&
-    !/purged within|retention/.test(lower)
-  ) {
-    return 'RIGHT_TO_ERASURE_CASCADE';
-  }
-  if (
-    /encrypt(?:ed|ion)? at rest|aes-256|column.?encrypt/.test(lower) &&
-    !/purged within|retention|ttl|tenant[- ]isolated/.test(lower)
-  ) {
-    return 'ENCRYPTION_AT_REST';
-  }
-  return fallback;
+  return best ?? fallback;
+}
+
+/**
+ * Weighted keyword evidence (English and Bangla) for the code-checkable categories, in tie-break
+ * order. `lower` is normalized prose: lower case, Bangla digits converted to ASCII.
+ */
+function scoreCoreCategories(lower: string): Array<[RuleCategory, number]> {
+  const has = (re: RegExp) => re.test(lower);
+  const mentionsLogging = has(/\blog(?:s|ged|ging|gers?)?\b|stdout|observability|লগ/);
+  const forbids = has(/prohibit|forbid|shall not|must not|may not|never|নিষিদ্ধ|যাবে না/);
+  const plaintext = has(/unredacted|plain ?text|redact|\bmask|রিড্যাক্ট|অরক্ষিত/);
+  const retention = has(/retention|retain|purge|deleted within|erased within|\bttl\b|রিটেনশন|মধ্যে[^।]{0,80}মুছে/);
+  const duration = extractTemporalHoursFromProse(lower).hit;
+  const encryption = has(/encrypt(?:ed|ion)? at rest|aes-?256|column.?encrypt|এনক্রিপ্ট/);
+  const tenantKeys = has(
+    /tenant[- ]isolated|tenant[- ]specific|per[- ]tenant|customer[- ]managed\s+key|tenant_kms|টেন্যান্ট|পৃথক\s*কী|আইসোলেটেড\s*কী|কেএমএস/
+  );
+  return [
+    ['PII_LOGGING_BAN', mentionsLogging ? 2 + (forbids ? 1 : 0) + (plaintext ? 2 : 0) : 0],
+    [
+      'AI_HUMAN_IN_THE_LOOP',
+      (has(/human[- ]in[- ]the[- ]loop|human oversight|human review|overseen by natural persons|মানব তদারকি|হিউম্যান/) ? 3 : 0) +
+        (has(/article 14\b|\bai act\b|high-risk ai|অনুচ্ছেদ 14/) ? 2 : 0) +
+        (has(/confidence|automated decision|autonomous|আত্মবিশ্বাস|স্বয়ংক্রিয়/) ? 1 : 0),
+    ],
+    [
+      'CROSS_BORDER_TRANSFER',
+      (has(/cross[- ]border|third[- ]countr|article 44\b|chapter v\b|আন্তঃসীমান্ত|দেশের বাইরে|তৃতীয় দেশ/) ? 3 : 0) +
+        (has(/transfer|replicat|স্থানান্তর|রেপ্লিকেশন/) ? 1 : 0) +
+        (has(/\b[a-z]{2}-[a-z]+-\d\b|\beea\b|sovereign|residency|রিজিয়ন|সার্বভৌম/) ? 1 : 0),
+    ],
+    [
+      'RIGHT_TO_ERASURE_CASCADE',
+      (has(/right to (?:be )?forgotten|right to erasure|erasure of personal data|cascad|delete all linked|article 17\b/) ? 3 : 0) +
+        (has(/erasure|\berase\b|মুছে ফেল/) ? 1 : 0),
+    ],
+    ['RETENTION_AND_TENANT_KMS', (retention ? 2 : 0) + (duration ? 2 : 0) + (tenantKeys ? 1 : 0)],
+    ['ENCRYPTION_AT_REST', encryption && !retention && !duration ? 2 : 0],
+  ];
 }
 
 /** "need not", "not required", "optional", "may (be)" directly governing a phrase. */
@@ -1227,6 +1261,7 @@ async function withOfficialEurLexText(items: LiveRegulatoryFeedItem[], fetchImpl
       excerpt: `Act ${a.celex} ${a.relation} ${a.targetCelex}; review the clauses compiled from ${a.targetCelex}.`,
       url: a.url,
       suggestedFramework: a.targetCelex === '32024R1689' ? 'EU_AI_ACT' : 'GDPR',
+      kind: 'CHANGE_NOTICE',
     })),
   ];
 }

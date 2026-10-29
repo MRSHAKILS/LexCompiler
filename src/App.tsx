@@ -11,6 +11,7 @@ import { LiveDocsAndRubricView } from './components/LiveDocsAndRubricView';
 import { LiveMultiLlmMeshStudio } from './components/LiveMultiLlmMeshStudio';
 import { McpAndAgentsHub } from './components/McpAndAgentsHub';
 import { TokenAndDataLifecycleLab } from './components/TokenAndDataLifecycleLab';
+import { feedItemToClauseRequest } from './feedIngest';
 import type {
   FullComplianceScanReport,
   LiveRegulatoryFeedItem,
@@ -173,7 +174,11 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  const handleCompileCustomProse = async (clauseId: string, newProse: string) => {
+  const handleCompileCustomProse = async (
+    clauseId: string,
+    newProse: string,
+    extra: Partial<ReturnType<typeof feedItemToClauseRequest>> = {}
+  ) => {
     setIsCompiling(true);
     runShockwaveAnimation('Custom Legal Clause Compilation');
     try {
@@ -184,11 +189,13 @@ export function App() {
           clauseId,
           rawLegalText: newProse,
           amendmentLabel: `Custom Prose Mutation on ${clauseId}`,
+          ...extra,
         }),
       });
       if (res.ok) {
         const updated = (await res.json()) as FullComplianceScanReport;
         setReport(updated);
+        if (updated.clauses.some((c) => c.id === clauseId)) setActiveClauseId(clauseId);
         fetchAllTelemetry();
         triggerToast(
           `Compiled legal prose into SMT-LIB2 & verified against ${updated.files.length} polyglot AST files in ${updated.totalZ3ExecutionMs} ms.`
@@ -329,7 +336,8 @@ export function App() {
   };
 
   const handleIngestLiveFeedItem = async (item: LiveRegulatoryFeedItem) => {
-    await handleCompileCustomProse('CLAUSE-DPA-4.2', item.excerpt);
+    const request = feedItemToClauseRequest(item);
+    await handleCompileCustomProse(request.clauseId, request.rawLegalText, request);
   };
 
   const handleSwitchLocale = async (locale: 'en' | 'bn') => {

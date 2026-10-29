@@ -477,6 +477,11 @@ export interface LiveRegulatoryFeedItem {
   suggestedFramework: ComplianceFrameworkId;
   /** Curated or offline demo text that is not (or not only) the official publication. */
   illustrative?: boolean;
+  /**
+   * TEXT (default): the excerpt states obligations that can be compiled.
+   * CHANGE_NOTICE: another act amends or corrects a tracked regulation; there is no text to compile.
+   */
+  kind?: 'TEXT' | 'CHANGE_NOTICE';
 }
 
 // ============================================================================

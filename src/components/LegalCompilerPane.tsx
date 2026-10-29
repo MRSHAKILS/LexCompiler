@@ -16,6 +16,7 @@ import type {
   LiveRegulatoryFeedItem,
   RegulatoryMutationPreset,
 } from '../../shared/types';
+import { canIngestFeedItem } from '../feedIngest';
 
 interface LegalCompilerPaneProps {
   clauses: LegalClause[];
@@ -178,16 +179,22 @@ export const LegalCompilerPane: React.FC<LegalCompilerPaneProps> = ({
                 >
                   Official Statute Source <ExternalLink className="w-2.5 h-2.5" />
                 </a>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onIngestLiveFeedItem(item);
-                    setShowLiveFeed(false);
-                  }}
-                  className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-indigo-600 hover:bg-indigo-500 text-white"
-                >
-                  Ingest & Compile Statute →
-                </button>
+                {canIngestFeedItem(item) ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onIngestLiveFeedItem(item);
+                      setShowLiveFeed(false);
+                    }}
+                    className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-indigo-600 hover:bg-indigo-500 text-white"
+                  >
+                    Ingest & Compile Statute →
+                  </button>
+                ) : (
+                  <span className="text-[10px] font-mono text-slate-400">
+                    Change notice: review the affected clauses
+                  </span>
+                )}
               </div>
             </div>
           ))}

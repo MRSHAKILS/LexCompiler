@@ -27,6 +27,7 @@ import {
   getBanglaInitialClauses,
   getInitialClauses,
   getMutationPresets,
+  FRAMEWORK_DISPLAY_NAMES,
   inferRuleCategoryFromProse,
 } from './compiler/legalCompiler.js';
 import { getMcpServersCatalog, handleMcpMessage, invokeMcpTool } from './mcp/mcpSuite.js';
@@ -500,6 +501,7 @@ app.post('/api/clauses/compile', async (req, res) => {
       frameworkId,
       category,
       amendmentLabel,
+      sourceUrl,
     } = req.body as {
       clauseId?: string;
       rawLegalText: string;
@@ -508,10 +510,15 @@ app.post('/api/clauses/compile', async (req, res) => {
       frameworkId?: ComplianceFrameworkId;
       category?: RuleCategory;
       amendmentLabel?: string;
+      sourceUrl?: string;
     };
 
     if (!rawLegalText || !rawLegalText.trim()) {
       res.status(400).json({ error: 'rawLegalText is required' });
+      return;
+    }
+    if (clauseId !== undefined && (typeof clauseId !== 'string' || !/^[A-Za-z0-9._-]{1,120}$/.test(clauseId))) {
+      res.status(400).json({ error: 'clauseId may only contain letters, digits, ".", "_" and "-" (max 120)' });
       return;
     }
 
@@ -540,6 +547,10 @@ app.post('/api/clauses/compile', async (req, res) => {
       const newId = clauseId || `CLAUSE-CUSTOM-${Date.now().toString().slice(-4)}`;
       const newCat: RuleCategory = category || inferRuleCategoryFromProse(rawLegalText);
       const newCit = citation || 'Custom DPA Amendment §4.2';
+      const knownFramework =
+        typeof frameworkId === 'string' && Object.hasOwn(FRAMEWORK_DISPLAY_NAMES, frameworkId)
+          ? frameworkId
+          : undefined;
       const compiledResult = await compileLegalProseToFormalPolicyAsync(
         rawLegalText,
         newCat,
@@ -549,8 +560,11 @@ app.post('/api/clauses/compile', async (req, res) => {
 
       activeClauses.unshift({
         id: newId,
-        frameworkId: frameworkId || 'ENTERPRISE_DPA',
-        frameworkName: 'Custom Enterprise DPA / Regulatory Statute',
+        frameworkId: knownFramework ?? 'ENTERPRISE_DPA',
+        frameworkName: knownFramework
+          ? FRAMEWORK_DISPLAY_NAMES[knownFramework]
+          : 'Custom Enterprise DPA / Regulatory Statute',
+        ...(typeof sourceUrl === 'string' && /^https?:\/\//.test(sourceUrl) ? { sourceUrl } : {}),
         citation: newCit,
         title: title || 'Custom Compiled Neuro-Symbolic Legal Obligation',
         severity: 'CRITICAL',
