@@ -2,7 +2,7 @@
 
 This log has two parts:
 
-1. **What's new**: work completed on branch `claude/compassionate-hypatia-3mjhsk`, step by step.
+1. **What's new**: work completed in PRs #26 and #28 (branch `claude/compassionate-hypatia-3mjhsk`, now merged into `main`), step by step.
 2. **To complete in a local environment**: items that couldn't be fully built in the cloud session (they need services, credentials, or infrastructure it doesn't have), with what remains to be done for each.
 
 Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPORT.md).
@@ -487,7 +487,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-10 | **Real PostgreSQL execution (X2)** | — | ✅ Done (Steps 12, 25): also verified against real PostgreSQL 17 and Redis servers. |
 | L-11 | **Tree-sitter queries (L3)** | — | ✅ Done (Steps 9, 14): Python, TypeScript and SQL grammars. |
 | L-12 | **External MCP servers** | The external services are not available here | Client implemented and tested (Step 20); four of six servers verified `ONLINE` with working tool calls, plus a Windows spawn fix (Step 32). Remaining: the GitHub MCP (needs `GITHUB_TOKEN`) and n8n (needs an n8n instance with the MCP Server Trigger workflow). |
-| L-15 | **GitHub code-scanning upload** | Code scanning is a repository setting | Reusable workflow added (Step 20). Remaining: enable code scanning on a real repository and call `mrshakils/lexcompiler/.github/workflows/lexcompiler-scan.yml@main` from it with a `clauses-file`. |
+| L-15 | **GitHub code-scanning upload** | Code scanning is a repository setting | Reusable workflow added (Step 20). Remaining: enable code scanning on a real repository and call `shahriar-ahmed-seam/LexCompiler/.github/workflows/lexcompiler-scan.yml@main` from it with a `clauses-file`. |
 | L-16 | **Symbolic program semantics (V3)** | — | ✅ Done (Step 16): path-sensitive symbolic execution for TypeScript and Python, Z3 counterexamples, inter-procedural taint within a module. |
 | L-17 | **More rule categories (L2)** | — | ✅ Done (Step 15). Optional local check: write a real DPIA for `services/ai_credit_triage.ts` and reference it with `DPIA_REFERENCE`. |
 | L-18 | **Multi-tenant users and projects (P1)** | No real identity provider here | Implemented (Step 17) and tested against a local OpenID provider. Remaining: register LexCompiler with your IdP (Keycloak, Entra ID, Okta, Auth0…), set `LEXCOMPILER_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_REDIRECT_URI` and the roles claim, then sign in through `/api/auth/login`. |
@@ -497,23 +497,3 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-22 | **Frontend accessibility and tests (U1)** | Not reached in the cloud session | ✅ Done (Step 33): jsdom tests for the dashboard, IDE drawer and agent console, keyboard/ARIA/contrast fixes, and the two largest components split. |
 | L-13 | **EUR-Lex SPARQL ingestion** | EUR-Lex and CELLAR are blocked from this session (403) | ✅ Done (Steps 20, 29): the live feed returns the official Art. 17 / Art. 14 text (`illustrative: false`) through CELLAR, plus live amendments. |
 | L-14 | **Docker image verification (D1)** | Docker isn't available in this session | ✅ Done (Steps 6, 24): the compose stack builds and runs, healthy and non-root, with models served by the compose Ollama. |
-
----
-
-## Local verification prompt
-
-Paste this into Claude Code in your local clone (branch `claude/compassionate-hypatia-3mjhsk`):
-
-```text
-Pull origin/claude/compassionate-hypatia-3mjhsk. Read docs/IMPLEMENTATION_LOG.md: Part 1 is
-what is built, Part 2 lists what still needs this machine. Work through every Part 2 row whose
-"What remains" is not ✅ Done, in this order: L-1, L-6, L-14, L-9, L-10, L-3, L-7, L-8, L-18,
-L-2, L-4, L-5, L-12, L-13, L-15, L-19, L-20, L-21, L-22.
-For each row: tell me what you need to install or which credentials you need and wait for my OK;
-do the remaining step; fix anything that breaks in the code (never weaken a test or a claim in
-README.md / AGENTS.md); run npm run typecheck, npm run lint, npm test, npm run verify:cli,
-npm run verify:realworld, npm run build (and the agents/ pytest suite); mark the row done with a
-short note; commit as mrshakils <121shakilahmed@gmail.com> and push to the same branch.
-Never commit secrets. At the end, update docs/LIMITATIONS_REPORT.md §0 and summarise.
-```
-

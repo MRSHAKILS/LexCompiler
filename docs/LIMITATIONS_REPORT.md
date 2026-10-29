@@ -14,7 +14,7 @@ Every finding from the previous revision was re-checked against the new code and
 
 ---
 
-## 0. Status on Branch `claude/compassionate-hypatia-3mjhsk`
+## 0. Status on `main`
 
 The audit below is kept as written. This table records where each finding stands after the remediation work on this branch. "Step N" refers to Part 1 of [`IMPLEMENTATION_LOG.md`](IMPLEMENTATION_LOG.md), and "L-N" to the items in its Part 2 that need a local environment.
 
@@ -558,7 +558,7 @@ README and `AGENTS.md` still claim the 6-agent crew, OPA evaluation, pgvector + 
 
 ## 6. P0 Fixes on This Branch
 
-These changes on `claude/compassionate-hypatia-3mjhsk` address the P0 recommendations. Each is covered by `server/security.test.ts`, and the security behaviour was also checked against a running server.
+These changes address the P0 recommendations. Each is covered by `server/security.test.ts`, and the security behaviour was also checked against a running server.
 
 | Finding | Change |
 | :--- | :--- |
