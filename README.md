@@ -213,6 +213,33 @@ Each compiled clause carries a Rego v1 policy. When an `opa` binary is on `PATH`
 
 `astPatternQuery` holds real Tree-sitter queries for the Python and TypeScript grammars (WASM, from `@vscode/tree-sitter-wasm`) and the SQL grammar (`server/analyzer/grammars/tree-sitter-sql.wasm`, rebuilt with `npm run build:sql-grammar`, which needs clang and wasm-ld). The scan report returns their matches per clause in `structuralQueryMatches`.
 
+### GitHub App: Checking Pull Requests
+
+LexCompiler runs as a GitHub App. On every pull request it adds a check run named `LexCompiler / compliance`, with an annotation on each line that breaks an approved rule.
+
+- **It never runs your code.** It downloads the commit's archive, reads the `.py`, `.ts` and `.sql` files in memory, parses them, and proves them against the rules with Z3. Symlinks, `node_modules` and hidden folders are skipped.
+- **A pull request fails only for findings it adds.** Findings that already exist on the default branch show as warnings, so turning LexCompiler on doesn't turn every pull request red. A rule Z3 can't decide gives `action_required`, never a pass.
+- **Default-branch pushes are scanned as the baseline.** That check is `neutral` and never blocks.
+- Scans use the rule versions Legal approved, and record the commit, the rule-version hashes and the LexCompiler build.
+- Webhooks are verified with `X-Hub-Signature-256`, and redeliveries are ignored. Scans run in a job queue kept in the database, so queued work survives a restart.
+
+**Set it up from the browser.** No manual app settings are needed.
+
+1. GitHub must reach the webhook. Testing locally, open a relay channel at [smee.io/new](https://smee.io/new) and run:
+   ```bash
+   npx smee-client --url https://smee.io/<channel> --target http://127.0.0.1:3001/api/github/webhooks
+   ```
+   Smee parses and re-stringifies each body, which changes GitHub's escaping of `<`, `>` and `&`. Set `LEXCOMPILER_GITHUB_WEBHOOK_RELAY=smee` and LexCompiler restores that escaping before checking the signature. The HMAC still has to match, so nothing GitHub didn't sign gets through. A tunnel that forwards the raw bytes, such as `cloudflared tunnel --url http://localhost:3001`, needs no setting.
+2. Start LexCompiler with `LEXCOMPILER_GITHUB_WEBHOOK_URL=https://smee.io/<channel>`, `LEXCOMPILER_GITHUB_WEBHOOK_RELAY=smee` and `LEXCOMPILER_PUBLIC_URL=http://localhost:3001`.
+3. As an administrator, open `http://localhost:3001/github/register` and click **Create the GitHub App on GitHub**.
+   - GitHub creates a private app from a manifest. It requests Checks: write, Pull requests: write, Contents: read and Metadata: read, and subscribes to pull request, push, check run and check suite events.
+   - The app id, private key, webhook secret and OAuth client credentials come back once and are saved to `data/github-app.json` with mode 0600.
+   - Add `?org=<name>` to the URL to create the app in an organization.
+4. As a workspace owner, open `http://localhost:3001/github/install`, pick the repositories and install. Before linking, LexCompiler asks GitHub to confirm that your GitHub account can access the installation, because the `installation_id` on the setup URL can be forged. A first scan of each default branch is then queued.
+5. Optionally, make the check required: **Settings → Rules → Rulesets**, then "Require status checks to pass" with `LexCompiler / compliance`. On the Free plan this works for public repositories.
+
+In production, set the credentials with environment variables instead (see the configuration reference). `GET /api/github/app` reports whether an app is configured; it returns no secrets.
+
 ### Opening Remediation Pull Requests on GitHub
 
 ```bash
@@ -299,6 +326,12 @@ The workflow uploads the findings to GitHub code scanning and fails the job when
 | `LEXCOMPILER_INPUT_PRICE_PER_MTOK_USD` | built-in | Input price for token-cost estimates |
 | `LEXCOMPILER_CACHE_READ_MULTIPLIER` | built-in | Price multiplier for cached input tokens |
 | `LEXCOMPILER_PREFILL_TOKENS_PER_SEC` | built-in | Prefill throughput for latency estimates |
+| `LEXCOMPILER_PUBLIC_URL` | `http://localhost:<PORT>` | Address people use to reach LexCompiler; used in links from GitHub check runs and as the GitHub App's callback URLs |
+| `LEXCOMPILER_GITHUB_WEBHOOK_URL` | `<public URL>/api/github/webhooks` | Webhook URL put in the GitHub App manifest (a relay such as smee.io when testing locally) |
+| `LEXCOMPILER_GITHUB_APP_ID`, `LEXCOMPILER_GITHUB_APP_PRIVATE_KEY_PATH` (or `LEXCOMPILER_GITHUB_APP_PRIVATE_KEY`), `LEXCOMPILER_GITHUB_WEBHOOK_SECRET`, `LEXCOMPILER_GITHUB_APP_SLUG`, `LEXCOMPILER_GITHUB_CLIENT_ID`, `LEXCOMPILER_GITHUB_CLIENT_SECRET` | unset | GitHub App credentials from the environment; otherwise `data/github-app.json` written by `/github/register` |
+| `LEXCOMPILER_GITHUB_WEBHOOK_RELAY` | unset | `smee` when deliveries come through smee.io, which re-stringifies JSON (signatures are still checked) |
+| `LEXCOMPILER_GITHUB_APP_FILE` | `data/github-app.json` | Where the manifest flow saves the app's credentials |
+| `GITHUB_API_URL`, `LEXCOMPILER_GITHUB_WEB_URL` | `https://api.github.com`, `https://github.com` | GitHub endpoints (GitHub Enterprise Server) |
 | `LEXCOMPILER_GITHUB_TOKEN`, `LEXCOMPILER_GITHUB_REPO`, `LEXCOMPILER_GITHUB_BASE`, `LEXCOMPILER_GITHUB_PATH_PREFIX` | unset | GitHub pull-request integration |
 
 The security settings (`HOST`, `LEXCOMPILER_API_TOKEN`, `LEXCOMPILER_ALLOWED_ORIGINS`, `LEXCOMPILER_ALLOWED_HOSTS`, `LEXCOMPILER_ENABLE_RUNTIME_SANDBOX`) are described in [Security Model](#security-model).

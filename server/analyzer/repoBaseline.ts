@@ -27,6 +27,20 @@ const SOURCE_EXTENSIONS: Record<string, TargetRepoFile['language']> = {
 const SKIPPED_DIRS = new Set(['node_modules', '.git', '.venv', 'venv', '__pycache__', 'dist', 'build', '.next', 'coverage', '.tox', '.mypy_cache']);
 const MAX_SCANNED_FILES = Math.max(1, Number(process.env.LEXCOMPILER_MAX_SCANNED_FILES) || 2000);
 const MAX_FILE_BYTES = 1024 * 1024;
+export const MAX_SOURCE_FILES = MAX_SCANNED_FILES;
+export const MAX_SOURCE_FILE_BYTES = MAX_FILE_BYTES;
+
+/**
+ * The language a repository-relative path is scanned as, or null when it is not scanned. Same
+ * rules as reading a folder: skipped and hidden directories, .d.ts files, unknown extensions.
+ */
+export function sourceLanguageForPath(relPath: string): TargetRepoFile['language'] | null {
+  const parts = relPath.split('/');
+  const name = parts.pop() || '';
+  if (parts.some((dir) => SKIPPED_DIRS.has(dir) || dir.startsWith('.'))) return null;
+  if (name.endsWith('.d.ts')) return null;
+  return SOURCE_EXTENSIONS[path.extname(name)] ?? null;
+}
 
 export class TargetRepoPathError extends Error {}
 
