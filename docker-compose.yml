@@ -9,4 +9,23 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
+      - HOST=0.0.0.0
+      # Required when listening beyond loopback; the UI prompts for it once per session.
+      - LEXCOMPILER_API_TOKEN=${LEXCOMPILER_API_TOKEN:?Set LEXCOMPILER_API_TOKEN before running docker compose}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
+    volumes:
+      - lexcompiler-data:/app/data
     restart: unless-stopped
+
+  # Optional local models: docker compose --profile ollama up -d
+  # then: docker compose exec ollama ollama pull all-minilm && docker compose exec ollama ollama pull qwen2.5-coder:0.5b
+  ollama:
+    image: ollama/ollama:0.6.8
+    profiles: ["ollama"]
+    volumes:
+      - ollama-models:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  lexcompiler-data:
+  ollama-models:

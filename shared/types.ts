@@ -26,6 +26,8 @@ export interface DeonticExtractionProvenance {
   llmModel?: string;
   llmLatencyMs?: number;
   llmRejectedReason?: string;
+  /** Ambiguities a human should confirm (several durations found, negation detected, …). */
+  reviewNotes?: string[];
 }
 
 export interface DeonticExtraction {
@@ -73,6 +75,11 @@ export interface LegalClause {
   version: string;
   lastAmended: string;
   sourceUrl?: string;
+  /**
+   * Built-in demo text: a paraphrase whose numeric thresholds are scenario
+   * parameters, not wording from the cited law.
+   */
+  illustrative?: boolean;
   deontic: DeonticExtraction;
   compiled: CompiledPolicyArtifacts;
 }
@@ -197,6 +204,10 @@ export interface ASTFindingNode {
     sovereignGuardEnabled?: boolean;
     hasCascadeDelete?: boolean;
     containsPii?: boolean;
+    /** How the retention value was obtained, e.g. "PII_CACHE_TTL_HOURS (hours)" or "setex literal (seconds)". */
+    retentionSource?: string;
+    /** True when the TTL unit was not stated in the identifier and hours were assumed. */
+    retentionUnitAssumed?: boolean;
   };
   editAnchors?: SourceEditAnchor[];
 }
@@ -288,9 +299,14 @@ export interface ClauseVerificationProof {
   frameworkId: ComplianceFrameworkId;
   category: RuleCategory;
   severity: 'CRITICAL' | 'HIGH' | 'MEDIUM';
-  status: 'SAT_COMPLIANT' | 'UNSAT_VIOLATION';
-  z3SolverStatus: 'sat' | 'unsat';
+  /** UNKNOWN_NEEDS_REVIEW: Z3 returned `unknown` (e.g. timeout); never counted as compliant. */
+  status: 'SAT_COMPLIANT' | 'UNSAT_VIOLATION' | 'UNKNOWN_NEEDS_REVIEW';
+  z3SolverStatus: 'sat' | 'unsat' | 'unknown';
   z3SolveTimeMs: number;
+  /** Number of code constructs (tables, endpoints, workers, …) the clause was checked against. */
+  applicableInstanceCount?: number;
+  /** Set when the clause's bounds came from defaults or an LLM fallback, or no construct applied. */
+  reviewReasons?: string[];
   smtLib2Executed: string;
   unsatCoreAssertions: string[];
   unsatCoreIterations?: string[][];
@@ -298,7 +314,12 @@ export interface ClauseVerificationProof {
   repairTargets?: Z3RepairTarget[];
   counterexampleWitness: Record<string, string | number | boolean>;
   formalProofSteps: Z3FormalProofStep[];
+  /** Denials from `opa eval` when OPA is installed; otherwise derived from the Z3 result. */
   opaRegoTriggeredDenials: string[];
+  /** 'opa' when the generated Rego was evaluated by OPA, 'z3-derived' otherwise. */
+  policyDenialSource?: 'opa' | 'z3-derived';
+  /** OPA evaluation error, if OPA was available but failed. */
+  opaError?: string;
   affectedGraphNodeIds: string[];
   offendingLocations: Array<{
     nodeId: string;
@@ -334,15 +355,19 @@ export interface FilePatchDiff {
   linesAdded: number;
   linesRemoved: number;
   addressedClauseIds: string[];
+  /** Result of re-parsing the patched file (Python ast, TypeScript parser, SQL tokenizer). */
+  syntaxCheck?: { passed: boolean; message?: string };
 }
 
 export interface RemediationPullRequest {
   prId: string;
+  /** Always 0: LexCompiler produces a local remediation bundle, not a GitHub pull request. */
   prNumber: number;
   title: string;
   branchName: string;
   baseBranch: string;
-  status: 'READY_TO_MERGE' | 'APPLIED_TO_REPO';
+  /** READY_TO_MERGE only when every clause is SAT_COMPLIANT after patching. */
+  status: 'READY_TO_MERGE' | 'BLOCKED_UNRESOLVED' | 'APPLIED_TO_REPO';
   createdAt: string;
   triggeredBy: string;
   addressedViolationsCount: number;
@@ -356,6 +381,8 @@ export interface RemediationPullRequest {
   postPatchVerifyTimeMs: number;
   cegisIterations?: number;
   unresolvedClauseIds?: string[];
+  /** Patched files that no longer parse; any entry blocks the PR. */
+  validationErrors?: string[];
   cryptographicAttestationHash: string;
   executiveSummary: string;
   filePatches: FilePatchDiff[];
@@ -384,6 +411,8 @@ export interface LiveRegulatoryFeedItem {
   excerpt: string;
   url: string;
   suggestedFramework: ComplianceFrameworkId;
+  /** Curated or offline demo text that is not (or not only) the official publication. */
+  illustrative?: boolean;
 }
 
 // ============================================================================
@@ -430,14 +459,16 @@ export interface McpToolInvocationResult {
       arguments: Record<string, unknown>;
     };
   };
+  /** Exactly what the JSON-RPC endpoint returns: a result (possibly isError) or an error. */
   jsonRpcResponse: {
     jsonrpc: '2.0';
-    id: string;
-    result: {
+    id: string | number | null;
+    result?: {
       content: Array<{ type: 'text'; text: string }>;
-      structuredOutput: unknown;
+      structuredContent?: unknown;
       isError: boolean;
     };
+    error?: { code: number; message: string; data?: unknown };
   };
   timestamp: string;
 }
@@ -490,6 +521,8 @@ export interface RagasEvaluationMetrics {
   answerRelevance: number;
   deonticAlignmentScore: number;
   overallRagasScore: number;
+  /** How the scores were computed (labels, judge model, …). */
+  evaluationMethod?: string;
 }
 
 export interface RagQueryExecutionReport {
@@ -520,7 +553,7 @@ export interface AgentExecutionStep {
   inputTokensOptimized: number;
   outputTokens: number;
   latencyMs: number;
-  status: 'COMPLETED';
+  status: 'COMPLETED' | 'FAILED';
   reasoningSummary: string;
   structuredArtifactPreview: string;
 }
@@ -612,4 +645,6 @@ export interface FullComplianceScanReport {
   remediationPR: RemediationPullRequest | null;
   mutationPresets: RegulatoryMutationPreset[];
   files: TargetRepoFile[];
+  /** Tree-sitter matches of each clause's structural query (clause id → matches). */
+  structuralQueryMatches?: Record<string, Array<{ filePath: string; language: string; line: number; captures: Record<string, string> }>>;
 }
