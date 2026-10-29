@@ -96,7 +96,26 @@ const NUMBER_WORDS: Record<string, number> = {
 };
 
 const UNIT_WORDS =
-  'hours?|hrs?|h|minutes?|mins?|days?|weeks?|wks?|months?|mos?|years?|yrs?|percent|ঘণ্টা|ঘন্টা|দিন';
+  'hours?|hrs?|h|minutes?|mins?|days?|weeks?|wks?|fortnights?|months?|mos?|years?|yrs?|percent|ঘণ্টা|ঘন্টা|দিন';
+
+const HALVABLE_UNITS = 'hours?|days?|weeks?|fortnights?|months?|years?';
+
+/**
+ * Rewrites halves as decimals before number words are read, so "half a day" is 0.5 day
+ * (not "half 1 day"), and "one and a half days" / "a day and a half" are 1.5 days.
+ */
+export function normalizeFractionalDurations(lower: string): string {
+  const word = Object.keys(NUMBER_WORDS).join('|');
+  const value = (w: string) => (/^\d/.test(w) ? parseFloat(w) : (NUMBER_WORDS[w] ?? NaN));
+  return lower
+    .replace(new RegExp(`\\bhalf\\s+an?\\s+(${HALVABLE_UNITS})\\b`, 'g'), '0.5 $1')
+    .replace(new RegExp(`\\b(\\d+(?:\\.\\d+)?|${word})\\s+and\\s+a\\s+half\\s+(${HALVABLE_UNITS})\\b`, 'g'), (m, n: string, unit: string) =>
+      Number.isFinite(value(n)) ? `${value(n) + 0.5} ${unit}` : m
+    )
+    .replace(new RegExp(`\\b(\\d+(?:\\.\\d+)?|${word})\\s+(${HALVABLE_UNITS})\\s+and\\s+a\\s+half\\b`, 'g'), (m, n: string, unit: string) =>
+      Number.isFinite(value(n)) ? `${value(n) + 0.5} ${unit}` : m
+    );
+}
 
 /** Rewrites spelled-out counts before a unit ("seventy-two hours", "one week") as digits. */
 export function normalizeNumberWords(lower: string): string {
@@ -123,6 +142,7 @@ const TEMPORAL_UNITS: Array<{ re: RegExp; toHours: (n: number) => number; label:
   { re: /(\d+(?:\.\d+)?)\s*(?:days|day)\b/g, toHours: (n) => n * 24, label: 'days' },
   { re: /(\d+(?:\.\d+)?)\s*(?:দিন)/g, toHours: (n) => n * 24, label: 'days_bn' },
   { re: /(\d+(?:\.\d+)?)\s*(?:weeks|week|wks|wk)\b/g, toHours: (n) => n * 24 * 7, label: 'weeks' },
+  { re: /(\d+(?:\.\d+)?)\s*(?:fortnights|fortnight)\b/g, toHours: (n) => n * 24 * 14, label: 'fortnights' },
   { re: /(\d+(?:\.\d+)?)\s*(?:months|month|mos|mo)\b/g, toHours: (n) => n * 24 * 30, label: 'months' },
   { re: /(\d+(?:\.\d+)?)\s*(?:years|year|yrs|yr)\b/g, toHours: (n) => n * 24 * 365, label: 'years' },
 ];
@@ -139,7 +159,7 @@ export function extractTemporalHoursFromProse(lower: string): {
   evidence: string[];
   reviewNotes: string[];
 } {
-  const text = normalizeNumberWords(lower);
+  const text = normalizeFractionalDurations(normalizeNumberWords(normalizeFractionalDurations(lower)));
   const found: Array<{ hours: number; text: string; label: string }> = [];
   for (const unit of TEMPORAL_UNITS) {
     for (const m of text.matchAll(unit.re)) {

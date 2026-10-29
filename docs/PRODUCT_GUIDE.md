@@ -7,7 +7,7 @@
 > | 0. Merge and fix | Done: #29, #28 (via #30); analyzer rewrite saved on `wip/analyzer-ir` |
 > | 1. Database | Done: #31 |
 > | 2. GitHub App and pull-request checks | Done: #32, #33 |
-> | 2a. AI foundation (section 5.3) | Next |
+> | 2a. AI foundation (section 5.3) | In progress: #35 fixed RAG embeddings, the duration parser and the model labels; the gateway and evals are next |
 > | 3. The lawyer's workspace | Planned |
 > | 4. Fixes and exceptions | Planned |
 > | 4a. MCP server for coding assistants (section 5.8) | Planned |
@@ -767,8 +767,8 @@ This section covers where models, retrieval and MCP fit into the product, how to
 
 - The six MCP demo servers answer over HTTP and stdio (5.8).
 - `server/agents/llmClient.ts` talks to OpenAI-compatible and Anthropic APIs. Once a model is configured, `runAgent` (`server/agents/agentRuntime.ts`) runs a real tool-calling loop.
-- `POST /api/rag/query` fails while Ollama is running, because of an embedding bug (5.6). The MCP RAG tool still works, because it uses 384-dimension feature-hashed vectors instead of Ollama.
-- With no model configured, the agents screen still shows model names such as "Claude 3.7 Sonnet + GPT-4o Structured Outputs". They're hard-coded in `server/agents/multiAgentOrchestrator.ts`, and each step ran as one direct tool call (`DIRECT_TOOL_CALL`).
+- RAG works with Ollama's `all-minilm` embeddings, through `POST /api/rag/query` and the MCP RAG tool (5.6, fixed in #35).
+- The agents screen shows the model that ran, or "No model: direct tool call". Before #35 it showed hard-coded names such as "Claude 3.7 Sonnet + GPT-4o Structured Outputs" for steps that ran no model.
 - Nothing in `server/product` or `server/github` calls a model, RAG or MCP yet.
 
 ### 5.1 Rules for AI
@@ -826,6 +826,9 @@ LEXCOMPILER_LLM_API_KEY=<key>
 LEXCOMPILER_AGENT_Z3_FORMAL_CRITIC_MODEL=<model id>
 # Judge for npm run eval:rag.
 LEXCOMPILER_AGENT_RAG_JUDGE_MODEL=<model id>
+
+# Ollama embedding model for RAG (default all-minilm:latest); "none" uses feature hashing.
+LEXCOMPILER_EMBEDDING_MODEL=all-minilm:latest
 ```
 
 | Provider | `LEXCOMPILER_LLM_PROVIDER` | `LEXCOMPILER_LLM_BASE_URL` |
@@ -851,9 +854,9 @@ This comes before Phase 3, because AI drafting and PR explanations build on it.
 
 **Build**
 
-1. **Fix RAG embeddings,** as described in 5.6.
-2. **Fix the parser** in `server/compiler/legalCompiler.ts`: "half a day" is 12 hours and "a fortnight" is 336 hours. Add a test for each.
-3. **Honest labels.**
+1. **Fix RAG embeddings,** as described in 5.6. *Done in #35.*
+2. **Fix the parser** in `server/compiler/legalCompiler.ts`: "half a day" is 12 hours and "a fortnight" is 336 hours. Add a test for each. *Done in #35, which also reads "one and a half days" and "a day and a half" as 36 hours.*
+3. **Honest labels.** *Done in #35, which also replaced the fixed list of six "integrated" external MCP servers with their live status.*
    - Agent steps show the model from `llmConfigFor(agentId)`, or "No model: direct tool call". Remove the hard-coded `llmModel` names and the fixed `activeLlms` list in `multiAgentOrchestrator.ts`.
    - Show framework names (CrewAI, DSPy and the rest) only for runs of the Python adapters that use them (5.7).
    - RAG reports list only the steps that ran. Today the list always includes a cross-encoder reranker and CRAG, even when no reranker is loaded.
@@ -923,16 +926,15 @@ The check result is computed without a model (rule 1). Afterwards, if the worksp
 - "HyDE" in the code means adding the matching clause's SMT text to the query. No model writes a hypothetical document.
 - Two entry points. `POST /api/rag/query` embeds with Ollama's `all-minilm` when it's reachable. The MCP tool `hybrid_contextual_graph_rag_query` always uses 384-dimension feature-hashed vectors.
 
-**The bug**
+**The bug,** fixed in #35:
 - `computeRealNeuralEmbedding` (`server/services/realAiServiceMesh.ts`) sends up to 1,200 characters to Ollama's `/api/embeddings`. `all-minilm` accepts 512 tokens, so long chunks fail with HTTP 500 and "the input length exceeds the context length".
 - `executeRealNeuralRagQuery` (`server/rag/hybridRagEngine.ts`) then throws "Embedding model all-minilm:latest … stopped answering", and the whole query fails.
 
-**The fix,** in Phase 2a:
-1. Call `POST /api/embed` with `"truncate": true`. I checked that it returns 384-dimension vectors for long input.
-2. Split code chunks at function and class boundaries, which the Tree-sitter analyzer already finds, keeping each under about 400 tokens.
-3. If one chunk still fails, drop only its dense score and keep its BM25 and graph scores.
-4. Use the same embeddings in the endpoint and the MCP tool, so both return the same ranking.
-5. Send the generated answer through the gateway instead of the hard-coded `qwen2.5-coder:0.5b`.
+**The fix:**
+1. *Done in #35:* `POST /api/embed` with `"truncate": true`. A chunk longer than the model's 512 tokens is cut to fit for its dense vector; BM25 and the graph walk still read the whole chunk. On the fixture, the endpoint now embeds every chunk and answered in about 6 seconds on the first run, including the local model's answer.
+2. *Done in #35:* if a chunk still can't be embedded, only its dense score is dropped; it keeps its BM25 and graph scores. Before, such a chunk got a feature-hashing score, which compared scores from two vector spaces.
+3. *Done in #35:* the endpoint and the MCP tool use the same embeddings, so they rank the same way. `LEXCOMPILER_EMBEDDING_MODEL` picks the model, and `none` turns neural embeddings off.
+4. *Next:* send the generated answer through the gateway instead of the hard-coded `qwen2.5-coder:0.5b`.
 
 **In the product**
 - Each workspace gets its own index: documents and clauses, approved rule versions, and the code chunks from each repo's latest `main` scan. Index names include the workspace ID, and no query crosses workspaces.

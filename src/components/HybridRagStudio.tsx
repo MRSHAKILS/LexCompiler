@@ -53,7 +53,7 @@ export const HybridRagStudio: React.FC<HybridRagStudioProps> = ({ initialReport 
           <div>
             <h2 className="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
               <Database className="w-4 h-4 text-indigo-400" />
-              Contextual RAG + Semantic/Late Chunking + pgvector/BM25 RRF + Neo4j Graph RAG Studio
+              Hybrid RAG: Dense Vectors + BM25 + Graph Walk, Fused with RRF
             </h2>
             <p className="text-xs text-slate-400 font-mono mt-0.5">
               Vector DB: {ragReport.vectorDbBackend} · Graph DB: {ragReport.graphDbBackend}
@@ -62,7 +62,7 @@ export const HybridRagStudio: React.FC<HybridRagStudioProps> = ({ initialReport 
 
           <div className="flex items-center gap-2 font-mono text-xs">
             <span className="px-2.5 py-1 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
-              RAGAS Overall: {(ragReport.ragasMetrics.overallRagasScore * 100).toFixed(1)}%
+              Heuristic score: {(ragReport.ragasMetrics.overallRagasScore * 100).toFixed(1)}%
             </span>
             <span className="px-2.5 py-1 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
               Latency: {ragReport.latencyMs} ms
@@ -117,37 +117,37 @@ export const HybridRagStudio: React.FC<HybridRagStudioProps> = ({ initialReport 
         </div>
       </div>
 
-      {/* HyDE Query Expansion & RAGAS Evaluation Strip */}
+      {/* Query expansion and retrieval scores */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         <div className="lg:col-span-7 p-4 rounded-xl bg-[#0A0E17] border border-slate-800 space-y-2.5">
           <div className="text-xs font-mono font-bold uppercase text-amber-300 flex items-center gap-1.5">
             <Sparkles className="w-3.5 h-3.5" />
-            Stage 1 & 2: Query Rewriting + HyDE (Hypothetical Formal SMT Document Expansion)
+            Query Rewrite and Expansion with the Matching Clause's SMT Text
           </div>
           <div className="text-[11px] font-mono text-slate-300 bg-[#06090F] p-2.5 rounded border border-slate-800">
             <span className="text-indigo-400">Deontic Query Rewrite:</span>{' '}
             {ragReport.rewrittenDeonticQuery}
           </div>
           <div className="text-[11px] font-mono text-emerald-300 bg-[#06090F] p-2.5 rounded border border-slate-800">
-            <span className="text-amber-400">HyDE SMT-LIB2 Hypothesis:</span>{' '}
+            <span className="text-amber-400">SMT expansion:</span>{' '}
             {ragReport.hydeHypotheticalFormalQuery}
           </div>
           <div className="p-3 rounded-lg bg-indigo-950/35 border border-indigo-500/40 text-xs text-slate-200 leading-relaxed">
             <strong className="text-indigo-300 font-mono">
-              Self-RAG & CRAG Grounded Synthesis:{' '}
+              Grounded answer:{' '}
             </strong>
             {ragReport.synthesizedNeuroSymbolicAnswer}
           </div>
         </div>
 
-        {/* RAGAS Metrics Card */}
+        {/* Retrieval scores */}
         <div className="lg:col-span-5 p-4 rounded-xl bg-[#0A0E17] border border-slate-800 space-y-3">
           <div className="text-xs font-mono font-bold uppercase text-emerald-300">
-            Live RAGAS & Corrective RAG (CRAG) Faithfulness Telemetry
+            Retrieval Scores (against category-derived labels)
           </div>
           <div className="space-y-2">
             {[
-              { label: 'Faithfulness (Zero Hallucination)', val: ragReport.ragasMetrics.faithfulness },
+              { label: 'Faithfulness (cited sources found in the retrieved text)', val: ragReport.ragasMetrics.faithfulness },
               { label: 'Deontic Alignment with Z3 Proof', val: ragReport.ragasMetrics.deonticAlignmentScore },
               { label: 'Context Recall (Statute + AST)', val: ragReport.ragasMetrics.contextRecall },
               { label: 'Answer Relevance', val: ragReport.ragasMetrics.answerRelevance },
@@ -224,11 +224,11 @@ export const HybridRagStudio: React.FC<HybridRagStudioProps> = ({ initialReport 
           ))}
         </div>
 
-        {/* Neo4j Knowledge Graph Triples & Cypher Queries */}
+        {/* Graph triples reached by the walk */}
         <div className="lg:col-span-5 space-y-3">
           <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200 flex items-center gap-2">
             <Network className="w-4 h-4 text-emerald-400" />
-            Graph RAG Knowledge Triples & Neo4j Cypher Traversal
+            Graph Triples Reached ({ragReport.graphDbBackend})
           </h3>
 
           <div className="space-y-2.5">

@@ -15,62 +15,36 @@ import type {
   MultiAgentPipelineReport,
 } from '../../shared/types';
 
+/** An external MCP server from /api/ai-heavy/overview: suggested ones stay NOT_CONFIGURED until they answer. */
+export interface ExternalMcpServerStatus {
+  id: string;
+  name: string;
+  transport: string;
+  purpose: string;
+  status: string;
+  liveTools?: Array<{ name: string }>;
+  error?: string;
+}
+
 interface McpAndAgentsHubProps {
   mcpServers: McpServerDescriptor[];
+  externalMcpServers?: ExternalMcpServerStatus[];
   multiAgentReport: MultiAgentPipelineReport | null;
   onRefreshAgents: () => void;
 }
 
-const INTEGRATED_EXTERNAL_MCPS = [
-  {
-    id: 'postgres-pgvector-mcp',
-    name: 'PostgreSQL + pgvector Schema & Vector Store MCP',
-    transport: 'stdio / sse',
-    endpoints: 6,
-    description: 'Live DDL introspection and HNSW vector similarity queries over statutory embeddings.',
-  },
-  {
-    id: 'neo4j-cypher-mcp',
-    name: 'Neo4j Knowledge Graph & Blast-Radius Cypher MCP',
-    transport: 'streamable-http',
-    endpoints: 5,
-    description: '2-hop Graph RAG traversal linking GDPR/HIPAA clauses to AST nodes and SQL columns.',
-  },
-  {
-    id: 'github-git-mcp',
-    name: 'GitHub Repository & Pull Request Automation MCP',
-    transport: 'streamable-http',
-    endpoints: 8,
-    description: 'Creates remediation branches, commits AST-verified patches, and opens the remediation PR.',
-  },
-  {
-    id: 'filesystem-sandbox-mcp',
-    name: 'Ephemeral Git Sandbox Filesystem MCP',
-    transport: 'stdio',
-    endpoints: 5,
-    description: 'Reads and writes polyglot source files in isolated verification worktrees.',
-  },
-  {
-    id: 'duckdb-lakehouse-mcp',
-    name: 'DuckDB / Apache Iceberg Compliance Ledger MCP',
-    transport: 'stdio',
-    endpoints: 4,
-    description: 'Stores immutable Parquet/JSONL OpenLineage compliance telemetry and Z3 proof timings.',
-  },
-  {
-    id: 'n8n-webhook-bridge-mcp',
-    name: 'n8n & Temporal Workflow Trigger MCP',
-    transport: 'streamable-http / sse',
-    endpoints: 4,
-    description: 'Dispatches real-time regulatory shockwave alerts and CI/CD compliance gates.',
-  },
-];
+const RUNTIME_LABEL = { cloud: 'Cloud model', local: 'Local model', none: 'No model' } as const;
 
 export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
   mcpServers,
+  externalMcpServers = [],
   multiAgentReport,
   onRefreshAgents,
 }) => {
+  const configuredExternal = externalMcpServers.filter((s) => s.status !== 'NOT_CONFIGURED');
+  const suggestedExternal = externalMcpServers.filter((s) => s.status === 'NOT_CONFIGURED');
+  const modelSteps = multiAgentReport?.steps.filter((st) => st.execution === 'LLM_AGENT').length ?? 0;
+  const models = multiAgentReport?.activeLlms ?? [];
   const [selectedServerId, setSelectedServerId] = useState<string>(
     mcpServers[0]?.id || 'lex-statute-ingest-mcp'
   );
@@ -109,37 +83,37 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="p-4 rounded-xl bg-[#0D131F] border border-indigo-500/40">
           <div className="text-[11px] font-mono uppercase text-indigo-300">
-            MCP Servers Built & Used
+            MCP Servers
           </div>
           <div className="text-2xl font-bold text-white mt-1">
-            6 Custom + 6 Integrated
+            {mcpServers.length} Built-in · {configuredExternal.length} External
           </div>
           <div className="text-xs text-slate-400 mt-1 font-mono">
-            Transports: stdio · SSE · Streamable HTTP
+            Transports: stdio · Streamable HTTP
           </div>
         </div>
 
         <div className="p-4 rounded-xl bg-[#0D131F] border border-emerald-500/40">
           <div className="text-[11px] font-mono uppercase text-emerald-300">
-            Multi-Agent Orchestration
+            Agent Pipeline
           </div>
           <div className="text-2xl font-bold text-white mt-1">
-            6 Specialized Agents
+            {multiAgentReport ? `${multiAgentReport.steps.length} Steps` : 'Not run yet'}
           </div>
           <div className="text-xs text-slate-400 mt-1 font-mono">
-            LangGraph · CrewAI · DSPy · Pydantic-AI · Swarm
+            {modelSteps > 0 ? `${modelSteps} run a model; the rest call their tool directly` : 'No model: each step calls its MCP tool directly'}
           </div>
         </div>
 
         <div className="p-4 rounded-xl bg-[#0D131F] border border-amber-500/40">
           <div className="text-[11px] font-mono uppercase text-amber-300">
-            Frontier + Local LLMs
+            Models
           </div>
           <div className="text-2xl font-bold text-white mt-1">
-            9 Models + 3 Local Runtimes
+            {models.length > 0 ? `${models.length} Configured` : 'None Configured'}
           </div>
           <div className="text-xs text-slate-400 mt-1 font-mono">
-            Claude · GPT-4o · Gemini · DeepSeek-R1 · Qwen · Ollama
+            {models.length > 0 ? models.map((m) => m.model).join(' · ') : 'Set LEXCOMPILER_LLM_MODEL (product guide, section 5.2)'}
           </div>
         </div>
 
@@ -148,11 +122,10 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
             Pipeline Token Savings
           </div>
           <div className="text-2xl font-bold text-white mt-1">
-            {multiAgentReport?.tokenSavingsPercent || 78.2}% Reduced
+            {multiAgentReport ? `${multiAgentReport.tokenSavingsPercent}% Reduced` : '—'}
           </div>
           <div className="text-xs text-slate-400 mt-1 font-mono">
-            {multiAgentReport?.totalRawTokens || 5590} →{' '}
-            {multiAgentReport?.totalOptimizedTokens || 1245} tokens
+            {multiAgentReport ? `${multiAgentReport.totalRawTokens} → ${multiAgentReport.totalOptimizedTokens} tokens` : 'Run the pipeline to measure'}
           </div>
         </div>
       </div>
@@ -163,7 +136,7 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold uppercase tracking-wider text-slate-100 flex items-center gap-2">
               <Server className="w-4 h-4 text-indigo-400" />
-              6 Custom-Built Model Context Protocol (MCP) Servers (Live JSON-RPC 2.0)
+              Built-in Model Context Protocol (MCP) Servers (Live JSON-RPC 2.0)
             </h2>
             <span className="text-xs font-mono text-emerald-400 flex items-center gap-1">
               <Radio className="w-3.5 h-3.5 animate-pulse" /> {mcpServers.reduce((n, s) => n + s.toolsCount, 0)} tools on {mcpServers.length} servers
@@ -235,31 +208,34 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
             })}
           </div>
 
-          {/* 6 Integrated External Ecosystem MCP Servers */}
+          {/* External MCP servers: only the ones that answer count as connected */}
           <div className="pt-2">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 mb-2.5 flex items-center gap-2">
               <Network className="w-4 h-4 text-emerald-400" />
-              6 Integrated Ecosystem MCP Servers Used in Data & Git Pipeline
+              External MCP Servers
             </h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-              {INTEGRATED_EXTERNAL_MCPS.map((ext) => (
-                <div
-                  key={ext.id}
-                  className="p-2.5 rounded-lg bg-[#090D16] border border-slate-800/90 space-y-1"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-mono font-bold text-emerald-300 truncate">
-                      {ext.id}
-                    </span>
-                    <span className="text-[9.5px] font-mono text-slate-400">
-                      {ext.endpoints} tools
-                    </span>
+            {configuredExternal.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                {configuredExternal.map((ext) => (
+                  <div key={ext.id} className="p-2.5 rounded-lg bg-[#090D16] border border-slate-800/90 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-mono font-bold text-emerald-300 truncate">{ext.id}</span>
+                      <span className="text-[9.5px] font-mono text-slate-400">
+                        {ext.status} · {ext.liveTools?.length ?? 0} tools
+                      </span>
+                    </div>
+                    <div className="text-[11px] font-medium text-slate-200">{ext.name}</div>
+                    <p className="text-[10.5px] text-slate-400">{ext.error || ext.purpose}</p>
                   </div>
-                  <div className="text-[11px] font-medium text-slate-200">{ext.name}</div>
-                  <p className="text-[10.5px] text-slate-400">{ext.description}</p>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-400">
+                None connected. Add servers to <code>mcp-servers.json</code> (or the file named by{' '}
+                <code>LEXCOMPILER_EXTERNAL_MCP_CONFIG</code>); they count once they answer <code>tools/list</code>.
+                {suggestedExternal.length > 0 && ` Suggested: ${suggestedExternal.map((e) => e.id).join(', ')}.`}
+              </p>
+            )}
           </div>
         </div>
 
@@ -334,7 +310,7 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
               </div>
             ) : (
               <div className="p-6 text-center text-xs font-mono text-slate-400 border border-dashed border-slate-800 rounded-lg">
-                Click "Invoke RPC" on any of the 6 MCP servers to execute a live JSON-RPC 2.0{' '}
+                Click "Invoke RPC" on any MCP server to execute a live JSON-RPC 2.0{' '}
                 <code>tools/call</code> request and inspect the structured protocol response.
               </div>
             )}
@@ -349,8 +325,7 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
             <div>
               <h2 className="text-sm font-bold uppercase tracking-wider text-slate-100 flex items-center gap-2">
                 <Bot className="w-4 h-4 text-emerald-400" />
-                6-Agent Neuro-Symbolic Pipeline Trace (LangGraph · CrewAI · DSPy · Pydantic-AI ·
-                Swarm)
+                Agent Pipeline Trace
               </h2>
               <p className="text-xs text-slate-400 font-mono mt-0.5">
                 {multiAgentReport.orchestrationPattern}
@@ -361,7 +336,7 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
               onClick={onRefreshAgents}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-semibold bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer"
             >
-              <Zap className="w-3.5 h-3.5" aria-hidden="true" /> Re-Run 6-Agent Compliance Crew
+              <Zap className="w-3.5 h-3.5" aria-hidden="true" /> Run the Pipeline Again
             </button>
           </div>
 
@@ -379,12 +354,14 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
                     </span>
                     <span
                       className={`px-2 py-0.5 rounded text-[10px] font-mono ${
-                        step.runtime === 'Ollama-Local-GGUF'
+                        step.runtime === 'local'
                           ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                          : 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                          : step.runtime === 'cloud'
+                            ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                            : 'bg-slate-700/40 text-slate-300 border border-slate-600/50'
                       }`}
                     >
-                      {step.runtime}
+                      {RUNTIME_LABEL[step.runtime] ?? step.runtime}
                     </span>
                   </div>
                   <div className="text-xs font-bold text-slate-100">{step.agentName}</div>
@@ -394,6 +371,9 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
                   <div className="text-[10.5px] font-mono text-indigo-300">
                     MCP Call: {step.mcpServerCalled} → {step.mcpToolCalled}()
                   </div>
+                  {step.pythonAdapter && (
+                    <div className="text-[10px] font-mono text-slate-400">Python adapter (separate): {step.pythonAdapter}</div>
+                  )}
                   <p className="text-[11px] text-slate-300 leading-relaxed">
                     {step.reasoningSummary}
                   </p>
@@ -415,37 +395,41 @@ export const McpAndAgentsHub: React.FC<McpAndAgentsHubProps> = ({
             ))}
           </div>
 
-          {/* Frontier + Local Ollama Model Routing Matrix */}
+          {/* Models configured for the agents */}
           <div className="p-4 rounded-xl bg-[#0A0E17] border border-slate-800">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200 mb-3 flex items-center gap-2">
               <Cpu className="w-4 h-4 text-amber-400" />
-              Polyglot LLM Router & On-Device Local Runtime Fleet (Ollama · vLLM · llama.cpp)
+              Configured Models
             </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
-              {multiAgentReport.activeLlms.map((m) => (
-                <div
-                  key={m.model}
-                  className="p-3 rounded-lg bg-[#06090F] border border-slate-800/90 space-y-1"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-mono font-bold text-slate-100">{m.model}</span>
-                    <span
-                      className={`px-1.5 py-0.5 rounded text-[9.5px] font-mono ${
-                        m.isLocalRuntime
-                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                          : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
-                      }`}
-                    >
-                      {m.isLocalRuntime ? 'LOCAL ON-DEVICE' : 'CLOUD FRONTIER'}
-                    </span>
+            {models.length === 0 ? (
+              <p className="text-[11px] text-slate-400">
+                No model is configured, so the steps above ran as direct tool calls. Set <code>LEXCOMPILER_LLM_MODEL</code> (or{' '}
+                <code>LEXCOMPILER_AGENT_&lt;ID&gt;_MODEL</code>) to run them as tool-calling agents.
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                {models.map((m) => (
+                  <div key={`${m.model}@${m.provider}`} className="p-3 rounded-lg bg-[#06090F] border border-slate-800/90 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-mono font-bold text-slate-100">{m.model}</span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[9.5px] font-mono ${
+                          m.isLocalRuntime
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                        }`}
+                      >
+                        {m.isLocalRuntime ? 'ON THIS MACHINE' : 'CLOUD'}
+                      </span>
+                    </div>
+                    <div className="text-[10.5px] font-mono text-slate-400">
+                      {m.provider} · {m.quantizationOrTier}
+                    </div>
+                    <p className="text-[11px] text-slate-300">{m.role}</p>
                   </div>
-                  <div className="text-[10.5px] font-mono text-slate-400">
-                    {m.provider} · {m.quantizationOrTier}
-                  </div>
-                  <p className="text-[11px] text-slate-300">{m.role}</p>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

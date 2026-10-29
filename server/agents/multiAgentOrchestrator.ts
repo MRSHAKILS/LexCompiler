@@ -19,14 +19,12 @@ import type {
   SQLTableSchema,
   TargetRepoFile,
 } from '../../shared/types.js';
-import { z3SolverVersion } from '../util/versions.js';
 
 interface AgentStepSpec {
   agentId: string;
   agentName: string;
-  frameworkUsed: AgentExecutionStep['frameworkUsed'];
-  llmModel: string;
-  runtime: AgentExecutionStep['runtime'];
+  /** Framework of this agent's optional Python adapter in agents/lexcompiler_agents (not used by this pipeline). */
+  pythonAdapter: string;
   mcpServerCalled: string;
   mcpToolCalled: string;
   args: Record<string, unknown>;
@@ -61,9 +59,7 @@ export async function buildMultiAgentExecutionReport(
     {
       agentId: 'agent-horizon-scanner',
       agentName: 'Regulatory Horizon Scanner & Statute Ingest Agent',
-      frameworkUsed: 'CrewAI',
-      llmModel: 'Gemini 2.5 Flash + DeepSeek-V3',
-      runtime: 'Cloud-Frontier',
+      pythonAdapter: 'CrewAI',
       mcpServerCalled: 'lex-statute-ingest-mcp',
       mcpToolCalled: 'fetch_live_regulatory_feed',
       args: { jurisdiction: 'ALL' },
@@ -74,9 +70,7 @@ export async function buildMultiAgentExecutionReport(
     {
       agentId: 'agent-deontic-extractor',
       agentName: 'Deontic Legal Deconstruction Agent',
-      frameworkUsed: 'DSPy',
-      llmModel: 'Claude 3.7 Sonnet (Anthropic Prompt Cached)',
-      runtime: 'Cloud-Frontier',
+      pythonAdapter: 'DSPy',
       mcpServerCalled: 'lex-deontic-compiler-mcp',
       mcpToolCalled: 'compile_prose_to_smt_and_rego',
       args: { rawLegalText: clauses[0]?.rawLegalText || '', citation: clauses[0]?.citation || '' },
@@ -87,9 +81,7 @@ export async function buildMultiAgentExecutionReport(
     {
       agentId: 'agent-polyglot-ast-mapper',
       agentName: 'Polyglot AST & Knowledge Graph Mapper Agent',
-      frameworkUsed: 'Hermes-ToolCall',
-      llmModel: 'Qwen-2.5-Coder-7B-Instruct (GGUF Q4_K_M)',
-      runtime: 'Ollama-Local-GGUF',
+      pythonAdapter: 'Hermes-style tool calls (Ollama)',
       mcpServerCalled: 'lex-polyglot-ast-mcp',
       mcpToolCalled: 'scan_polyglot_repository_ast',
       args: {},
@@ -101,9 +93,7 @@ export async function buildMultiAgentExecutionReport(
     {
       agentId: 'agent-contextual-graph-rag',
       agentName: 'Contextual + Graph RAG & HyDE Grounding Agent',
-      frameworkUsed: 'LangGraph',
-      llmModel: 'Llama-3.3-70B / BGE-Reranker-Large',
-      runtime: 'Ollama-Local-GGUF',
+      pythonAdapter: 'LangGraph',
       mcpServerCalled: 'lex-hybrid-rag-mcp',
       mcpToolCalled: 'hybrid_contextual_graph_rag_query',
       args: { query: 'Which code constructs violate the active clauses?', topK: 4 },
@@ -117,9 +107,7 @@ export async function buildMultiAgentExecutionReport(
     {
       agentId: 'agent-z3-formal-critic',
       agentName: 'Neuro-Symbolic Z3 Theorem Prover & Critic Agent',
-      frameworkUsed: 'Pydantic-AI',
-      llmModel: `DeepSeek-R1 (Formal Reasoning) + Microsoft Z3 ${z3SolverVersion()}`,
-      runtime: 'Cloud-Frontier',
+      pythonAdapter: 'Pydantic AI',
       mcpServerCalled: 'lex-z3-prover-mcp',
       mcpToolCalled: 'prove_repository_compliance_z3',
       args: {},
@@ -133,9 +121,7 @@ export async function buildMultiAgentExecutionReport(
     {
       agentId: 'agent-remediation-pr-enforcer',
       agentName: 'Autonomous Remediation Synthesizer & PR Gate Agent',
-      frameworkUsed: 'OpenAI-Swarm',
-      llmModel: 'Claude 3.7 Sonnet + GPT-4o Structured Outputs',
-      runtime: 'Cloud-Frontier',
+      pythonAdapter: 'OpenAI Agents SDK',
       mcpServerCalled: 'lex-remediation-pr-mcp',
       mcpToolCalled: 'synthesize_and_verify_remediation_pr',
       args: {},
@@ -156,7 +142,7 @@ export async function buildMultiAgentExecutionReport(
       try {
         const run = await runAgent({
           agentId: spec.agentId,
-          role: `You are the ${spec.agentName} of LexCompiler, a compliance compiler (${spec.frameworkUsed} role).`,
+          role: `You are the ${spec.agentName} of LexCompiler, a compliance compiler.`,
           task: `Use ${spec.mcpToolCalled} (suggested arguments: ${JSON.stringify(spec.args)}) and any other tool you need, then report what you found for these clauses:\n${spec.optimizedInput.slice(0, 4000)}`,
           mcpServerId: spec.mcpServerCalled,
           clauses,
@@ -166,9 +152,10 @@ export async function buildMultiAgentExecutionReport(
           stepNumber: idx + 1,
           agentId: spec.agentId,
           agentName: spec.agentName,
-          frameworkUsed: spec.frameworkUsed,
+          frameworkUsed: 'LexCompiler agent runtime',
           llmModel: run.model,
-          runtime: spec.runtime,
+          runtime: modelRuntime(llm.baseUrl),
+          pythonAdapter: spec.pythonAdapter,
           mcpServerCalled: spec.mcpServerCalled,
           mcpToolCalled: run.toolCalls.map((t) => t.name).join(', ') || spec.mcpToolCalled,
           inputTokensRaw: countTokens(spec.rawInput),
@@ -184,8 +171,8 @@ export async function buildMultiAgentExecutionReport(
         });
       } catch (err) {
         steps.push({
-          stepNumber: idx + 1, agentId: spec.agentId, agentName: spec.agentName, frameworkUsed: spec.frameworkUsed, llmModel: llm.label || llm.model,
-          runtime: spec.runtime, mcpServerCalled: spec.mcpServerCalled, mcpToolCalled: spec.mcpToolCalled, inputTokensRaw: countTokens(spec.rawInput),
+          stepNumber: idx + 1, agentId: spec.agentId, agentName: spec.agentName, frameworkUsed: 'LexCompiler agent runtime', llmModel: llm.label || llm.model,
+          runtime: modelRuntime(llm.baseUrl), pythonAdapter: spec.pythonAdapter, mcpServerCalled: spec.mcpServerCalled, mcpToolCalled: spec.mcpToolCalled, inputTokensRaw: countTokens(spec.rawInput),
           inputTokensOptimized: 0, outputTokens: 0, latencyMs: 0, status: 'FAILED', reasoningSummary: `LLM agent failed: ${(err as Error).message}`,
           structuredArtifactPreview: '', execution: 'LLM_AGENT',
         });
@@ -206,9 +193,10 @@ export async function buildMultiAgentExecutionReport(
       stepNumber: idx + 1,
       agentId: spec.agentId,
       agentName: spec.agentName,
-      frameworkUsed: spec.frameworkUsed,
-      llmModel: spec.llmModel,
-      runtime: spec.runtime,
+      frameworkUsed: 'None (direct tool call)',
+      llmModel: 'No model: direct tool call',
+      runtime: 'none',
+      pythonAdapter: spec.pythonAdapter,
       mcpServerCalled: spec.mcpServerCalled,
       mcpToolCalled: spec.mcpToolCalled,
       inputTokensRaw: countTokens(spec.rawInput),
@@ -222,6 +210,7 @@ export async function buildMultiAgentExecutionReport(
     });
   }
 
+  const configured = specs.filter((sp) => llmConfigFor(sp.agentId));
   const totalRawTokens = steps.reduce((acc, s) => acc + s.inputTokensRaw, 0);
   const totalOptimizedTokens = steps.reduce((acc, s) => acc + s.inputTokensOptimized, 0);
   const totalLatencyMs = Math.round((performance.now() - t0) * 10) / 10;
@@ -229,60 +218,11 @@ export async function buildMultiAgentExecutionReport(
   return {
     runId: `AGENT-RUN-${crypto.randomUUID()}`,
     triggeredAt: new Date().toISOString(),
-    orchestrationPattern:
-      'LangGraph Supervisor State-Graph + CrewAI Role Delegation + DSPy Compiled Signatures + Pre-PR Z3 Formal Verification Gate',
-    activeFrameworks: [
-      'LangGraph (Supervisor State Machine)',
-      'CrewAI (Role-Based Compliance Crew)',
-      'DSPy (Programmatic Deontic Signatures)',
-      'Pydantic-AI / Zod (Typed Schema Guardrails)',
-      'Hermes (Nous Function-Calling Runtime)',
-      'OpenAI Agents SDK / Swarm Handoffs',
-    ],
-    activeLlms: [
-      {
-        model: 'Claude 3.7 Sonnet',
-        provider: 'Anthropic',
-        role: 'Deontic Legal Deconstruction & Polyglot AST Patch Synthesis',
-        quantizationOrTier: 'Frontier + Anthropic Prompt Caching',
-        isLocalRuntime: false,
-      },
-      {
-        model: 'DeepSeek-R1 (671B / Distill-14B)',
-        provider: 'DeepSeek / Ollama',
-        role: 'SMT-LIB2 Formal Logic Synthesis & Unsat Core Deduction',
-        quantizationOrTier: 'Context Cached + Local Q4_K_M GGUF',
-        isLocalRuntime: true,
-      },
-      {
-        model: 'GPT-4o',
-        provider: 'OpenAI',
-        role: 'Structured JSON Schema Validation & PR Executive Attestation',
-        quantizationOrTier: 'Structured Outputs / JSON Mode',
-        isLocalRuntime: false,
-      },
-      {
-        model: 'Gemini 2.5 Flash',
-        provider: 'Google',
-        role: 'High-Throughput EUR-Lex / Federal Register Horizon Scanning & Contextual RAG Prefixing',
-        quantizationOrTier: 'Gemini Context Caching (Cheap-Model Router)',
-        isLocalRuntime: false,
-      },
-      {
-        model: 'Qwen-2.5-Coder-7B-Instruct',
-        provider: 'Alibaba / Ollama Local',
-        role: 'On-Device Privacy-Preserving AST Triage & Codeburn Pruning',
-        quantizationOrTier: 'Ollama + llama.cpp (GGUF Q4_K_M)',
-        isLocalRuntime: true,
-      },
-      {
-        model: 'Llama-3.3-70B-Instruct + Kimi-k1.5',
-        provider: 'Meta / Moonshot / vLLM',
-        role: 'Long-Context Enterprise DPA Cross-Reference & HyDE Query Rewriting',
-        quantizationOrTier: 'vLLM AWQ 4-bit',
-        isLocalRuntime: true,
-      },
-    ],
+    orchestrationPattern: configured.length
+      ? `Six steps in sequence, one MCP server each. ${configured.length} of 6 steps run a tool-calling model loop; the rest call their tool directly.`
+      : 'Six steps in sequence, one MCP server each. No model is configured, so each step calls its tool directly (set LEXCOMPILER_LLM_MODEL).',
+    activeFrameworks: configured.length ? ['LexCompiler agent runtime (TypeScript tool-calling loop)'] : [],
+    activeLlms: configuredModels(specs.map((sp) => ({ agentId: sp.agentId, agentName: sp.agentName }))),
     totalLatencyMs,
     totalRawTokens,
     totalOptimizedTokens,
@@ -292,15 +232,45 @@ export async function buildMultiAgentExecutionReport(
   };
 }
 
+/** Where a model endpoint runs, from its base URL. */
+function modelRuntime(baseUrl: string): 'cloud' | 'local' {
+  try {
+    const host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '');
+    return ['localhost', '127.0.0.1', '::1'].includes(host) || host.endsWith('.local') ? 'local' : 'cloud';
+  } catch {
+    return 'cloud';
+  }
+}
+
+/** The models configured for the agents (and the RAG judge), grouped by model and endpoint. */
+function configuredModels(agents: Array<{ agentId: string; agentName: string }>): MultiAgentPipelineReport['activeLlms'] {
+  const byKey = new Map<string, { model: string; provider: string; roles: string[]; protocol: string; local: boolean }>();
+  for (const a of [...agents, { agentId: 'agent-rag-judge', agentName: 'RAG evaluation judge' }]) {
+    const cfg = llmConfigFor(a.agentId);
+    if (!cfg) continue;
+    const key = `${cfg.model}@${cfg.baseUrl}`;
+    const entry = byKey.get(key) ?? {
+      model: cfg.model,
+      provider: new URL(cfg.baseUrl).host,
+      roles: [],
+      protocol: cfg.provider === 'anthropic' ? 'Anthropic Messages API' : 'OpenAI-compatible API',
+      local: modelRuntime(cfg.baseUrl) === 'local',
+    };
+    entry.roles.push(a.agentName);
+    byKey.set(key, entry);
+  }
+  return [...byKey.values()].map((e) => ({ model: e.model, provider: e.provider, role: e.roles.join(', '), quantizationOrTier: e.protocol, isLocalRuntime: e.local }));
+}
+
 export function getPromptLibraryCatalog(): PromptLibraryEntry[] {
   return [
     {
       id: 'PROMPT-DEONTIC-01',
       title: 'Deontic Legal-to-SMT-LIB2 Neuro-Symbolic Compiler Prompt',
-      agentRole: 'Agent 2: Deontic Legal Deconstruction Agent (DSPy + Claude 3.7 Sonnet)',
+      agentRole: 'Agent 2: Deontic Legal Deconstruction Agent',
       version: 'v2.4.0-prod',
       patternType: 'XML Structured Role Prompting + Chain-of-Thought + Formal Grammar Constraint',
-      targetModels: ['Claude 3.7 Sonnet', 'DeepSeek-R1'],
+      targetModels: ['Any model configured for the agent (LEXCOMPILER_LLM_MODEL or LEXCOMPILER_AGENT_<ID>_MODEL)'],
       tokenOptimizationApplied: [
         'Anthropic Prompt Caching (<legal_ontology_cache>)',
         'LLMLingua-2 / Caveman Recital Slimming',
@@ -325,10 +295,10 @@ Output SMT-LIB2: (assert (! (= statutory_max_ttl_hours 72) :named law_max_retent
     {
       id: 'PROMPT-CONTEXTUAL-RAG-02',
       title: 'Anthropic-Style Contextual RAG Chunk Situating Prompt',
-      agentRole: 'Agent 4: Contextual + Graph RAG Grounding Agent (Gemini 2.5 Flash)',
+      agentRole: 'Agent 4: Contextual + Graph RAG Grounding Agent',
       version: 'v2.1.0-prod',
       patternType: 'Anthropic Contextual Retrieval Prefix Generator + Graph Entity Linker',
-      targetModels: ['Gemini 2.5 Flash', 'Qwen-2.5-Coder-7B'],
+      targetModels: ['Any model configured for the agent (LEXCOMPILER_LLM_MODEL or LEXCOMPILER_AGENT_<ID>_MODEL)'],
       tokenOptimizationApplied: [
         'Gemini Context Caching (Full Statute Prefix)',
         'Cheap-Model Routing',
@@ -347,10 +317,10 @@ Contextual Prefix: "[Anthropic Contextual RAG Prefix | SQL Schema: schema/postgr
     {
       id: 'PROMPT-AST-PATCH-03',
       title: 'Z3-Guided Counterexample-to-AST Patch Synthesis Prompt',
-      agentRole: 'Agent 6: Autonomous Remediation & PR Enforcer Agent (Claude 3.7 Sonnet + GPT-4o)',
+      agentRole: 'Agent 6: Autonomous Remediation & PR Enforcer Agent',
       version: 'v2.4.0-prod',
       patternType: 'Counterexample-Guided Inductive Synthesis (CEGIS) + Unified Diff Generator',
-      targetModels: ['Claude 3.7 Sonnet', 'GPT-4o', 'Qwen-2.5-Coder-7B'],
+      targetModels: ['Any model configured for the agent (LEXCOMPILER_LLM_MODEL or LEXCOMPILER_AGENT_<ID>_MODEL)'],
       tokenOptimizationApplied: [
         'Codeburn AST Dead-Branch Pruning',
         'Graphify S-Expression Subgraph Input',
@@ -372,10 +342,10 @@ Patch: - PII_CACHE_TTL_HOURS = 720\n+ PII_CACHE_TTL_HOURS = 72\n+ USE_TENANT_KMS
     {
       id: 'PROMPT-CRAG-JUDGE-04',
       title: 'Corrective RAG (CRAG) & Self-RAG Deontic Faithfulness Judge Prompt',
-      agentRole: 'Agent 5: Z3 Formal Verification & Critic Agent (DeepSeek-R1)',
+      agentRole: 'Agent 5: Z3 Formal Verification & Critic Agent',
       version: 'v1.9.0-prod',
       patternType: 'LLM-as-a-Judge + Symbolic Cross-Check (RAGAS Evaluation)',
-      targetModels: ['DeepSeek-R1', 'GPT-4o'],
+      targetModels: ['Any model configured for the agent (LEXCOMPILER_LLM_MODEL or LEXCOMPILER_AGENT_<ID>_MODEL)'],
       tokenOptimizationApplied: ['Structured Outputs / JSON Mode', 'Sliding-Window Trimming'],
       systemPromptXml: `<crag_evaluator>
   <task>Evaluate retrieved statutory and AST chunks for (1) Context Precision, (2) Deontic Alignment with Z3 SMT proof, and (3) Zero Hallucinated Citations.</task>
