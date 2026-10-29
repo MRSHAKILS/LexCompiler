@@ -12,7 +12,6 @@ import {
   getPromptLibraryCatalog,
 } from './agents/multiAgentOrchestrator.js';
 import { analyzeFullRepositoryAsync } from './analyzer/astAnalyzer.js';
-import { runTreeSitterQueries } from './analyzer/treeSitter.js';
 import {
   ensureTargetRepoFilesExist,
   readTargetRepoFiles,
@@ -29,7 +28,6 @@ import {
   getInitialClauses,
   getMutationPresets,
   inferRuleCategoryFromProse,
-  sha256Hex,
 } from './compiler/legalCompiler.js';
 import { getMcpServersCatalog, handleMcpMessage, invokeMcpTool } from './mcp/mcpSuite.js';
 import { loadActiveClauseState, saveActiveClauseState } from './state.js';
@@ -64,7 +62,6 @@ import {
   computeRealNeuralEmbedding,
   ensurePersistentSqliteDb,
   getLiveServiceMeshTelemetry,
-  recordScanToPersistentSqlite,
   runRealLlmInference,
 } from './services/realAiServiceMesh.js';
 import {
@@ -74,6 +71,7 @@ import {
   resolveServerSecurityConfig,
 } from './security.js';
 import { resolvePythonAsync } from './util/python.js';
+import { buildComplianceReport } from './report.js';
 import type {
   ComplianceFrameworkId,
   FullComplianceScanReport,
@@ -161,74 +159,7 @@ let commitCounter = 1;
 async function buildFullComplianceReport(
   options: { recordToLedger?: boolean } = {}
 ): Promise<FullComplianceScanReport> {
-  const rawFiles = readTargetRepoFiles();
-  const { sqlTables, astFindings, enrichedFiles } = await analyzeFullRepositoryAsync(rawFiles);
-  const { proofs, architectureGraph, totalZ3ExecutionMs, merkleAuditRoot } =
-    await verifyRepositoryAgainstClauses(activeClauses, sqlTables, astFindings);
-
-  const remediationPR = await synthesizeRemediationPullRequest(
-    activeClauses,
-    enrichedFiles,
-    proofs
-  );
-
-  const compliantClausesCount = proofs.filter((p) => p.status === 'SAT_COMPLIANT').length;
-  const violatedClausesCount = proofs.filter((p) => p.status === 'UNSAT_VIOLATION').length;
-  const overallComplianceScore = Math.round(
-    (compliantClausesCount / Math.max(1, proofs.length)) * 100
-  );
-
-  const identity = await resolveRepositoryIdentity(
-    sha256Hex(enrichedFiles.map((f) => `${f.path}\n${f.content}`).join('\n'))
-  );
-  const commitHash = `${identity.commitHash}${identity.dirty ? '-dirty' : ''}`;
-  const scanId = `SCAN-${Date.now().toString().slice(-6)}`;
-
-  // Only state-changing requests append to the audit ledger; reads stay side-effect free.
-  if (options.recordToLedger) {
-    recordScanToPersistentSqlite({
-      scanId,
-      commitHash,
-      compliantCount: compliantClausesCount,
-      violatedCount: violatedClausesCount,
-      z3SolveMs: totalZ3ExecutionMs,
-      merkleRoot: merkleAuditRoot,
-    });
-  }
-
-  const structuralQueryMatches: FullComplianceScanReport['structuralQueryMatches'] = {};
-  for (const clause of activeClauses) {
-    try {
-      structuralQueryMatches[clause.id] = await runTreeSitterQueries(clause.compiled.astPatternQuery, enrichedFiles);
-    } catch {
-      structuralQueryMatches[clause.id] = [];
-    }
-  }
-
-  return {
-    scanId,
-    timestamp: new Date().toISOString(),
-    repositoryName: identity.name,
-    repositoryBranch: identity.branch,
-    commitHash,
-    z3EngineVersion: 'Microsoft Z3 v4.13.4 (WASM/Native SMT-LIB2)',
-    activeAmendmentLabel,
-    totalClausesEvaluated: activeClauses.length,
-    compliantClausesCount,
-    violatedClausesCount,
-    overallComplianceScore,
-    totalZ3ExecutionMs,
-    merkleAuditRoot,
-    clauses: activeClauses,
-    sqlTables,
-    astFindings,
-    architectureGraph,
-    proofs,
-    remediationPR,
-    mutationPresets: getMutationPresets(),
-    structuralQueryMatches,
-    files: enrichedFiles,
-  };
+  return buildComplianceReport(activeClauses, activeAmendmentLabel, options);
 }
 
 async function checkPython3(): Promise<string | null> {

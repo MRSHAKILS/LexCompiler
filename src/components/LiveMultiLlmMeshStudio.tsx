@@ -209,7 +209,7 @@ export const LiveMultiLlmMeshStudio: React.FC<LiveMultiLlmMeshStudioProps> = ({
                       {m.parameterSize} · {m.quantizationLevel} · {m.sizeFormatted}
                     </span>
                   </div>
-                  <div className="text-[10.5px] font-mono text-zinc-500">
+                  <div className="text-[10.5px] font-mono text-zinc-400">
                     SHA-256 Digest: {m.digest}… · Family: {m.family}
                   </div>
                   <p className="text-xs text-zinc-300">{m.roleInLexCompiler}</p>

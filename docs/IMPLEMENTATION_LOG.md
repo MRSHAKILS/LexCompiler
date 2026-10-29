@@ -422,6 +422,24 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - The GitHub MCP needs a GitHub token.
   - n8n needs its image and a workflow with an MCP Server Trigger at `/mcp/lexcompiler`, set up in n8n's own UI.
 
+### Step 33 · Frontend tests, accessibility and component split (L-22)
+- **UI tests** (`@testing-library/react` 16.3, jsdom 26.1; `// @vitest-environment jsdom` per file):
+  - `src/test/globalSetup.ts` builds a real report and agent run before the tests: a child process runs the analyzer, Z3 and remediation on a scratch fixture copy, so the components render what the API returns. The report builder moved from `server/index.ts` to `server/report.ts`.
+  - **Dashboard** (`src/App.test.tsx`): loading status, the real Z3 verdict, `aria-current` on the active module, Ctrl/⌘ + 1–7 switching (plain digits and Ctrl+Shift ignored), pressed state on the corpus switch, live-region announcements, named controls.
+  - **IDE drawer:** tabs pattern (roving `tabIndex`, Arrow/Home/End with wrapping, `aria-labelledby` panel), the real violation and diff, the labelled editor's save, per-proof regions.
+  - **Agent console:** six labelled agent-step articles from the real pipeline, server selection through an `aria-pressed` toggle, uniquely named "Invoke" buttons, an announced JSON-RPC response.
+  - **Contrast** (`src/contrast.test.tsx`): reads Tailwind's palette from `theme.css` (OKLCH → sRGB) and requires 4.5:1 for every text colour on the lightest panel background, and for white or black text on solid buttons including their hover colour. A probe with the old classes fails it (zinc-500 3.74:1, white on emerald-600 3.67:1, on its emerald-500 hover 2.46:1).
+- **Accessibility fixes:**
+  - The ⌘1–⌘7 shortcut labels had no key handler; Ctrl/⌘ + digit now opens the module (`aria-keyshortcuts`).
+  - The sidebar is a `nav` with `aria-current`; the corpus switch is a labelled group with `aria-pressed`; the toast is a polite live region; the loading screen and the Z3 verdict are `status`; decorative icons are `aria-hidden`.
+  - The drawer tabs follow the WAI-ARIA tabs pattern. The MCP server cards, which were click-only `div`s, gained keyboard-reachable toggles.
+  - A global `:focus-visible` outline replaces the editor's `outline-none`.
+  - Low-contrast text was raised: zinc/slate-500/600 to 400, and white text on emerald-600 or rose-600/500 now sits on 700 with an 800 hover.
+- **Bug fix:** a `<textarea>` normalises line breaks to `\n`, so saving a CRLF file from the editor rewrote every line ending. The editor now saves with the file's own endings (test included).
+- **Split:**
+  - `App.tsx` (784 lines) delegates to `AppSidebar` and `CommandBar`.
+  - `IdeRemediationDrawer.tsx` (752 lines) delegates to `ide/DiffPanel`, `RuntimePanel`, `EditorPanel`, `WitnessPanel` and `PrBundlePanel`, plus the reusable `a11y/useRovingTabs` hook.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -447,7 +465,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-19 | **Full verification of real repositories at scale** | No large real-world repositories to benchmark against here | Run `LEXCOMPILER_TARGET_REPO=… npm run verify:cli` on real codebases, measure precision/recall of findings, and tune the analyzer heuristics. |
 | L-20 | **Event-loop blocking (S6)** | Not reached in the cloud session | ✅ Done (Step 30): sandbox Git, Python resolution and the analyzer fallback are async on the request path. |
 | L-21 | **PII classification beyond names (A1)** | Not reached in the cloud session | ✅ Done (Step 31): PII classified from types, schemas and values across SQL, Pydantic and TypeScript, with precision/recall tests. |
-| L-22 | **Frontend accessibility and tests (U1)** | Not reached in the cloud session | Add `@testing-library/react` + jsdom tests for the dashboard, IDE drawer and agent console; fix keyboard focus, ARIA labels and colour contrast; split the largest components. |
+| L-22 | **Frontend accessibility and tests (U1)** | Not reached in the cloud session | ✅ Done (Step 33): jsdom tests for the dashboard, IDE drawer and agent console, keyboard/ARIA/contrast fixes, and the two largest components split. |
 | L-13 | **EUR-Lex SPARQL ingestion** | EUR-Lex and CELLAR are blocked from this session (403) | ✅ Done (Steps 20, 29): the live feed returns the official Art. 17 / Art. 14 text (`illustrative: false`) through CELLAR, plus live amendments. |
 | L-14 | **Docker image verification (D1)** | Docker isn't available in this session | ✅ Done (Steps 6, 24): the compose stack builds and runs, healthy and non-root, with models served by the compose Ollama. |
 

@@ -189,7 +189,7 @@ npm start
 | `npm run dev` | API server (`tsx watch`) and Vite UI together |
 | `npm start` | Compiled server from `dist-server/` (run `npm run build` first) |
 | `npm run start:tsx` | Server straight from TypeScript sources |
-| `npm test` | Vitest suite (runs on scratch copies; `target-repo/` is never modified) |
+| `npm test` | Vitest suite: server tests in Node, and UI tests in jsdom (dashboard, IDE drawer, agent console, keyboard and ARIA behaviour, WCAG AA colour contrast) rendered from a real scan. Runs on scratch copies; `target-repo/` is never modified |
 | `npm run typecheck` | `tsc --noEmit` for the UI and the server |
 | `npm run lint` | ESLint flat config (`eslint.config.js`) |
 | `npm run verify:cli` | Compliance gate (exit 0 passed, 1 failed, 2 internal error) |
