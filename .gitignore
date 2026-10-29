@@ -14,3 +14,5 @@ repos/
 mcp-servers.json
 .handoff-state
 .handoff-stop
+__pycache__/
+*.py[cod]
