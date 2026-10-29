@@ -163,6 +163,36 @@ export interface DocumentSummary {
   uploadedAt: string;
 }
 
+export type ExceptionStatus = 'requested' | 'approved' | 'rejected' | 'expired' | 'revoked';
+/** A request to waive findings of one rule: one fingerprint, or every finding under a path glob. */
+export interface ExceptionRecord {
+  id: string;
+  workspaceId: string;
+  ruleId: string;
+  ruleKey: string;
+  repoId: string | null;
+  repoName: string | null;
+  fingerprint: string | null;
+  pathGlob: string | null;
+  reason: string;
+  /** A user id, or "github:<login>" for a request made with the check run's button. */
+  requestedBy: string;
+  requestedFrom: 'github' | 'dashboard';
+  requestedAt: string;
+  status: ExceptionStatus;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  decisionNote: string | null;
+  expiresAt: string | null;
+  scanId: string | null;
+  prNumber: number | null;
+  headSha: string | null;
+  baseSha: string | null;
+  filePath: string | null;
+  startLine: number | null;
+  message: string | null;
+}
+
 export class ProductStore {
   constructor(readonly db: Db) {}
 
@@ -901,11 +931,165 @@ export class ProductStore {
   activeExceptions(workspaceId: string, repoId: string, at: string = nowIso()): ActiveException[] {
     const rows = this.db
       .prepare(
-        `SELECT id, rule_id, fingerprint, path_glob FROM exceptions
+        `SELECT id, rule_id, fingerprint, path_glob, expires_at FROM exceptions
          WHERE workspace_id = ? AND status = 'approved' AND (repo_id IS NULL OR repo_id = ?) AND (expires_at IS NULL OR expires_at > ?)`
       )
       .all(workspaceId, repoId, at) as Row[];
-    return rows.map((r) => ({ id: String(r.id), ruleId: String(r.rule_id), fingerprint: str(r.fingerprint), pathGlob: str(r.path_glob) }));
+    return rows.map((r) => ({ id: String(r.id), ruleId: String(r.rule_id), fingerprint: str(r.fingerprint), pathGlob: str(r.path_glob), expiresAt: str(r.expires_at) }));
+  }
+
+  // ---------------------------------------------------------------- exceptions (Phase 4)
+
+  private exceptionFrom(r: Row): ExceptionRecord {
+    return {
+      id: String(r.id),
+      workspaceId: String(r.workspace_id),
+      ruleId: String(r.rule_id),
+      ruleKey: String(r.rule_key ?? ''),
+      repoId: str(r.repo_id),
+      repoName: str(r.full_name),
+      fingerprint: str(r.fingerprint),
+      pathGlob: str(r.path_glob),
+      reason: String(r.reason),
+      requestedBy: String(r.requested_by),
+      requestedFrom: (str(r.requested_from) ?? 'dashboard') as 'github' | 'dashboard',
+      requestedAt: String(r.requested_at),
+      status: r.status as ExceptionStatus,
+      decidedBy: str(r.decided_by),
+      decidedAt: str(r.decided_at),
+      decisionNote: str(r.decision_note),
+      expiresAt: str(r.expires_at),
+      scanId: str(r.scan_id),
+      prNumber: r.pr_number == null ? null : Number(r.pr_number),
+      headSha: str(r.head_sha),
+      baseSha: str(r.base_sha),
+      filePath: str(r.file_path),
+      startLine: r.start_line == null ? null : Number(r.start_line),
+      message: str(r.message),
+    };
+  }
+
+  private static readonly EXCEPTION_SELECT = `SELECT e.*, r.key AS rule_key, p.full_name FROM exceptions e JOIN rules r ON r.id = e.rule_id LEFT JOIN repos p ON p.id = e.repo_id`;
+
+  /**
+   * Records a request. A request for a finding that already has an open request or an
+   * unexpired approval returns that one instead, so clicking the button twice adds nothing.
+   */
+  requestException(input: {
+    workspaceId: string;
+    ruleId: string;
+    repoId: string | null;
+    fingerprint?: string | null;
+    pathGlob?: string | null;
+    reason: string;
+    requestedBy: string;
+    requestedFrom: 'github' | 'dashboard';
+    scan?: { id: string; prNumber: number | null; headSha: string; baseSha: string | null } | null;
+    finding?: { filePath: string; startLine: number; message: string } | null;
+  }): { exception: ExceptionRecord; created: boolean } {
+    const fingerprint = input.fingerprint || null;
+    const pathGlob = input.pathGlob?.trim() || null;
+    if (!fingerprint === !pathGlob) throw new StoreError('an exception covers either one finding (fingerprint) or a path glob');
+    if (!this.db.prepare('SELECT 1 FROM rules WHERE id = ? AND workspace_id = ?').get(input.ruleId, input.workspaceId)) throw new StoreError('unknown rule', 404);
+    const reason = input.reason.trim().slice(0, 2000);
+    if (!reason) throw new StoreError('a reason is required');
+    const now = nowIso();
+    const existing = this.db
+      .prepare(
+        `SELECT id FROM exceptions WHERE workspace_id = ? AND rule_id = ? AND repo_id IS ? AND fingerprint IS ? AND path_glob IS ?
+           AND (status = 'requested' OR (status = 'approved' AND (expires_at IS NULL OR expires_at > ?))) ORDER BY requested_at DESC LIMIT 1`
+      )
+      .get(input.workspaceId, input.ruleId, input.repoId, fingerprint, pathGlob, now) as Row | undefined;
+    if (existing) return { exception: this.getException(input.workspaceId, String(existing.id))!, created: false };
+    const id = newId();
+    this.db
+      .prepare(
+        `INSERT INTO exceptions (id, workspace_id, rule_id, repo_id, fingerprint, path_glob, reason, requested_by, requested_from, requested_at, status,
+           scan_id, pr_number, head_sha, base_sha, file_path, start_line, message)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.workspaceId,
+        input.ruleId,
+        input.repoId,
+        fingerprint,
+        pathGlob,
+        reason,
+        input.requestedBy,
+        input.requestedFrom,
+        now,
+        input.scan?.id ?? null,
+        input.scan?.prNumber ?? null,
+        input.scan?.headSha ?? null,
+        input.scan?.baseSha ?? null,
+        input.finding?.filePath ?? null,
+        input.finding?.startLine ?? null,
+        input.finding?.message.slice(0, 2000) ?? null
+      );
+    return { exception: this.getException(input.workspaceId, id)!, created: true };
+  }
+
+  getException(workspaceId: string, id: string): ExceptionRecord | undefined {
+    const r = this.db.prepare(`${ProductStore.EXCEPTION_SELECT} WHERE e.id = ? AND e.workspace_id = ?`).get(id, workspaceId) as Row | undefined;
+    return r ? this.exceptionFrom(r) : undefined;
+  }
+
+  listExceptions(workspaceId: string, options: { status?: ExceptionStatus } = {}): ExceptionRecord[] {
+    const rows = options.status
+      ? (this.db.prepare(`${ProductStore.EXCEPTION_SELECT} WHERE e.workspace_id = ? AND e.status = ? ORDER BY e.requested_at DESC`).all(workspaceId, options.status) as Row[])
+      : (this.db.prepare(`${ProductStore.EXCEPTION_SELECT} WHERE e.workspace_id = ? ORDER BY e.requested_at DESC`).all(workspaceId) as Row[]);
+    return rows.map((r) => this.exceptionFrom(r));
+  }
+
+  /** Legal's decision. Approval needs a reason and an expiry date in the future. */
+  decideException(
+    workspaceId: string,
+    id: string,
+    userId: string,
+    decision: { approve: true; note: string; expiresAt: string } | { approve: false; note: string },
+    now: Date = new Date()
+  ): ExceptionRecord {
+    const e = this.getException(workspaceId, id);
+    if (!e) throw new StoreError('unknown exception', 404);
+    if (e.status !== 'requested') throw new StoreError(`only requested exceptions can be decided (this one is ${e.status})`, 409);
+    const note = decision.note.trim().slice(0, 2000);
+    if (decision.approve) {
+      if (!note) throw new StoreError('approving an exception needs a reason');
+      const expires = new Date(decision.expiresAt);
+      if (Number.isNaN(expires.getTime())) throw new StoreError('expiresAt must be a date');
+      if (expires.getTime() <= now.getTime()) throw new StoreError('expiresAt must be in the future');
+      if (expires.getTime() > now.getTime() + 366 * 24 * 3600 * 1000) throw new StoreError('an exception can last at most one year');
+      this.db
+        .prepare("UPDATE exceptions SET status = 'approved', decided_by = ?, decided_at = ?, decision_note = ?, expires_at = ? WHERE id = ?")
+        .run(userId, now.toISOString(), note, expires.toISOString(), id);
+    } else {
+      this.db.prepare("UPDATE exceptions SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ? WHERE id = ?").run(userId, now.toISOString(), note || null, id);
+    }
+    return this.getException(workspaceId, id)!;
+  }
+
+  /** Test-only admin action (guide, Phase 4 test): moves an approved exception's expiry. */
+  setExceptionExpiry(workspaceId: string, id: string, expiresAt: string): ExceptionRecord {
+    const e = this.getException(workspaceId, id);
+    if (!e) throw new StoreError('unknown exception', 404);
+    if (e.status !== 'approved' && e.status !== 'expired') throw new StoreError('only approved exceptions have an expiry', 409);
+    this.db.prepare("UPDATE exceptions SET expires_at = ?, status = 'approved' WHERE id = ?").run(new Date(expiresAt).toISOString(), id);
+    return this.getException(workspaceId, id)!;
+  }
+
+  /** Marks approved exceptions whose expiry has passed as expired; returns how many. Scans ignore them either way. */
+  expireExceptions(at: string = nowIso()): number {
+    const r = this.db.prepare("UPDATE exceptions SET status = 'expired' WHERE status = 'approved' AND expires_at IS NOT NULL AND expires_at <= ?").run(at);
+    return Number(r.changes);
+  }
+
+  /** The scan a check run reported, found from GitHub's check run id. */
+  getScanByCheckRun(checkRunId: number): ScanRecord | undefined {
+    const r = this.db
+      .prepare('SELECT s.*, p.full_name FROM scans s JOIN repos p ON p.id = s.repo_id WHERE s.check_run_id = ? ORDER BY s.created_at DESC LIMIT 1')
+      .get(checkRunId) as Row | undefined;
+    return r ? this.scanFrom(r) : undefined;
   }
 
   // ---------------------------------------------------------------- GitHub

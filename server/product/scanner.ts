@@ -97,6 +97,7 @@ export interface ActiveException {
   ruleId: string;
   fingerprint: string | null;
   pathGlob: string | null;
+  expiresAt?: string | null;
 }
 
 /**

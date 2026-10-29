@@ -13,7 +13,7 @@ import { openDatabase } from './db/index.js';
 import { DocumentError, extractDocumentText, looksLikeLegacyBangla, splitClauses } from './product/documents.js';
 import { createProductRouter } from './product/router.js';
 import { buildRuleCard, findHighlights } from './product/ruleCard.js';
-import { ProductStore, type Repo, type RuleVersion } from './product/store.js';
+import { ProductStore, type ExceptionRecord, type Repo, type RuleVersion } from './product/store.js';
 
 /** The §4.2 text from the walkthrough (product guide, Phase 3 test). */
 const DPA_42 =
@@ -216,6 +216,7 @@ let store: ProductStore;
 let workspaceId: string;
 let githubRepo: Repo;
 const queued: Array<{ repo: Repo; version: RuleVersion }> = [];
+const reruns: ExceptionRecord[] = [];
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexc-legal-'));
 
 beforeAll(async () => {
@@ -253,6 +254,10 @@ beforeAll(async () => {
       enqueueBranchScan: (repo, version) => {
         queued.push({ repo, version });
         return `job-${queued.length}`;
+      },
+      onExceptionDecided: (exception) => {
+        reruns.push(exception);
+        return `rerun-${reruns.length}`;
       },
     })
   );
@@ -331,6 +336,46 @@ describe('lawyer workspace API', () => {
     const set = await call(`/workspaces/${workspaceId}/rules`, 'nusrat', { rawLegalText: text, ruleId: draft.body.rule.id, values: { maxRetentionHours: 72 } });
     expect(set.body.version.card.values[0]).toMatchObject({ value: 72, source: 'legal' });
     expect((await call(`/workspaces/${workspaceId}/rule-versions/${set.body.version.id}/approve`, 'nusrat', {})).status).toBe(200);
+  });
+
+  it('lets an engineer request an exception, shows it in the inbox, and lets Legal decide it', async () => {
+    const [local] = store.listRepos(workspaceId).filter((r) => r.source === 'local');
+    const scan = await call(`/workspaces/${workspaceId}/repos/${local.id}/scan`, 'root', {});
+    const finding = scan.body.findings.find((f: { ruleKey: string }) => f.ruleKey === 'R-1');
+    expect(finding).toBeTruthy();
+
+    // Viewers and strangers cannot ask; engineers can.
+    expect((await call(`/workspaces/${workspaceId}/exceptions`, 'stranger', { scanId: scan.body.id, fingerprint: finding.fingerprint, reason: 'x' })).status).toBe(404);
+    const asked = await call(`/workspaces/${workspaceId}/exceptions`, 'tanvir', { scanId: scan.body.id, fingerprint: finding.fingerprint, reason: 'Cache is flushed by the nightly job' });
+    expect(asked.status).toBe(201);
+    expect(asked.body).toMatchObject({ status: 'requested', requestedFrom: 'dashboard', ruleKey: 'R-1', filePath: finding.filePath });
+    // Asking again returns the open request.
+    expect((await call(`/workspaces/${workspaceId}/exceptions`, 'tanvir', { scanId: scan.body.id, fingerprint: finding.fingerprint, reason: 'again' })).status).toBe(200);
+
+    const inbox = await call(`/workspaces/${workspaceId}/inbox`, 'nusrat');
+    expect(inbox.body.exceptionRequests.map((e: { id: string }) => e.id)).toEqual([asked.body.id]);
+    expect(inbox.body.ruleDrafts.map((d: { ruleKey: string }) => d.ruleKey)).toContain('R-2');
+
+    // Only Legal decides, an approval needs an expiry, and deciding re-runs the check.
+    expect((await call(`/workspaces/${workspaceId}/exceptions/${asked.body.id}/approve`, 'tanvir', { note: 'ok', expiresAt: '2099-01-01' })).status).toBe(403);
+    expect((await call(`/workspaces/${workspaceId}/exceptions/${asked.body.id}/approve`, 'nusrat', { note: 'ok' })).status).toBe(400);
+    const until = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+    const ok = await call(`/workspaces/${workspaceId}/exceptions/${asked.body.id}/approve`, 'nusrat', { note: 'Flushed nightly; fix in LN-14', expiresAt: until });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ status: 'approved', decisionNote: 'Flushed nightly; fix in LN-14', expiresAt: until, rerunJobId: `rerun-${reruns.length}` });
+    expect((await call(`/workspaces/${workspaceId}/exceptions/${asked.body.id}/approve`, 'nusrat', { note: 'again', expiresAt: until })).status).toBe(409);
+
+    // The waived finding no longer fails the next scan.
+    const rescan = await call(`/workspaces/${workspaceId}/repos/${local.id}/scan`, 'root', {});
+    expect(rescan.body.findings.find((f: { fingerprint: string }) => f.fingerprint === finding.fingerprint).state).toBe('waived');
+
+    // The test-only admin action moves the expiry to yesterday; the finding counts again.
+    expect((await call(`/workspaces/${workspaceId}/exceptions/${asked.body.id}/expiry`, 'nusrat', { expiresAt: '2000-01-01' })).status).toBe(403);
+    const expired = await call(`/workspaces/${workspaceId}/exceptions/${asked.body.id}/expiry`, 'root', { expiresAt: new Date(Date.now() - 24 * 3600 * 1000).toISOString() });
+    expect(expired.body.status).toBe('expired');
+    const after = await call(`/workspaces/${workspaceId}/repos/${local.id}/scan`, 'root', {});
+    expect(after.body.findings.find((f: { fingerprint: string }) => f.fingerprint === finding.fingerprint).state).not.toBe('waived');
+    expect((await call(`/workspaces/${workspaceId}/exceptions?status=expired`, 'tanvir')).body).toHaveLength(1);
   });
 
   it('refuses a Bangla upload in the old Bijoy encoding', async () => {

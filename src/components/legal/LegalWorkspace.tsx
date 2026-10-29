@@ -77,6 +77,65 @@ interface Rule {
   title: string;
   versions: RuleVersion[];
 }
+interface ExceptionRequest {
+  id: string;
+  ruleKey: string;
+  repoName: string | null;
+  filePath: string | null;
+  startLine: number | null;
+  pathGlob: string | null;
+  message: string | null;
+  reason: string;
+  requestedBy: string;
+  requestedFrom: 'github' | 'dashboard';
+  prNumber: number | null;
+}
+interface Inbox {
+  exceptionRequests: ExceptionRequest[];
+  ruleDrafts: Array<{ versionId: string; ruleKey: string; version: number }>;
+}
+
+/** One exception request: Legal approves with a reason and an end date, or rejects. */
+function ExceptionRequestCard({ request, busy, onDecide }: { request: ExceptionRequest; busy: boolean; onDecide: (approve: boolean, note: string, expiresAt: string) => void }) {
+  const [note, setNote] = useState('');
+  const [until, setUntil] = useState('');
+  const where = request.filePath ? `${request.filePath}:${request.startLine ?? 1}` : request.pathGlob ?? '';
+  const by = request.requestedBy.startsWith('github:') ? `@${request.requestedBy.slice(7)} on GitHub` : 'the dashboard';
+  return (
+    <li className="rounded border border-zinc-800 p-2 text-sm space-y-2" aria-label={`Exception request for ${request.ruleKey} at ${where}`}>
+      <p>
+        <span className="font-semibold">{request.ruleKey}</span> <span className="font-mono text-xs">{where}</span>
+        {request.repoName && <span className="text-zinc-400"> in {request.repoName}</span>}
+        {request.prNumber !== null && <span className="text-zinc-400"> (pull request #{request.prNumber})</span>}
+      </p>
+      {request.message && <p className="text-xs text-zinc-300">{request.message}</p>}
+      <p className="text-xs text-zinc-400">
+        Requested from {by}: {request.reason}
+      </p>
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="text-xs text-zinc-300">
+          Reason for the decision
+          <input className="mt-1 block bg-[#0B101B] border border-zinc-700 rounded px-2 py-1 text-sm w-72" value={note} onChange={(e) => setNote(e.target.value)} />
+        </label>
+        <label className="text-xs text-zinc-300">
+          Waived until
+          <input type="date" className="mt-1 block bg-[#0B101B] border border-zinc-700 rounded px-2 py-1 text-sm" value={until} onChange={(e) => setUntil(e.target.value)} />
+        </label>
+        <button
+          type="button"
+          disabled={busy || !note.trim() || !until}
+          onClick={() => onDecide(true, note, new Date(`${until}T23:59:59Z`).toISOString())}
+          className="rounded bg-emerald-700 hover:bg-emerald-800 text-white px-2 py-1 disabled:opacity-50"
+        >
+          Approve exception
+        </button>
+        <button type="button" disabled={busy} onClick={() => onDecide(false, note, '')} className="rounded bg-rose-700 hover:bg-rose-800 text-white px-2 py-1 disabled:opacity-50">
+          Reject exception
+        </button>
+      </div>
+    </li>
+  );
+}
 
 async function api<T>(url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, body === undefined ? undefined : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -133,6 +192,7 @@ export function LegalWorkspace() {
   const [counterparties, setCounterparties] = useState<Counterparty[]>([]);
   const [documents, setDocuments] = useState<DocSummary[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
+  const [inbox, setInbox] = useState<Inbox>({ exceptionRequests: [], ruleDrafts: [] });
   const [docId, setDocId] = useState<string | null>(null);
   const [clauses, setClauses] = useState<Clause[]>([]);
   const [clause, setClause] = useState<Clause | null>(null);
@@ -180,10 +240,16 @@ export function LegalWorkspace() {
 
   const refresh = useCallback(async () => {
     if (!workspaceId) return;
-    const [docs, cps, rs] = await Promise.all([api<DocSummary[]>(`${base}/documents`), api<Counterparty[]>(`${base}/counterparties`), api<Rule[]>(`${base}/rules`)]);
+    const [docs, cps, rs, box] = await Promise.all([
+      api<DocSummary[]>(`${base}/documents`),
+      api<Counterparty[]>(`${base}/counterparties`),
+      api<Rule[]>(`${base}/rules`),
+      api<Inbox>(`${base}/inbox`),
+    ]);
     setDocuments(docs);
     setCounterparties(cps);
     setRules(rs);
+    setInbox(box);
   }, [base, workspaceId]);
   useEffect(() => {
     void run(refresh);
@@ -270,8 +336,16 @@ export function LegalWorkspace() {
       setMessage({ kind: 'ok', text: action === 'approve' ? `Approved. ${n === 1 ? '1 repository' : `${n} repositories`} queued for a scan of main.` : 'Rejected.' });
     });
 
+  const decideException = (request: ExceptionRequest, approve: boolean, note: string, expiresAt: string) =>
+    run(async () => {
+      const r = await api<{ rerunJobId: string | null }>(`${base}/exceptions/${request.id}/${approve ? 'approve' : 'reject'}`, approve ? { note, expiresAt } : { note });
+      await refresh();
+      setMessage({ kind: 'ok', text: `Exception ${approve ? 'approved' : 'rejected'}.${r.rerunJobId ? ' The pull request check runs again.' : ''}` });
+    });
+
   const totalFailures = useMemo(() => card?.impact.reduce((n, r) => n + (r.failures ?? 0), 0) ?? 0, [card]);
-  const canEdit = ws && ['owner', 'legal', 'admin'].includes(ws.role);
+  // Rules and exceptions are decided by Legal (server/product/store.ts PERMISSIONS).
+  const canEdit = ws && ['legal', 'admin'].includes(ws.role);
 
   return (
     <div className="min-h-screen bg-[#050609] text-zinc-100 p-6">
@@ -542,6 +616,25 @@ export function LegalWorkspace() {
               )}
             </article>
           )}
+
+          <section aria-labelledby="inbox-heading">
+            <h2 id="inbox-heading" className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-2">
+              Legal inbox ({inbox.exceptionRequests.length + inbox.ruleDrafts.length})
+            </h2>
+            {inbox.exceptionRequests.length + inbox.ruleDrafts.length === 0 && <p className="text-sm text-zinc-400">Nothing waits for Legal.</p>}
+            {inbox.ruleDrafts.length > 0 && <p className="text-sm text-zinc-300 mb-2">Rules waiting for approval: {inbox.ruleDrafts.map((d) => `${d.ruleKey} v${d.version}`).join(', ')} (below).</p>}
+            <ul className="space-y-2">
+              {inbox.exceptionRequests.map((e) =>
+                canEdit ? (
+                  <ExceptionRequestCard key={e.id} request={e} busy={busy} onDecide={(approve, note, expiresAt) => void decideException(e, approve, note, expiresAt)} />
+                ) : (
+                  <li key={e.id} className="text-sm text-zinc-300">
+                    {e.ruleKey} {e.filePath ?? e.pathGlob}: waiting for Legal
+                  </li>
+                )
+              )}
+            </ul>
+          </section>
 
           <section aria-labelledby="rules-heading">
             <h2 id="rules-heading" className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-2">

@@ -51,6 +51,8 @@ export function renderCheckOutput(input: {
   filesScanned: number;
   truncated: boolean;
   lexcompilerVersion: string;
+  /** "1 finding waived until 30 Nov 2026", shown under the counts. */
+  waiverLine?: string | null;
 }): CheckOutput {
   const { summary: s, kind, defaultBranch } = input;
   const titles = new Map(input.rules.map((r) => [r.ruleKey, r.title]));
@@ -73,6 +75,7 @@ export function renderCheckOutput(input: {
       ? `**${s.newCount} new** · ${s.existingCount} ${existingLabel} · ${s.waivedCount} waived by an approved exception`
       : `**${s.existingCount + s.newCount} ${existingLabel}** · ${s.waivedCount} waived by an approved exception. A pull request fails only for findings it adds.`
   );
+  if (input.waiverLine) lines.push('', input.waiverLine);
   if (s.undecidedRuleKeys.length > 0) {
     lines.push('', `⚠️ Z3 could not decide ${s.undecidedRuleKeys.join(', ')} within its time limit. These rules are not counted as passing; ask Legal to review.`);
   }
