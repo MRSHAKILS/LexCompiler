@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import ts from 'typescript';
 import type {
   ASTFindingNode,
@@ -11,13 +12,14 @@ import type {
   TargetRepoFile,
 } from '../../shared/types.js';
 import { resolvePython, resolvePythonAsync } from '../util/python.js';
-import { classifyPii, PII_NAME, type PiiEvidence } from './piiClassifier.js';
+import { classifyPii, PII_NAME, snakeCase, type PiiEvidence } from './piiClassifier.js';
 import { collectGovernanceFindings } from './governanceFacts.js';
 import { summarizeTypeScriptFunction } from './symbolicTs.js';
 
 const PII_IDENTIFIER = PII_NAME;
 const PII_COLUMN_PREFIX = /^(patient_|biometric_)/i;
-const TTL_NAMES = /(ttl|retention|expir|purge)/i;
+// Whole name tokens, so `LOGIN_THROTTLE_*` is not a TTL (it contains "ttl").
+const TTL_NAMES = /(^|_)(ttl|ttls|retention|retain|expiry|expires?|expiration|purge)(_|$)/i;
 const KMS_FLAG_NAMES = /(tenant.*kms|kms.*envelope|tenant_isolated_kms)/i;
 const CIPHER_NAMES = /(encryption_cipher|^cipher$|kms_cipher)/i;
 const CONFIDENCE_NAMES = /(confidence|threshold|auto_approval|min_score|min_conf)/i;
@@ -56,6 +58,34 @@ export function ttlUnitFromName(name: string): { hoursPerUnit: number; unit: str
   if (/(^|_)(d|days?)($|_)/i.test(name)) return { hoursPerUnit: 24, unit: 'days', assumed: false };
   if (/(^|_)(w|wk|wks|weeks?)($|_)/i.test(name)) return { hoursPerUnit: 168, unit: 'weeks', assumed: false };
   return { hoursPerUnit: 1, unit: 'hours', assumed: true };
+}
+
+const COMMENT_UNITS: Array<[RegExp, number, string]> = [
+  [/^(ms|msecs?|millis(econds?)?)$/i, 1 / 3_600_000, 'milliseconds'],
+  [/^(s|secs?|seconds?)$/i, 1 / 3600, 'seconds'],
+  [/^(m|mins?|minutes?)$/i, 1 / 60, 'minutes'],
+  [/^(h|hrs?|hours?)$/i, 1, 'hours'],
+  [/^(d|days?)$/i, 24, 'days'],
+  [/^(w|wks?|weeks?)$/i, 168, 'weeks'],
+];
+
+/**
+ * Unit of a unitless TTL constant from its trailing comment, e.g. `_cache_ttl = 300  # 5 minutes`
+ * (the value is then seconds) or `TTL = 30  # days`. Null when the comment does not settle it.
+ */
+export function ttlUnitFromComment(comment: string, value: number): { hoursPerUnit: number; unit: string } | null {
+  const unitOf = (w: string) => COMMENT_UNITS.find(([re]) => re.test(w));
+  // "N <unit>": pick the unit that makes `value` equal to the stated duration.
+  const stated = /(\d+(?:\.\d+)?)\s*([a-z]+)/i.exec(comment);
+  const statedUnit = stated && unitOf(stated[2]);
+  if (stated && statedUnit) {
+    const hours = Number(stated[1]) * statedUnit[1];
+    const match = COMMENT_UNITS.find(([, perUnit]) => Math.abs(value * perUnit - hours) <= 1e-9 * Math.max(1, hours));
+    if (match) return { hoursPerUnit: match[1], unit: match[2] };
+  }
+  // A bare unit word: "# seconds", "# in minutes".
+  const word = comment.match(/[a-z]+/gi)?.map(unitOf).find(Boolean);
+  return word && !stated ? { hoursPerUnit: word[1], unit: word[2] } : null;
 }
 
 function roundHours(h: number): number {
@@ -844,7 +874,8 @@ export interface ParsedPythonAst {
 const PYTHON_AST_SCRIPT = String.raw`
 import ast, json, re, sys
 
-src = sys.stdin.read()
+# Node writes UTF-8; text-mode stdin would decode with the locale code page (cp1252 on Windows).
+src = sys.stdin.buffer.read().decode("utf-8")
 try:
     tree = ast.parse(src)
 except SyntaxError as e:
@@ -1018,28 +1049,52 @@ attr_reads = sorted({n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribu
                     | {n.slice.value for n in ast.walk(tree) if isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)})
 
 # --- PII taint: seeds are PII-named parameters; propagate through assignments to a fixpoint.
+# Keyed by (scope, name): a variable is tainted only in the function that assigned it (module-level
+# names are visible everywhere), so a "response" tainted in one function does not taint every
+# "response" in the file.
 tainted = set()
-origin = {}  # tainted name -> PII field it carries
-for f in functions:
-    for a in f["args"]:
-        if PII.search(a):
-            tainted.add(a)
-            origin[a] = a
+origin = {}  # (scope, name) -> PII field it carries
+def scope_of(n):
+    fn = enclosing_function(n)
+    return id(fn) if fn is not None else None
+for fn_node in ast.walk(tree):
+    if isinstance(fn_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for a in fn_node.args.args + fn_node.args.kwonlyargs:
+            if PII.search(a.arg):
+                tainted.add((id(fn_node), a.arg))
+                origin[(id(fn_node), a.arg)] = a.arg
+def taint_key(n):
+    """The tainted (scope, name) a Name load refers to: its own function's, else a module global."""
+    for key in ((scope_of(n), n.id), (None, n.id)):
+        if key in tainted:
+            return key
+    return None
 
 def is_sanitizer_call(n):
     return isinstance(n, ast.Call) and bool(SANITIZER.search(dotted(n.func).split(".")[-1] or ""))
+
+# Calls whose result carries their arguments' data. Any other call is opaque: its result is
+# tainted only through its receiver (payload.get(...), email.lower()), so the response of an
+# HTTP call that was sent an e-mail is not itself treated as PII.
+TAINT_PRESERVING = {"str", "repr", "format", "format_map", "join", "dumps", "dict", "list", "tuple", "set", "copy",
+                    "deepcopy", "asdict", "vars", "getattr", "lower", "upper", "strip", "lstrip", "rstrip", "title",
+                    "casefold", "replace", "encode", "decode", "model_dump", "model_dump_json", "json", "jsonable_encoder"}
 
 def tainted_leaves(expr):
     out = []
     def visit(n):
         if is_sanitizer_call(n):
             return
+        if isinstance(n, ast.Call) and (dotted(n.func).split(".")[-1] or "") not in TAINT_PRESERVING:
+            if isinstance(n.func, ast.Attribute):
+                visit(n.func.value)
+            return
         if isinstance(n, ast.Attribute) and PII.search(n.attr):
             out.append((n, n.attr)); return
         if isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str) and PII.search(n.slice.value):
             out.append((n, n.slice.value)); return
-        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in tainted:
-            out.append((n, origin.get(n.id, n.id))); return
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and taint_key(n) is not None:
+            out.append((n, origin.get(taint_key(n), n.id))); return
         for c in ast.iter_child_nodes(n):
             visit(c)
     visit(expr)
@@ -1053,9 +1108,10 @@ while changed:
         if leaves:
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for t in targets:
-                if isinstance(t, ast.Name) and t.id not in tainted:
-                    tainted.add(t.id)
-                    origin[t.id] = leaves[0][1]
+                key = (scope_of(node), t.id) if isinstance(t, ast.Name) else None
+                if key is not None and key not in tainted:
+                    tainted.add(key)
+                    origin[key] = leaves[0][1]
                     changed = True
 
 def is_log_sink(name):
@@ -1406,12 +1462,16 @@ async function parsePythonAstAsync(content: string): Promise<ParsedPythonAst | n
  */
 export async function primePythonAstCache(files: TargetRepoFile[]): Promise<void> {
   const pending = files.filter((f) => f.language === 'python' && !pythonAstCache.has(sha256Hex(f.content)));
-  await Promise.all(
-    pending.map(async (f) => {
+  // At most one interpreter per core: a large repository must not spawn thousands at once.
+  let next = 0;
+  const worker = async () => {
+    while (next < pending.length) {
+      const f = pending[next++];
       const parsed = await parsePythonAstAsync(f.content);
       if (parsed) pythonAstCache.set(sha256Hex(f.content), parsed);
-    })
-  );
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(pending.length, Math.max(2, os.availableParallelism())) }, worker));
 }
 
 function anchorFromSpan(
@@ -1468,11 +1528,24 @@ export function parsePythonAstFile(file: TargetRepoFile): {
     f.decorators.some((d) => /\b(app|router|api|bp|blueprint)\.(post|put|patch|get|delete|route)$/i.test(d))
   );
   const piiFns = py.functions.filter((f) => f.args.some((a) => isPiiIdentifier(a) || /payload|patient|pii/i.test(a)));
-  const primaryFn = routeFns[0] || piiFns[0];
+  // A routed handler processes PII only if it takes a PII argument or a model with PII fields,
+  // or logs PII; a health check or config route in the same app does not.
+  const piiModels = new Set(
+    py.classes
+      .filter((c) => (c.fields || []).some((f) => classifyPii({ name: f.name, typeText: f.annotation, description: f.description, patterns: f.patterns, samples: f.samples }).pii))
+      .map((c) => c.name)
+  );
+  const piiRouteFns = routeFns.filter(
+    (f) =>
+      piiFns.includes(f) ||
+      Object.values(f.annotations || {}).some((t) => piiModels.has(t)) ||
+      leakingSinks.some((s) => s.lineno >= f.lineno && s.lineno <= f.end_lineno)
+  );
+  const primaryFn = piiRouteFns[0] || piiFns[0] || routeFns[0];
   const isCacheFile = py.cache_calls.length > 0 || /\bredis\b|\bcache\b/i.test(file.content);
   // A cache worker's envelope flag belongs to the cache finding, not to an endpoint.
   const isPiiEndpoint =
-    routeFns.length > 0 ||
+    piiRouteFns.length > 0 ||
     py.encrypt_calls.length > 0 ||
     (kmsFlags.length > 0 && !isCacheFile) ||
     (logsPlaintextPii && piiFns.length > 0);
@@ -1506,7 +1579,7 @@ export function parsePythonAstFile(file: TargetRepoFile): {
       column: 1,
       language: 'python',
       astNodeKind: primaryFn?.kind || 'Module',
-      constructType: routeFns.length > 0 ? 'FASTAPI_ENDPOINT' : 'PII_PROCESSING_FUNCTION',
+      constructType: piiRouteFns.length > 0 ? 'FASTAPI_ENDPOINT' : 'PII_PROCESSING_FUNCTION',
       functionName: primaryFn?.name || 'module',
       codeSnippet: snippet(lines, Math.max(1, fnStart - 1), fnEnd),
       metadata: {
@@ -1541,10 +1614,25 @@ export function parsePythonAstFile(file: TargetRepoFile): {
     });
   }
 
-  // Retention: every TTL/retention constant (with unit from its name), plus literal cache TTLs.
+  // Retention: every TTL/retention constant (unit from its name, else from its comment), plus
+  // literal cache TTLs, when the constant or its module concerns PII. A schema or HTTP cache in a
+  // module that never touches personal data is not PII retention.
   const envelopeFlag = kmsFlags.find((a) => /envelope|cache/i.test(a.name)) || kmsFlags[0];
+  const piiNamed = (n: string) => isPiiIdentifier(n) || /(^|_)(pii|phi|personal|patient)(_|$)/i.test(n);
+  const moduleHandlesPii =
+    py.functions.some((f) => f.args.some(piiNamed)) ||
+    py.assignments.some((a) => isPiiIdentifier(a.name)) ||
+    (py.attr_reads || []).some(piiNamed) ||
+    py.classes.some((c) => (c.fields || []).some((f) => classifyPii({ name: f.name, typeText: f.annotation, description: f.description, patterns: f.patterns, samples: f.samples }).pii)) ||
+    py.sinks.some((s) => s.leaks.length > 0);
   const ttlAssigns = py.assignments.filter(
-    (a) => TTL_NAMES.test(a.name) && typeof a.value === 'number' && a.span && a.scope !== '' && !CONFIDENCE_NAMES.test(a.name)
+    (a) =>
+      TTL_NAMES.test(snakeCase(a.name)) &&
+      typeof a.value === 'number' &&
+      a.span &&
+      a.scope !== '' &&
+      !CONFIDENCE_NAMES.test(a.name) &&
+      (moduleHandlesPii || piiNamed(a.name))
   );
   const retentionEntries: Array<{
     key: string;
@@ -1555,7 +1643,10 @@ export function parsePythonAstFile(file: TargetRepoFile): {
     line: number;
   }> = [];
   for (const a of ttlAssigns) {
-    const unit = ttlUnitFromName(a.name);
+    const named = ttlUnitFromName(a.name);
+    const comment = lines[a.lineno - 1]?.split('#').slice(1).join('#') ?? '';
+    const fromComment = named.assumed && comment ? ttlUnitFromComment(comment, a.value as number) : null;
+    const unit = fromComment ? { ...fromComment, assumed: false } : named;
     retentionEntries.push({
       key: a.name,
       hours: roundHours((a.value as number) * unit.hoursPerUnit),
@@ -1569,7 +1660,7 @@ export function parsePythonAstFile(file: TargetRepoFile): {
     });
   }
   for (const c of py.cache_calls) {
-    if (c.ttl_seconds == null || !c.ttl_span) continue;
+    if (c.ttl_seconds == null || !c.ttl_span || !moduleHandlesPii) continue;
     if (c.ttl_refs.some((r) => ttlAssigns.some((a) => a.name === r))) continue;
     retentionEntries.push({
       key: `${c.func}@${c.lineno}`,

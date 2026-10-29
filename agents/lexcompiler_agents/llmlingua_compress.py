@@ -11,7 +11,8 @@ import sys
 
 
 def main() -> None:
-    req = json.load(sys.stdin)
+    # Bytes, not text: text-mode stdin uses the locale code page (cp1252 on Windows), not UTF-8.
+    req = json.load(sys.stdin.buffer)
     from llmlingua import PromptCompressor
 
     compressor = PromptCompressor(

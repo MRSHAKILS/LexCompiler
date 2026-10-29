@@ -40,14 +40,20 @@ function toZ3(Z3: Z3Any, e: SymExpr, strs: Map<string, number>, vars: Map<string
     case 'ite':
       return Z3.If(toZ3(Z3, e.c, strs, vars), toZ3(Z3, e.t, strs, vars), toZ3(Z3, e.e, strs, vars));
     case 'op': {
-      const a = e.args.map((x) => toZ3(Z3, x, strs, vars));
+      // Python semantics for mixed sorts (`True < 2`, `if count:`): booleans are 0/1 in
+      // arithmetic and comparisons, Int is widened to Real, and numbers are truthy when non-zero.
+      const asBool = (x: Z3Any) => (Z3.isBool(x) ? x : x.neq(Z3.isInt(x) ? Z3.Int.val(0) : Z3.Real.val('0')));
+      const asNum = (x: Z3Any) => (Z3.isBool(x) ? Z3.If(x, Z3.Real.val('1'), Z3.Real.val('0')) : x);
+      const raw = e.args.map((x) => toZ3(Z3, x, strs, vars));
+      if (e.op === 'and' || e.op === 'or' || e.op === 'not') {
+        const b = raw.map(asBool);
+        return e.op === 'and' ? Z3.And(...b) : e.op === 'or' ? Z3.Or(...b) : Z3.Not(b[0]);
+      }
+      const sameSort = raw.length < 2 || (Z3.isBool(raw[0]) && Z3.isBool(raw[1])) || (Z3.isInt(raw[0]) && Z3.isInt(raw[1])) || (Z3.isReal(raw[0]) && Z3.isReal(raw[1]));
+      const a = sameSort && !(['lt', 'le', 'gt', 'ge', 'add', 'sub', 'mul', 'div', 'neg'].includes(e.op) && Z3.isBool(raw[0]))
+        ? raw
+        : raw.map(asNum).map((x) => (Z3.isInt(x) ? Z3.ToReal(x) : x));
       switch (e.op) {
-        case 'and':
-          return Z3.And(...a);
-        case 'or':
-          return Z3.Or(...a);
-        case 'not':
-          return Z3.Not(a[0]);
         case 'eq':
           return a[0].eq(a[1]);
         case 'ne':

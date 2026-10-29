@@ -440,6 +440,35 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
   - `App.tsx` (784 lines) delegates to `AppSidebar` and `CommandBar`.
   - `IdeRemediationDrawer.tsx` (752 lines) delegates to `ide/DiffPanel`, `RuntimePanel`, `EditorPanel`, `WitnessPanel` and `PrBundlePanel`, plus the reusable `a11y/useRovingTabs` hook.
 
+### Step 34 · Real repositories at scale (L-19)
+- **Corpora:** real open-source code already on this machine, scanned read-only from copies with `LEXCOMPILER_TARGET_REPO=… npm run verify:cli`:
+  - FastAPI (44 Python files), CrewAI (512), LiteLLM (2,776);
+  - Zod and RxJS sources (707 TypeScript files);
+  - the PostgreSQL 17 distribution's SQL (200 files).
+  Recall cannot be measured without labelled ground truth; precision was judged by reading every reported location.
+- **Bugs found and fixed:**
+  - **Non-ASCII Python was silently skipped on Windows:** the analyzer read stdin in the locale code page (cp1252), so files containing emoji or accented text failed to parse (9 of CrewAI's 512). It now reads UTF-8 bytes; the LLMLingua sidecar likewise.
+  - **Prover crash on LiteLLM:** the symbolic-execution translation called `.lt` on a Z3 boolean for Python's mixed-sort comparisons (`True < 2`). Operands are now coerced with Python semantics (bool → 0/1, Int → Real, numbers truthy when non-zero).
+  - **Silent truncation:** scanning stopped at 2,000 files without saying so.
+    - The limit is now `LEXCOMPILER_MAX_SCANNED_FILES`, and `getLastRepositoryScanCoverage()` reports truncation and skipped files over 1 MiB.
+    - `verify:cli` warns about both and fails the gate when the scan was truncated, since unscanned files are not proven.
+  - **Speed:** `verify:cli` parsed Python serially through the synchronous fallback (CrewAI 164 s). It now uses the async analyzer, with at most one interpreter per core (CrewAI 17–20 s, LiteLLM 2,776 files in 238 s).
+- **Precision fixes** (LiteLLM went from 90 reported locations, mostly false, to 21):
+  - TTL names match whole tokens (`LOGIN_THROTTLE_*` contains "ttl").
+  - A unitless TTL takes its unit from its comment (`= 300  # 5 minutes` → seconds).
+  - Retention constants and cache TTLs count only when the constant or its module concerns PII, and a constant merely named `…_PII_DENYLIST` no longer marks a module as handling PII.
+  - Routed handlers count as PII endpoints only if they take PII arguments or PII models, or log PII.
+  - The explanation says "processes PII without a tenant-isolated KMS envelope" when there is no encryption call, instead of claiming a shared key.
+  - Python taint is scoped per function (it was keyed by variable name across the whole module).
+  - An opaque call's result is tainted only through its receiver, not its arguments (an HTTP response is not PII because the request contained an e-mail). This trades some recall: a custom function that echoes PII into a log is no longer followed through its return value.
+- **Results** (illustrative clauses):
+  - **Clean:** FastAPI, CrewAI, the TypeScript libraries and the PostgreSQL SQL are `SAT_COMPLIANT` with no findings; vacuous clauses are flagged for scope review.
+  - **LiteLLM**, full scan, fails on two clauses:
+    - The 3 logging findings are all genuine: `user_email` logged in plaintext in user management and SCIM provisioning.
+    - Of the 18 retention/KMS findings, about 3 hold under the clause (the shared-key encryption utility, and user/MCP-registration endpoints without tenant-isolated encryption).
+    - The remainder are key and replay caches in authentication modules whose unitless TTLs are still assumed to be hours (reported with `assumed`).
+- **Tests:** non-ASCII parsing, comment units and non-PII caches, function-scoped and call-opaque taint, scan coverage (2,001 files and a 1.2 MiB file), and mixed-sort Z3 translation through the existing symbolic suite.
+
 ---
 
 ## Part 2 — To Complete in a Local Environment
@@ -462,7 +491,7 @@ Finding IDs (S1, V2, …) refer to [`LIMITATIONS_REPORT.md`](./LIMITATIONS_REPOR
 | L-16 | **Symbolic program semantics (V3)** | — | ✅ Done (Step 16): path-sensitive symbolic execution for TypeScript and Python, Z3 counterexamples, inter-procedural taint within a module. |
 | L-17 | **More rule categories (L2)** | — | ✅ Done (Step 15). Optional local check: write a real DPIA for `services/ai_credit_triage.ts` and reference it with `DPIA_REFERENCE`. |
 | L-18 | **Multi-tenant users and projects (P1)** | No real identity provider here | Implemented (Step 17) and tested against a local OpenID provider. Remaining: register LexCompiler with your IdP (Keycloak, Entra ID, Okta, Auth0…), set `LEXCOMPILER_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_REDIRECT_URI` and the roles claim, then sign in through `/api/auth/login`. |
-| L-19 | **Full verification of real repositories at scale** | No large real-world repositories to benchmark against here | Run `LEXCOMPILER_TARGET_REPO=… npm run verify:cli` on real codebases, measure precision/recall of findings, and tune the analyzer heuristics. |
+| L-19 | **Full verification of real repositories at scale** | No large real-world repositories to benchmark against here | ✅ Done (Step 34): five real-world corpora (3,332 Python, 707 TypeScript and 200 SQL files) scanned; four bugs and seven precision issues fixed. Remaining heuristic limits are documented: assumed TTL units, and recall that cannot be measured without labelled repositories. |
 | L-20 | **Event-loop blocking (S6)** | Not reached in the cloud session | ✅ Done (Step 30): sandbox Git, Python resolution and the analyzer fallback are async on the request path. |
 | L-21 | **PII classification beyond names (A1)** | Not reached in the cloud session | ✅ Done (Step 31): PII classified from types, schemas and values across SQL, Pydantic and TypeScript, with precision/recall tests. |
 | L-22 | **Frontend accessibility and tests (U1)** | Not reached in the cloud session | ✅ Done (Step 33): jsdom tests for the dashboard, IDE drawer and agent console, keyboard/ARIA/contrast fixes, and the two largest components split. |

@@ -269,6 +269,7 @@ The workflow uploads the findings to GitHub code scanning and fails the job when
 | `PORT` | `3001` | HTTP port |
 | `LEXCOMPILER_TARGET_REPO` | bundled `target-repo/` | Repository to scan |
 | `LEXCOMPILER_TARGET_REPO_IS_FIXTURE` | unset | `1` treats the target as the demo fixture |
+| `LEXCOMPILER_MAX_SCANNED_FILES` | `2000` | Source files read from the target repository; `verify:cli` fails the gate when a scan stops at this limit |
 | `LEXCOMPILER_SANDBOX_GIT_DIR` | `data/sandbox-git` | Git directory for remediation commits |
 | `LEXCOMPILER_DATA_DIR` | `data/` | Ledger, vector store, persisted clauses, signing key |
 | `LEXCOMPILER_SIGNING_KEY_PEM` / `LEXCOMPILER_SIGNING_KEY_PATH` | generated in the data dir | Ed25519 attestation key |

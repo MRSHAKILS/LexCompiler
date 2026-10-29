@@ -452,7 +452,9 @@ function planClause(
             {
               name: `inv_${inst.key}_tenant_kms_envelope`,
               expr: Z3.Implies(sKms, kms.eq(true)),
-              explanation: `'${f.functionName}' encrypts PII with a shared key instead of a tenant-isolated KMS envelope.`,
+              explanation: f.metadata.encryptsPii
+                ? `'${f.functionName}' encrypts PII with a shared key instead of a tenant-isolated KMS envelope.`
+                : `'${f.functionName}' processes PII without a tenant-isolated KMS envelope (no encryption call found).`,
               remediation: 'Call encrypt_with_tenant_kms(..., tenant_id=...) and enable the tenant KMS flag',
               repair: {
                 z3Variable: `${inst.key}__tenant_kms`,
