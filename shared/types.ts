@@ -501,9 +501,8 @@ export interface McpServerDescriptor {
   name: string;
   role: 'BUILT_CUSTOM' | 'INTEGRATED_EXTERNAL';
   version: string;
-  transports: Array<'stdio' | 'sse' | 'streamable-http'>;
+  transports: Array<'stdio' | 'streamable-http'>;
   endpointUrl: string;
-  sseEndpointUrl: string;
   stdioCommand: string;
   status: 'ONLINE' | 'READY';
   description: string;
@@ -517,7 +516,7 @@ export interface McpToolInvocationResult {
   invocationId: string;
   serverId: string;
   toolName: string;
-  transportUsed: 'streamable-http' | 'sse' | 'stdio';
+  transportUsed: 'streamable-http' | 'stdio';
   latencyMs: number;
   jsonRpcRequest: {
     jsonrpc: '2.0';
@@ -613,9 +612,14 @@ export interface AgentExecutionStep {
   stepNumber: number;
   agentId: string;
   agentName: string;
-  frameworkUsed: 'LangGraph' | 'CrewAI' | 'DSPy' | 'Pydantic-AI' | 'Hermes-ToolCall' | 'OpenAI-Swarm';
+  /** What ran the step: "LexCompiler agent runtime" when a model is configured, otherwise "None (direct tool call)". */
+  frameworkUsed: string;
+  /** The model that ran, or "No model: direct tool call". */
   llmModel: string;
-  runtime: 'Cloud-Frontier' | 'Ollama-Local-GGUF';
+  /** Where the model ran: a cloud API, a server on this machine (Ollama, vLLM), or no model. */
+  runtime: 'cloud' | 'local' | 'none';
+  /** Framework of the agent's optional Python adapter (agents/lexcompiler_agents); not used by this pipeline. */
+  pythonAdapter?: string;
   mcpServerCalled: string;
   mcpToolCalled: string;
   inputTokensRaw: number;

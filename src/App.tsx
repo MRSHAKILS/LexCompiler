@@ -9,7 +9,7 @@ import { IdeRemediationDrawer } from './components/IdeRemediationDrawer';
 import { LegalCompilerPane } from './components/LegalCompilerPane';
 import { LiveDocsAndRubricView } from './components/LiveDocsAndRubricView';
 import { LiveMultiLlmMeshStudio } from './components/LiveMultiLlmMeshStudio';
-import { McpAndAgentsHub } from './components/McpAndAgentsHub';
+import { McpAndAgentsHub, type ExternalMcpServerStatus } from './components/McpAndAgentsHub';
 import { TokenAndDataLifecycleLab } from './components/TokenAndDataLifecycleLab';
 import { feedItemToClauseRequest } from './feedIngest';
 import type {
@@ -54,6 +54,7 @@ export function App() {
   const [report, setReport] = useState<FullComplianceScanReport | null>(null);
   const [liveFeedItems, setLiveFeedItems] = useState<LiveRegulatoryFeedItem[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerDescriptor[]>([]);
+  const [externalMcpServers, setExternalMcpServers] = useState<ExternalMcpServerStatus[]>([]);
   const [multiAgentReport, setMultiAgentReport] = useState<MultiAgentPipelineReport | null>(
     null
   );
@@ -145,6 +146,7 @@ export function App() {
       if (aiHeavyRes.ok) {
         const aiData = await aiHeavyRes.json();
         setMcpServers(aiData.mcpServers || []);
+        setExternalMcpServers(aiData.externalMcpServers || []);
         setMultiAgentReport(aiData.multiAgentReport || null);
         setTokenBenchmark(aiData.tokenBenchmark || null);
         setDefaultRagReport(aiData.defaultRagReport || null);
@@ -557,6 +559,7 @@ export function App() {
           <main className="flex-1 overflow-y-auto">
             <McpAndAgentsHub
               mcpServers={mcpServers}
+              externalMcpServers={externalMcpServers}
               multiAgentReport={multiAgentReport}
               onRefreshAgents={fetchAllTelemetry}
             />

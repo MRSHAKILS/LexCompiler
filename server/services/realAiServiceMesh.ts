@@ -211,68 +211,62 @@ export async function getInstalledOllamaModels(): Promise<InstalledOllamaModel[]
   }
 }
 
+/** Ollama embedding model for RAG; `none` turns neural embeddings off (feature hashing is used). */
+export function embeddingModel(env: NodeJS.ProcessEnv = process.env): string | null {
+  const m = (env.LEXCOMPILER_EMBEDDING_MODEL ?? 'all-minilm:latest').trim();
+  return m && m !== 'none' ? m : null;
+}
+
 /**
- * Computes a real 384-dimensional neural vector embedding using Ollama's `all-minilm:latest`
- * Sentence-Transformer model (`POST http://localhost:11434/api/embeddings`).
+ * Embeds text with an Ollama embedding model (default `all-minilm:latest`, 384 dimensions)
+ * through `POST /api/embed` with `truncate: true`: text longer than the model's context
+ * (512 tokens for all-minilm) is cut to fit instead of failing. Vectors are cached in memory
+ * and SQLite, keyed by model and text. An empty embedding means the model did not answer.
  */
 export async function computeRealNeuralEmbedding(text: string): Promise<{
   embedding: number[];
   modelUsed: string;
   latencyMs: number;
   fromCache: boolean;
+  error?: string;
 }> {
-  const hash = sha256Hex(text);
+  const model = embeddingModel();
+  if (!model) return { embedding: [], modelUsed: 'none', latencyMs: 0, fromCache: false, error: 'LEXCOMPILER_EMBEDDING_MODEL is none' };
+  // The label is the same for cached and fresh vectors: it names the embedding space.
+  const label = `${model} (Ollama)`;
+  const hash = sha256Hex(`${model}\n${text}`);
   const cached = neuralEmbeddingCache.get(hash) || loadStoredEmbedding(hash);
   if (cached) {
     neuralEmbeddingCache.set(hash, cached);
-    return {
-      embedding: cached,
-      modelUsed: 'all-minilm:latest (Ollama 384-d Neural Cache)',
-      latencyMs: 0.1,
-      fromCache: true,
-    };
+    return { embedding: cached, modelUsed: label, latencyMs: 0, fromCache: true };
   }
 
   const t0 = performance.now();
+  let error = 'no embedding returned';
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3500);
-    const resp = await fetch(`${OLLAMA_BASE_URL}/api/embeddings`, {
+    const resp = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'all-minilm:latest',
-        prompt: text.slice(0, 1200),
-      }),
-      signal: controller.signal,
+      body: JSON.stringify({ model, input: text, truncate: true }),
+      // The first call after Ollama starts loads the model, which can take several seconds.
+      signal: AbortSignal.timeout(Number(process.env.LEXCOMPILER_EMBEDDING_TIMEOUT_MS) || 15_000),
     });
-    clearTimeout(timer);
-
     if (resp.ok) {
-      const data = (await resp.json()) as { embedding?: number[] };
-      if (data.embedding && data.embedding.length > 0) {
-        const rounded = data.embedding.map((v) => Math.round(v * 10000) / 10000);
+      const data = (await resp.json()) as { embeddings?: number[][] };
+      const vector = data.embeddings?.[0];
+      if (vector && vector.length > 0) {
+        const rounded = vector.map((v) => Math.round(v * 10000) / 10000);
         neuralEmbeddingCache.set(hash, rounded);
-        storeEmbedding(hash, 'all-minilm:latest', rounded);
-        const latencyMs = Math.round((performance.now() - t0) * 100) / 100;
-        return {
-          embedding: rounded,
-          modelUsed: 'all-minilm:latest (Ollama 384-d Sentence-Transformer)',
-          latencyMs,
-          fromCache: false,
-        };
+        storeEmbedding(hash, model, rounded);
+        return { embedding: rounded, modelUsed: label, latencyMs: Math.round((performance.now() - t0) * 100) / 100, fromCache: false };
       }
+    } else {
+      error = `Ollama returned HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`;
     }
-  } catch {
-    // fallback if ollama unreachable
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err);
   }
-
-  return {
-    embedding: [],
-    modelUsed: 'fallback-lexical',
-    latencyMs: 0.5,
-    fromCache: false,
-  };
+  return { embedding: [], modelUsed: label, latencyMs: Math.round((performance.now() - t0) * 100) / 100, fromCache: false, error };
 }
 
 /**
@@ -493,11 +487,11 @@ export async function getLiveServiceMeshTelemetry(): Promise<{
       serviceId: 'svc-mcp-protocol-mesh',
       name: 'Model Context Protocol (MCP) JSON-RPC 2.0 Mesh',
       category: 'MCP_MESH',
-      endpointOrPath: '/api/mcp/:serverId/rpc + /sse + stdio',
+      endpointOrPath: '/api/mcp/:serverId/rpc + stdio',
       status: 'ONLINE',
       latencyMs: 0.9,
       telemetrySummary: await mcpCatalogSummary(),
-      details: { transports: ['streamable-http', 'sse', 'stdio'] },
+      details: { transports: ['streamable-http', 'stdio'] },
     },
     {
       serviceId: 'svc-regulatory-apis',

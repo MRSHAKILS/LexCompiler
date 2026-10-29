@@ -10,7 +10,7 @@ import {
   sha256Hex,
 } from '../compiler/legalCompiler.js';
 import { verifyRepositoryAgainstClauses } from '../prover/z3Engine.js';
-import { executeStoreBackedRagQuery } from '../rag/hybridRagEngine.js';
+import { executeNeuralRetrieval } from '../rag/hybridRagEngine.js';
 import { synthesizeRemediationPullRequest } from '../remediation/prSynthesizer.js';
 import type {
   LegalClause,
@@ -29,9 +29,8 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       name: 'LexStatute Ingest & Horizon Scanner MCP',
       role: 'BUILT_CUSTOM',
       version: '2.4.0',
-      transports: ['stdio', 'sse', 'streamable-http'],
+      transports: ['stdio', 'streamable-http'],
       endpointUrl: '/api/mcp/lex-statute-ingest-mcp/rpc',
-      sseEndpointUrl: '/api/mcp/lex-statute-ingest-mcp/sse',
       stdioCommand: 'npx tsx server/mcp/stdio-server.ts lex-statute-ingest-mcp',
       status: 'ONLINE',
       description:
@@ -72,9 +71,8 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       name: 'LexDeontic Neuro-Symbolic Compiler MCP',
       role: 'BUILT_CUSTOM',
       version: '2.4.0',
-      transports: ['stdio', 'sse', 'streamable-http'],
+      transports: ['stdio', 'streamable-http'],
       endpointUrl: '/api/mcp/lex-deontic-compiler-mcp/rpc',
-      sseEndpointUrl: '/api/mcp/lex-deontic-compiler-mcp/sse',
       stdioCommand: 'npx tsx server/mcp/stdio-server.ts lex-deontic-compiler-mcp',
       status: 'ONLINE',
       description:
@@ -106,9 +104,8 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       name: 'LexAST Polyglot Code & SQL Schema Mapper MCP',
       role: 'BUILT_CUSTOM',
       version: '2.4.0',
-      transports: ['stdio', 'sse', 'streamable-http'],
+      transports: ['stdio', 'streamable-http'],
       endpointUrl: '/api/mcp/lex-polyglot-ast-mcp/rpc',
-      sseEndpointUrl: '/api/mcp/lex-polyglot-ast-mcp/sse',
       stdioCommand: 'npx tsx server/mcp/stdio-server.ts lex-polyglot-ast-mcp',
       status: 'ONLINE',
       description:
@@ -132,9 +129,8 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       name: 'LexZ3 Formal Theorem Prover & Attestation MCP',
       role: 'BUILT_CUSTOM',
       version: '2.4.0',
-      transports: ['stdio', 'sse', 'streamable-http'],
+      transports: ['stdio', 'streamable-http'],
       endpointUrl: '/api/mcp/lex-z3-prover-mcp/rpc',
-      sseEndpointUrl: '/api/mcp/lex-z3-prover-mcp/sse',
       stdioCommand: 'npx tsx server/mcp/stdio-server.ts lex-z3-prover-mcp',
       status: 'ONLINE',
       description:
@@ -158,9 +154,8 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       name: 'LexRAG Contextual + Graph RAG & CRAG MCP',
       role: 'BUILT_CUSTOM',
       version: '2.4.0',
-      transports: ['stdio', 'sse', 'streamable-http'],
+      transports: ['stdio', 'streamable-http'],
       endpointUrl: '/api/mcp/lex-hybrid-rag-mcp/rpc',
-      sseEndpointUrl: '/api/mcp/lex-hybrid-rag-mcp/sse',
       stdioCommand: 'npx tsx server/mcp/stdio-server.ts lex-hybrid-rag-mcp',
       status: 'ONLINE',
       description:
@@ -190,9 +185,8 @@ export function getMcpServersCatalog(): McpServerDescriptor[] {
       name: 'LexPR Autonomous Patch Synthesizer & n8n Enforcer MCP',
       role: 'BUILT_CUSTOM',
       version: '2.4.0',
-      transports: ['stdio', 'sse', 'streamable-http'],
+      transports: ['stdio', 'streamable-http'],
       endpointUrl: '/api/mcp/lex-remediation-pr-mcp/rpc',
-      sseEndpointUrl: '/api/mcp/lex-remediation-pr-mcp/sse',
       stdioCommand: 'npx tsx server/mcp/stdio-server.ts lex-remediation-pr-mcp',
       status: 'ONLINE',
       description:
@@ -332,7 +326,7 @@ export async function executeMcpTool(
       const { sqlTables, astFindings } = await repo();
       const verification = await verifyRepositoryAgainstClauses(clauses, sqlTables, astFindings);
       const topK = typeof args.topK === 'number' ? args.topK : 4;
-      return { ...(await executeStoreBackedRagQuery(String(args.query), clauses, sqlTables, astFindings, verification.proofs, topK)) };
+      return { ...(await executeNeuralRetrieval(String(args.query), clauses, sqlTables, astFindings, verification.proofs, topK)) };
     }
     case 'synthesize_and_verify_remediation_pr': {
       const { sqlTables, astFindings, enrichedFiles } = await repo();

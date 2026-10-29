@@ -246,57 +246,59 @@ app.get('/api/regulations/live-feed', async (_req, res) => {
 // 6+ MCP SERVERS CONTROL PLANE (JSON-RPC 2.0 + SSE + STDIO)
 // ============================================================================
 
-app.get('/api/mcp/servers', async (_req, res) => {
+/** External MCP servers: the suggested ones (NOT_CONFIGURED unless they answer) plus any in mcp-servers.json. */
+async function externalMcpServerStatus() {
   // External servers count as integrated only when they answer initialize + tools/list.
   const live = await probeExternalMcpServers();
-  const withStatus = <T extends { id: string }>(entries: T[]) => [
-    ...entries.map((e) => {
+  const suggested = [
+    {
+      id: 'postgres-pgvector-mcp',
+      name: 'PostgreSQL + pgvector Schema & Vector Store MCP',
+      transport: 'stdio / sse',
+      purpose: 'Live DDL introspection and HNSW vector similarity queries over statutory embeddings',
+    },
+    {
+      id: 'neo4j-cypher-mcp',
+      name: 'Neo4j Knowledge Graph & Blast-Radius Cypher MCP',
+      transport: 'streamable-http',
+      purpose: '2-hop Graph RAG traversal linking GDPR/HIPAA clauses to AST nodes and SQL columns',
+    },
+    {
+      id: 'github-git-mcp',
+      name: 'GitHub Repository & Pull Request Automation MCP',
+      transport: 'streamable-http',
+      purpose: 'Creates remediation branches, commits Z3-verified patches, and opens pull requests',
+    },
+    {
+      id: 'filesystem-sandbox-mcp',
+      name: 'Ephemeral Git Sandbox Filesystem MCP',
+      transport: 'stdio',
+      purpose: 'Reads and writes polyglot source files in isolated verification worktrees',
+    },
+    {
+      id: 'duckdb-lakehouse-mcp',
+      name: 'DuckDB / Apache Iceberg Compliance Ledger MCP',
+      transport: 'stdio',
+      purpose: 'Stores immutable Parquet/JSONL OpenLineage compliance telemetry and Z3 proof timings',
+    },
+    {
+      id: 'n8n-webhook-bridge-mcp',
+      name: 'n8n & Temporal Workflow Trigger MCP',
+      transport: 'streamable-http / sse',
+      purpose: 'Dispatches real-time regulatory shockwave alerts and CI/CD compliance gates',
+    },
+  ];
+  return [
+    ...suggested.map((e) => {
       const st = live.find((l) => l.id === e.id);
       return { ...e, status: st ? st.status : 'NOT_CONFIGURED', ...(st ? { liveTools: st.tools, serverInfo: st.serverInfo, error: st.error } : {}) };
     }),
-    ...live.filter((l) => !entries.some((e) => e.id === l.id)).map((l) => ({ id: l.id, name: l.serverInfo?.name || l.id, transport: l.transport, purpose: 'Configured in mcp-servers.json', status: l.status, liveTools: l.tools, serverInfo: l.serverInfo, error: l.error })),
+    ...live.filter((l) => !suggested.some((e) => e.id === l.id)).map((l) => ({ id: l.id, name: l.serverInfo?.name || l.id, transport: l.transport, purpose: 'Configured in mcp-servers.json', status: l.status, liveTools: l.tools, serverInfo: l.serverInfo, error: l.error })),
   ];
-  res.json({
-    servers: getMcpServersCatalog(),
-    integratedExternalMcpServers: withStatus([
-      {
-        id: 'postgres-pgvector-mcp',
-        name: 'PostgreSQL + pgvector Schema & Vector Store MCP',
-        transport: 'stdio / sse',
-        purpose: 'Live DDL introspection and HNSW vector similarity queries over statutory embeddings',
-      },
-      {
-        id: 'neo4j-cypher-mcp',
-        name: 'Neo4j Knowledge Graph & Blast-Radius Cypher MCP',
-        transport: 'streamable-http',
-        purpose: '2-hop Graph RAG traversal linking GDPR/HIPAA clauses to AST nodes and SQL columns',
-      },
-      {
-        id: 'github-git-mcp',
-        name: 'GitHub Repository & Pull Request Automation MCP',
-        transport: 'streamable-http',
-        purpose: 'Creates remediation branches, commits AST-verified patches, and opens PR #409',
-      },
-      {
-        id: 'filesystem-sandbox-mcp',
-        name: 'Ephemeral Git Sandbox Filesystem MCP',
-        transport: 'stdio',
-        purpose: 'Reads and writes polyglot source files in isolated verification worktrees',
-      },
-      {
-        id: 'duckdb-lakehouse-mcp',
-        name: 'DuckDB / Apache Iceberg Compliance Ledger MCP',
-        transport: 'stdio',
-        purpose: 'Stores immutable Parquet/JSONL OpenLineage compliance telemetry and Z3 proof timings',
-      },
-      {
-        id: 'n8n-webhook-bridge-mcp',
-        name: 'n8n & Temporal Workflow Trigger MCP',
-        transport: 'streamable-http / sse',
-        purpose: 'Dispatches real-time regulatory shockwave alerts and CI/CD compliance gates',
-      },
-    ]),
-  });
+}
+
+app.get('/api/mcp/servers', async (_req, res) => {
+  res.json({ servers: getMcpServersCatalog(), integratedExternalMcpServers: await externalMcpServerStatus() });
 });
 
 /** Calls a tool on a configured external MCP server. */
@@ -425,6 +427,7 @@ app.get('/api/ai-heavy/overview', async (_req, res) => {
 
     res.json({
       mcpServers: getMcpServersCatalog(),
+      externalMcpServers: await externalMcpServerStatus(),
       multiAgentReport,
       tokenBenchmark,
       defaultRagReport,
@@ -487,7 +490,7 @@ app.get('/api/workflows/n8n-export', (_req, res) => {
       },
       {
         id: '3',
-        name: 'MCP Tool: lex-deontic-compiler-mcp (Claude 3.7 + DeepSeek-R1)',
+        name: 'MCP Tool: lex-deontic-compiler-mcp',
         type: '@n8n/n8n-nodes-langchain.mcpClientTool',
         parameters: {
           serverUrl: 'http://localhost:3001/api/mcp/lex-deontic-compiler-mcp/rpc',
@@ -505,7 +508,7 @@ app.get('/api/workflows/n8n-export', (_req, res) => {
       },
       {
         id: '5',
-        name: 'MCP Tool: lex-remediation-pr-mcp (Auto-PR #409 Enforcer)',
+        name: 'MCP Tool: lex-remediation-pr-mcp (Z3-gated fix bundle)',
         type: '@n8n/n8n-nodes-langchain.mcpClientTool',
         parameters: {
           serverUrl: 'http://localhost:3001/api/mcp/lex-remediation-pr-mcp/rpc',

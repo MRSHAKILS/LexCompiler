@@ -381,7 +381,9 @@ function hybridRetrieve(
   const qVec = computeSemanticEmbedding(queryText);
   const dense = new Map<string, number>();
   for (const c of chunks) {
-    dense.set(c.chunkId, options.denseScores?.get(c.chunkId) ?? cosineSimilarity(qVec, computeSemanticEmbedding(c.contextualizedText)));
+    // With store-backed vectors, a chunk that has none (its embedding failed) gets no dense
+    // score; mixing in a feature-hashing cosine would compare scores from two vector spaces.
+    dense.set(c.chunkId, options.denseScores ? (options.denseScores.get(c.chunkId) ?? 0) : cosineSimilarity(qVec, computeSemanticEmbedding(c.contextualizedText)));
   }
 
   // BM25 (k1 = 1.5, b = 0.75) with document frequencies over token sets
@@ -472,15 +474,16 @@ function hybridRetrieve(
     originalQuery: query,
     hydeHypotheticalFormalQuery: hyde,
     rewrittenDeonticQuery,
+    // Only the steps that ran on this query, named for what they do here.
     techniquesExecuted: [
-      'Contextual RAG (Anthropic-style Prefix Prepending)',
-      'Variable / Semantic Proposition Chunking',
-      'Late Chunking (AST Subtree Preservation)',
-      'Query Rewriting & HyDE Formal Predicate Expansion',
-      'Hybrid Search (Dense Vector Cosine + Sparse BM25)',
-      'Graph RAG (2-Hop Statute-to-AST Knowledge Graph Boost)',
-      'Cross-Encoder Reranker (BGE-Reranker-Large equivalent)',
-      'Corrective RAG (CRAG) + Self-RAG Faithfulness Gate',
+      'Chunks per clause, SQL table, code construct and Z3 proof, each with a template prefix naming its source',
+      `Query expanded with the matching clause's SMT text (category ${category})`,
+      `Dense retrieval: ${options.denseBackend || '384-d feature hashing'}`,
+      'BM25 keyword search (k1 = 1.5, b = 0.75)',
+      `Graph walk, up to 2 hops: ${options.graphDbBackend || 'in-memory graph'}`,
+      'Reciprocal rank fusion of the three rankings (k = 60)',
+      ...(options.rerankBackend ? [`Cross-encoder rerank: ${options.rerankBackend}`] : []),
+      'Confidence label per chunk: a BM25 hit or cosine ≥ 0.25',
     ],
     latencyMs: Math.max(0.1, Math.round((performance.now() - t0) * 100) / 100),
     retrievedChunks: topRetrieved,
@@ -546,11 +549,26 @@ export async function executeStoreBackedRagQuery(
   const t0 = performance.now();
   const { chunks, triples } = buildContextualRagCorpus(clauses, sqlTables, astFindings, proofs);
   const { category, hyde } = categoryHyde(query, clauses);
-  const embed = deps.embed || (async (text: string) => ({ embedding: computeSemanticEmbedding(text), model: '384-d feature hashing' }));
+  const hashing = async (text: string) => ({ embedding: computeSemanticEmbedding(text), model: '384-d feature hashing' });
+  let embed = deps.embed || hashing;
 
-  const queryVec = await embed(`${query} ${hyde}`);
+  let queryVec = await embed(`${query} ${hyde}`);
+  if (queryVec.embedding.length === 0) {
+    // The embedding model stopped answering before the query was embedded: rank with hashing.
+    embed = hashing;
+    queryVec = await embed(`${query} ${hyde}`);
+  }
   const records = [];
-  for (const c of chunks) records.push({ id: c.chunkId, text: c.contextualizedText, embedding: (await embed(c.contextualizedText)).embedding });
+  let unembedded = 0;
+  for (const c of chunks) {
+    const e = await embed(c.contextualizedText);
+    // A chunk the model could not embed keeps its BM25 and graph scores; only its dense score is lost.
+    if (e.embedding.length !== queryVec.embedding.length) {
+      unembedded++;
+      continue;
+    }
+    records.push({ id: c.chunkId, text: c.contextualizedText, embedding: e.embedding });
+  }
   const vectorStore = deps.vectorStore || (await getVectorStore(queryVec.model, queryVec.embedding.length));
   await vectorStore.sync(records);
   const denseScores = await vectorStore.search(queryVec.embedding, chunks.length);
@@ -564,7 +582,7 @@ export async function executeStoreBackedRagQuery(
 
   const options: RetrievalOptions = {
     denseScores,
-    denseBackend: queryVec.model,
+    denseBackend: unembedded > 0 ? `${queryVec.model}; ${unembedded} of ${chunks.length} chunks not embedded` : queryVec.model,
     vectorDbBackend: vectorStore.backend,
     entityDistances,
     graphDbBackend: graphStore.backend,
@@ -583,10 +601,30 @@ export async function executeStoreBackedRagQuery(
 }
 
 /**
- * Same pipeline with neural dense retrieval: when Ollama `all-minilm` is reachable,
- * every chunk and the query are embedded (cached by content hash) and those cosine
- * scores drive the dense ranking; a local LLM then writes a grounded answer.
+ * Store-backed retrieval with neural dense vectors when the Ollama embedding model answers
+ * (LEXCOMPILER_EMBEDDING_MODEL, default all-minilm), otherwise 384-d feature hashing. The
+ * HTTP endpoint and the MCP tool both use this, so they rank the same way.
  */
+export async function executeNeuralRetrieval(
+  query: string,
+  clauses: LegalClause[],
+  sqlTables: SQLTableSchema[],
+  astFindings: ASTFindingNode[],
+  proofs: ClauseVerificationProof[],
+  topK = 5
+): Promise<RagQueryExecutionReport> {
+  const probe = await computeRealNeuralEmbedding(query);
+  const embed =
+    probe.embedding.length > 0
+      ? async (text: string) => {
+          const e = await computeRealNeuralEmbedding(text);
+          return { embedding: e.embedding, model: probe.modelUsed };
+        }
+      : undefined;
+  return executeStoreBackedRagQuery(query, clauses, sqlTables, astFindings, proofs, topK, { embed });
+}
+
+/** Neural retrieval, then a local LLM writes a short grounded answer. */
 export async function executeRealNeuralRagQuery(
   query: string,
   clauses: LegalClause[],
@@ -596,16 +634,7 @@ export async function executeRealNeuralRagQuery(
   topK = 5
 ): Promise<RagQueryExecutionReport> {
   const t0 = performance.now();
-  const probe = await computeRealNeuralEmbedding(query);
-  const embed =
-    probe.embedding.length > 0
-      ? async (text: string) => {
-          const e = await computeRealNeuralEmbedding(text);
-          if (e.embedding.length === 0) throw new Error(`Embedding model ${probe.modelUsed} stopped answering`);
-          return { embedding: e.embedding, model: probe.modelUsed };
-        }
-      : undefined;
-  const report = await executeStoreBackedRagQuery(query, clauses, sqlTables, astFindings, proofs, topK, { embed });
+  const report = await executeNeuralRetrieval(query, clauses, sqlTables, astFindings, proofs, topK);
 
   const contextBlock = report.retrievedChunks
     .slice(0, 3)
