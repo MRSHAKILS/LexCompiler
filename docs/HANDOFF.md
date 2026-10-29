@@ -25,7 +25,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | Phase | Status |
 |---|---|
 | 0–2 | Done, tested live on GitHub |
-| 2a AI foundation | Mostly done. Left: a larger RAG eval set (Bangla questions, a set for the test repo) |
+| 2a AI foundation | Done. RAG eval now has a Bangla set and a set for the test repo (see Evals) |
 | 3 Lawyer's workspace | Next. The rule API exists; the screens don't |
 | 4 Fixes and exceptions | Not started. The `exceptions` table exists, nothing writes to it |
 | 4a MCP for coding assistants | Not started. The six demo MCP servers work |
@@ -86,6 +86,9 @@ npm run eval:extract                       # parser only, no model
 npm run eval:extract -- --model local      # LEXCOMPILER_LOCAL_LLM_MODEL on Ollama
 npm run eval:extract -- --model cloud      # needs LEXCOMPILER_LLM_MODEL (or OPENAI_API_KEY)
 npm run eval:rag                           # 16 questions on the bundled fixture
+npm run eval:rag -- --dataset bn           # 10 Bangla questions, Bangla clause set (MRR 0.95, nDCG@5 0.60)
+LEXCOMPILER_TARGET_REPO=<finhealth-core-platform clone on feat/loan-applications> \
+  npm run eval:rag -- --dataset finhealth  # 8 questions (MRR 0.66, nDCG@5 0.45; fh02 'loan applicant fields' misses)
 ```
 
 ## Next steps, in order
@@ -95,7 +98,7 @@ Dates are from the schedule in the product guide, section 7.
 1. **Owner decisions** (blocking AI drafting):
    - Pick the cloud model provider, put its key in `.env`, and run `npm run eval:extract -- --model cloud`.
    - Decide whether to restore PR #15's files (below).
-2. **Finish 2a.** Add Bangla questions to `server/rag/eval/dataset.json`, and a second set for `finhealth-core-platform`.
+2. ~~**Finish 2a.**~~ Done: `dataset.bn.json` and `dataset.finhealth.json`. Retrieval misses the loan applicant model for "what personal data does the model collect" (fh02); improve chunk text for `PII_COLLECTION_MODEL` before Phase 3 relies on it.
 3. **Phase 3, the lawyer's workspace** (Nov 9–22). Guide: Phase 3 and 5.4.
    - Upload PDF, DOCX or text (`pdfjs-dist`, `mammoth`), split clauses, mark normative ones.
    - Rule card on the existing rules API: highlighted source, category, values, scope, effective date, questions. Fill values with `checkParserOnly` and, when the workspace has AI on, with the gateway and `checkExtraction`.
