@@ -6,14 +6,13 @@ import { readRepositoryFilesAt } from '../analyzer/repoBaseline.js';
 import { AiGateway, localModelConfig, modelForTask } from '../ai/gateway.js';
 import { OidcProvider, type Principal } from '../auth/oidc.js';
 import { tokensMatch, type Authenticator } from '../security.js';
-import { lexcompilerVersion } from '../util/versions.js';
 import type { EvidenceRecorder } from '../evidence/records.js';
+import type { TargetRepoFile } from '../../shared/types.js';
+import { scanLocalRepo, storeComingUp } from './repoScan.js';
 import type { RuleCategory } from '../../shared/types.js';
 import { compileClause, isRuleCategory, libraryTemplates, RULE_CATEGORIES } from './clauses.js';
 import { DocumentError, extractDocumentText, looksLikeLegacyBangla, MAX_DOCUMENT_BYTES, splitClauses } from './documents.js';
 import { buildRuleCard, CATEGORY_LABELS, cleanOverrides, impactPreview, type RuleCard } from './ruleCard.js';
-import { classifyFindings, scanFiles } from './scanner.js';
-import { scanConclusion, summarizeFindings } from './summary.js';
 import { can, ProductStore, StoreError, WORKSPACE_ROLES, type ExceptionRecord, type ExceptionStatus, type Permission, type Repo, type RuleScope, type RuleVersion, type User, type WorkspaceRole } from './store.js';
 
 /** Bearer API token (admin), OIDC bearer JWT, or OIDC session cookie. */
@@ -59,6 +58,10 @@ export interface ProductRouterOptions {
   evidence?: EvidenceRecorder;
   /** Where share links point (default http://localhost:3001). */
   publicUrl?: string;
+  /** Reads a GitHub repository's files at a commit, to refresh "Coming up" on demand. */
+  readRepoFiles?: (repo: Repo, commitSha: string) => Promise<TargetRepoFile[]>;
+  /** Fetches the regulation feed and stores new items; returns how many were new. */
+  refreshFeed?: () => Promise<number>;
 }
 
 const EXCEPTION_STATUSES: ExceptionStatus[] = ['requested', 'approved', 'rejected', 'expired', 'revoked'];
@@ -250,6 +253,30 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
     need('createShares'),
     handle((req, res) => res.status(201).json(store.createCounterparty(wid(req), String(req.body?.name || ''))))
   );
+  /**
+   * The repositories and path globs that handle a counterparty's data: { scope: [{ repoId, pathGlob }] }.
+   * Rules scoped to the counterparty are proven only on these paths.
+   */
+  r.post(
+    '/workspaces/:workspaceId/counterparties/:counterpartyId/scope',
+    need('editRules'),
+    handle((req, res) => {
+      const raw = Array.isArray(req.body?.scope) ? (req.body.scope as Array<Record<string, unknown>>) : null;
+      if (!raw) throw new StoreError('scope must be a list of { repoId, pathGlob }');
+      const repos = new Set(store.listRepos(wid(req)).map((r) => r.id));
+      const scope = raw.map((s) => {
+        const repoId = String(s.repoId ?? '');
+        const pathGlob = String(s.pathGlob ?? '').trim().replace(/^\/+/, '') || '**';
+        if (!repos.has(repoId)) throw new StoreError(`unknown repository ${repoId}`, 404);
+        if (pathGlob.includes('..')) throw new StoreError(`"${pathGlob}" is not a path glob inside the repository`);
+        return { repoId, pathGlob };
+      });
+      store.setCounterpartyScope(wid(req), String(req.params.counterpartyId), scope);
+      const cp = store.listCounterparties(wid(req)).find((c) => c.id === String(req.params.counterpartyId));
+      if (!cp) throw new StoreError('unknown counterparty', 404);
+      res.json(cp);
+    })
+  );
 
   // ---------------------------------------------------------------- rules
 
@@ -370,11 +397,11 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
 
   r.get('/library/templates', (_req, res) => res.json(libraryTemplates()));
   r.get('/workspaces/:workspaceId/rules', need('view'), (req, res) => res.json(store.listRules(wid(req))));
-  r.post(
-    '/workspaces/:workspaceId/rules',
-    need('editRules'),
-    handle(async (req, res) => {
-      const text = String(req.body?.rawLegalText || '').trim();
+  /**
+   * A draft from clause text: a new rule, or a new version of `ruleId`. Body fields (title,
+   * citation, category, values, scope, documentId) come from the request.
+   */
+  const draftFromText = async (req: Request, res: Response, text: string, documentIdOverride?: string) => {
       if (!text) throw new StoreError('rawLegalText is required');
       if (text.length > 20000) throw new StoreError('rawLegalText is too long (max 20000 characters)');
       const ruleId = req.body?.ruleId ? String(req.body.ruleId) : undefined;
@@ -384,7 +411,7 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
       const title = String(req.body?.title || existing?.title || '').trim();
       const category = req.body?.category;
       if (category !== undefined && !isRuleCategory(category)) throw new StoreError(`category must be one of ${RULE_CATEGORIES.join(', ')}`);
-      const documentId = req.body?.documentId ? String(req.body.documentId) : null;
+      const documentId = documentIdOverride ?? (req.body?.documentId ? String(req.body.documentId) : null);
       if (documentId && !store.getDocument(wid(req), documentId)) throw new StoreError('unknown document', 404);
       // Without card values the clause is the parser's compile, as before; the card records
       // what Legal saw and set.
@@ -409,9 +436,27 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
         card: storedCard(card),
         createdBy: userOf(res).id,
       });
-      res.status(201).json(created);
+      return created;
+  };
+  r.post(
+    '/workspaces/:workspaceId/rules',
+    need('editRules'),
+    handle(async (req, res) => {
+      res.status(201).json(await draftFromText(req, res, String(req.body?.rawLegalText || '').trim()));
     })
   );
+
+  /** Recomputes "Coming up" for the workspace's repositories (local folders, and GitHub at the last scanned commit). */
+  const refreshComingUp = async (workspaceId: string) => {
+    for (const repo of store.listRepos(workspaceId)) {
+      if (repo.source === 'local' && repo.localPath) {
+        await storeComingUp(store, repo, 'working-tree', readRepositoryFilesAt(repo.localPath));
+      } else if (options.readRepoFiles) {
+        const latest = store.latestBranchScan(repo.id);
+        if (latest) await storeComingUp(store, repo, latest.commitSha, await options.readRepoFiles(repo, latest.commitSha));
+      }
+    }
+  };
   r.post(
     '/workspaces/:workspaceId/rule-versions/:versionId/approve',
     need('editRules'),
@@ -429,6 +474,8 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
         note: req.body?.note ? String(req.body.note).slice(0, 2000) : undefined,
       });
       const evidence = await options.evidence?.ruleApproved(wid(req), version);
+      // A version that takes effect later shows in "Coming up" right away.
+      if ((version.effectiveFrom ?? '') > new Date().toISOString()) await refreshComingUp(wid(req));
       // Rescan main of every repository in scope, so the rule's failures show within a minute.
       const queuedScans: Array<{ repoId: string; jobId: string | null }> = [];
       if (options.enqueueBranchScan) {
@@ -444,6 +491,51 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
     '/workspaces/:workspaceId/rule-versions/:versionId/reject',
     need('editRules'),
     handle((req, res) => res.json(store.rejectRuleVersion(wid(req), String(req.params.versionId), userOf(res).id, String(req.body?.note || ''))))
+  );
+  /**
+   * Moves the effective date of an approved version that isn't in effect yet: { effectiveFrom }.
+   * A date today or earlier makes it take effect now, and the default branches in scope are rescanned.
+   */
+  r.post(
+    '/workspaces/:workspaceId/rule-versions/:versionId/effective',
+    need('editRules'),
+    handle(async (req, res) => {
+      const version = store.setEffectiveFrom(wid(req), String(req.params.versionId), String(req.body?.effectiveFrom ?? ''));
+      await options.evidence?.ruleRescheduled(wid(req), version, userOf(res).id);
+      const inEffect = (version.effectiveFrom ?? '') <= new Date().toISOString();
+      const queuedScans: Array<{ repoId: string; jobId: string | null }> = [];
+      if (inEffect && options.enqueueBranchScan) {
+        for (const repo of store.reposInScope(wid(req), version.scope)) if (repo.source === 'github') queuedScans.push({ repoId: repo.id, jobId: options.enqueueBranchScan(repo, version) });
+      }
+      await refreshComingUp(wid(req));
+      res.json({ ...version, inEffect, queuedScans });
+    })
+  );
+  /**
+   * A new draft version of a rule with a different scope: { all: true } or { counterpartyIds }.
+   * It copies the text, clause and card of the latest version; Legal approves it as usual.
+   */
+  r.post(
+    '/workspaces/:workspaceId/rules/:ruleId/rescope',
+    need('editRules'),
+    handle((req, res) => {
+      const rule = store.getRule(wid(req), String(req.params.ruleId));
+      if (!rule) throw new StoreError('unknown rule', 404);
+      const latest = [...rule.versions].filter((v) => v.status === 'approved' || v.status === 'draft').sort((a, b) => b.version - a.version)[0];
+      if (!latest) throw new StoreError('this rule has no version to copy', 409);
+      const created = store.createRuleDraft({
+        workspaceId: wid(req),
+        ruleId: rule.id,
+        title: rule.title,
+        sourceText: latest.sourceText,
+        clause: latest.clause,
+        documentId: latest.documentId,
+        scope: scopeFrom(store, wid(req), req.body),
+        card: latest.card,
+        createdBy: userOf(res).id,
+      });
+      res.status(201).json(created);
+    })
   );
   r.post(
     '/workspaces/:workspaceId/rules/:ruleId/retire',
@@ -557,8 +649,55 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
     const drafts = store
       .listRules(wid(req))
       .flatMap((rule) => rule.versions.filter((v) => v.status === 'draft').map((v) => ({ ruleId: rule.id, ruleKey: rule.key, title: rule.title, versionId: v.id, version: v.version, createdAt: v.createdAt })));
-    res.json({ exceptionRequests: store.listExceptions(wid(req), { status: 'requested' }), ruleDrafts: drafts, feedDrafts: [] });
+    const recent = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+    const feedDrafts = store.listFeedItems(wid(req)).filter((i) => i.kind === 'TEXT' && !i.documentId && i.firstSeenAt >= recent);
+    res.json({ exceptionRequests: store.listExceptions(wid(req), { status: 'requested' }), ruleDrafts: drafts, feedDrafts });
   });
+
+  // ---------------------------------------------------------------- coming up and the regulation feed (Phase 6)
+
+  /** Approved versions that take effect later, and what they find on each default branch. */
+  r.get('/workspaces/:workspaceId/coming-up', need('view'), (req, res) =>
+    res.json({ upcoming: store.upcomingRules(wid(req)).map((r) => ({ ruleKey: r.ruleKey, versionId: r.versionId, version: r.version, title: r.clause.title, effectiveFrom: r.effectiveFrom })), results: store.listComingUp(wid(req)) })
+  );
+  r.post(
+    '/workspaces/:workspaceId/coming-up/refresh',
+    need('runScans'),
+    handle(async (req, res) => {
+      await refreshComingUp(wid(req));
+      res.json({ results: store.listComingUp(wid(req)) });
+    })
+  );
+  /** Federal Register and EUR-Lex items, newest first, with the document this workspace made from each. */
+  r.get('/workspaces/:workspaceId/feed', need('view'), (req, res) => res.json(store.listFeedItems(wid(req), Number(req.query.limit) || 100)));
+  r.post(
+    '/workspaces/:workspaceId/feed/refresh',
+    need('editRules'),
+    handle(async (_req, res) => {
+      if (!options.refreshFeed) throw new StoreError('the regulation feed is not configured on this server', 501);
+      res.json({ added: await options.refreshFeed() });
+    })
+  );
+  /**
+   * "Draft rule change": turns a feed item into a regulation document and a draft linked to it,
+   * a new rule or (with { ruleId }) a new version of one. Nothing takes effect until Legal approves.
+   */
+  r.post(
+    '/workspaces/:workspaceId/feed/:itemId/draft',
+    need('editRules'),
+    handle(async (req, res) => {
+      const item = store.getFeedItem(wid(req), String(req.params.itemId));
+      if (!item) throw new StoreError('unknown feed item', 404);
+      if (item.kind === 'CHANGE_NOTICE') throw new StoreError('this item announces a change to another act and has no text to compile; open the amended act and upload the new text', 409);
+      const documentId =
+        item.documentId ??
+        store.addDocument({ workspaceId: wid(req), kind: 'regulation', title: item.title, language: 'en', text: item.excerpt, uploadedBy: userOf(res).id }).id;
+      store.linkDocumentToFeedItem(wid(req), documentId, item.id, item.url);
+      req.body = { citation: `${item.source === 'EUR_LEX' ? 'EUR-Lex' : 'Federal Register'} ${item.documentNumber}`, title: item.title.slice(0, 200), ...(req.body ?? {}) };
+      const created = await draftFromText(req, res, item.excerpt.trim(), documentId);
+      res.status(201).json({ ...created, documentId, feedItemId: item.id });
+    })
+  );
 
   // ---------------------------------------------------------------- share links and the evidence log (Phase 5)
 
@@ -657,25 +796,9 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
       const repo = store.getRepo(String(req.params.repoId));
       if (!repo || repo.workspaceId !== wid(req)) throw new StoreError('repository not found', 404);
       if (repo.source !== 'local' || !repo.localPath) throw new StoreError('GitHub repositories are scanned on push and pull request', 409);
-      const rules = store.rulesInEffect(wid(req));
-      const scan = store.createScan({ repoId: repo.id, commitSha: 'working-tree', trigger: 'manual', rules, lexcompilerVersion: lexcompilerVersion() });
-      try {
-        const result = await scanFiles(readRepositoryFilesAt(repo.localPath), rules);
-        const findings = classifyFindings(result.findings, null, store.activeExceptions(wid(req), repo.id));
-        const summary = summarizeFindings(findings, result.undecidedRuleKeys);
-        const done = store.completeScan(scan.id, {
-          conclusion: scanConclusion(summary, false),
-          filesScanned: result.filesScanned,
-          summary,
-          facts: result.facts,
-          findings,
-        });
-        const evidence = await options.evidence?.scanCompleted(wid(req), { scan: done, rules, findings, undecidedRuleKeys: result.undecidedRuleKeys });
-        res.json({ ...done, findings: store.listFindings(scan.id), evidence: evidence ? { seq: evidence.seq, headerSha256: evidence.headerSha256 } : null });
-      } catch (err) {
-        store.failScan(scan.id, (err as Error).message);
-        throw err;
-      }
+      // Each rule is proven only on the paths in its scope (scanLocalRepo, Phase 6).
+      const { scan, evidence } = await scanLocalRepo({ store, evidence: options.evidence }, repo, 'manual');
+      res.json({ ...scan, findings: store.listFindings(scan.id), evidence });
     })
   );
 

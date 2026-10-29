@@ -497,6 +497,38 @@ describe('GitHub App', () => {
     expect(new Set(scans.map((x) => x.job_id)).size).toBe(1);
   });
 
+  it('warns on pull requests about a version that takes effect later, and lists it as coming up from main', async () => {
+    // R-3 v2: human review below 0.92 instead of 0.85, effective in 3 days (guide, scene 6).
+    const r3 = store.rulesInEffect(workspaceId).find((r) => r.clause.category === 'AI_HUMAN_IN_THE_LOOP')!;
+    const text = r3.clause.rawLegalText.replace(/0\.85/g, '0.92').replace(/85%/g, '92%');
+    const clause = compileClauseSync({ text, key: r3.ruleKey, title: r3.clause.title, citation: r3.clause.citation, category: r3.clause.category });
+    expect(clause.deontic.extractedParameters.minAiConfidenceThreshold).toBe(0.92);
+    const arif = store.getUserBySub('arif')!;
+    const { version } = store.createRuleDraft({ workspaceId, ruleId: r3.ruleId, title: r3.clause.title, sourceText: text, clause, createdBy: arif.id });
+    const effective = new Date(Date.now() + 3 * 24 * 3600 * 1000);
+    store.approveRuleVersion(workspaceId, version.id, arif.id, { effectiveFrom: effective.toISOString() });
+    const date = effective.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+    // A push to main refreshes "Coming up" from the files of that commit.
+    queue.enqueue('scan', { githubRepoId: REPO_ID, installationId: INSTALLATION, kind: 'push', trigger: 'push', headSha: BASE });
+    await queue.drain();
+    const coming = store.listComingUp(workspaceId).filter((c) => c.versionId === version.id);
+    expect(coming).toHaveLength(1);
+    expect(coming[0].commitSha).toBe(BASE);
+    expect(coming[0].findings.map((f) => f.filePath)).toContain('services/ai_credit_triage.ts');
+
+    // A pull request keeps its conclusion and shows the future failures as warnings.
+    queue.enqueue('scan', { githubRepoId: REPO_ID, installationId: INSTALLATION, kind: 'pull_request', trigger: 'pull_request', headSha: HEAD2, baseSha: BASE, prNumber: 8 });
+    await queue.drain();
+    const patch = finalPatch() as ReturnType<typeof finalPatch> & { output: { summary: string; annotations: Array<{ title: string; annotation_level: string; path: string }> } };
+    // Same answer as without the future version: R-1 is still the only new finding.
+    expect(patch.conclusion).toBe('failure');
+    expect(patch.output.title).toBe('1 new finding (R-1)');
+    expect(patch.output.summary).toContain('### Coming up');
+    expect(patch.output.summary).toContain(`**${r3.ruleKey} v${version.version}** takes effect on ${date}`);
+    expect(patch.output.annotations.filter((a) => a.title.startsWith(`${r3.ruleKey} v${version.version} · from`)).map((a) => [a.path, a.annotation_level])).toContainEqual(['services/ai_credit_triage.ts', 'warning']);
+  });
+
   it('maps scan summaries to check conclusions', () => {
     const s = { newCount: 0, existingCount: 3, waivedCount: 0, undecidedRuleKeys: [] as string[], perRule: [] };
     expect(checkConclusion('pull_request', s)).toBe('success');

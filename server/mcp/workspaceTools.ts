@@ -1,7 +1,7 @@
 import { readRepositoryFilesAt, sourceLanguageForPath } from '../analyzer/repoBaseline.js';
 import { checkConclusion } from '../github/checkRun.js';
 import { splitClauses } from '../product/documents.js';
-import { classifyFindings, globMatch, scanFiles, type ClassifiedFinding, type RawFinding } from '../product/scanner.js';
+import { classifyFindings, scanFilesScoped, type ClassifiedFinding, type RawFinding } from '../product/scanner.js';
 import { can, rulesetSha256, type ProductStore, type Repo, type RuleInEffect, type TokenPrincipal } from '../product/store.js';
 import { summarizeFindings } from '../product/summary.js';
 import { bm25Tokens } from '../rag/hybridRagEngine.js';
@@ -260,7 +260,6 @@ function rulesFor(ctx: ToolContext, repo: Repo): { rules: RuleInEffect[]; globs:
   return { rules, globs };
 }
 
-const inScope = (findings: RawFinding[], globs: Map<string, string[]>) => findings.filter((f) => (globs.get(f.ruleKey) ?? ['**']).some((g) => globMatch(g, f.filePath)));
 
 /** The default branch the change is compared with: the latest scanned commit, or a local folder. */
 async function baseCommit(ctx: ToolContext, repo: Repo): Promise<{ sha: string; files: TargetRepoFile[]; scanId: string | null; rulesSha256: string | null }> {
@@ -295,7 +294,7 @@ async function baseFindings(ctx: ToolContext, repo: Repo, base: Awaited<ReturnTy
   const key = `${repo.id}:${base.sha}:${sha}`;
   const cached = base.sha === 'working-tree' ? undefined : ctx.state.baseline(key);
   if (cached) return cached;
-  const findings = inScope((await scanFiles(base.files, rules)).findings, globs);
+  const findings = (await scanFilesScoped(base.files, rules, globs)).findings;
   if (base.sha !== 'working-tree') ctx.state.setBaseline(key, findings);
   return findings;
 }
@@ -408,8 +407,8 @@ export async function callWorkspaceTool(name: string, args: Record<string, unkno
       }
       const base = await baseCommit(ctx, repo);
       const { files, ignored } = overlay(base.files, sent, deleted);
-      const head = await scanFiles(files, rules);
-      const findings = classifyFindings(inScope(head.findings, globs), await baseFindings(ctx, repo, base, rules, globs), ctx.store.activeExceptions(ws, repo.id));
+      const head = await scanFilesScoped(files, rules, globs);
+      const findings = classifyFindings(head.findings, await baseFindings(ctx, repo, base, rules, globs), ctx.store.activeExceptions(ws, repo.id));
       const summary = summarizeFindings(findings, head.undecidedRuleKeys);
       ctx.state.remember(ws, repo.id, findings);
       // Findings in the sent files first: those are the ones the change can fix.
@@ -462,13 +461,14 @@ export async function callWorkspaceTool(name: string, args: Record<string, unkno
     case 'suggest_fix': {
       const repo = resolveRepo(ctx, args.repo);
       const { finding } = lookupFinding(ctx, { fingerprint: String(args.fingerprint) });
-      const rule = rulesFor(ctx, repo).rules.find((r) => r.ruleKey === finding.ruleKey);
+      const scoped = rulesFor(ctx, repo);
+      const rule = scoped.rules.find((r) => r.ruleKey === finding.ruleKey);
       if (!rule) throw new ToolError(`${finding.ruleKey} does not apply to ${repo.fullName}.`);
       const sent = sentFiles(args.files);
       const base = await baseCommit(ctx, repo);
       const { files } = overlay(base.files, sent, []);
       const detail = { fingerprint: finding.fingerprint, paths: sent.map((f) => f.path) };
-      const scan = await scanFiles(files, [rule]);
+      const scan = await scanFilesScoped(files, [rule], scoped.globs);
       if (!scan.findings.some((f) => f.fingerprint === finding.fingerprint)) {
         return { repo: repo.fullName, detail, data: { verified: false, result: 'not found', note: 'This finding is not in the sent files any more.' } };
       }

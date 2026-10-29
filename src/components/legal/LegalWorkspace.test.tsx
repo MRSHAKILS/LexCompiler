@@ -17,6 +17,9 @@ const routes = {
   [`/api/workspaces/${WS}/documents`]: [{ id: 'doc-1', title: 'Klinikum Spree DPA', kind: 'contract', fileFormat: 'pdf', uploadedAt: '2026-11-10T09:00:00Z' }],
   [`/api/workspaces/${WS}/counterparties`]: [{ id: 'cp-1', name: 'Klinikum Spree' }],
   [`/api/workspaces/${WS}/shares`]: [],
+  [`/api/workspaces/${WS}/coming-up`]: { upcoming: [], results: [] },
+  [`/api/workspaces/${WS}/feed`]: [],
+  [`/api/workspaces/${WS}/repos`]: [],
   [`/api/workspaces/${WS}/rules`]: [
     { id: 'r1', key: 'R-1', title: 'Retention and tenant keys', versions: [{ id: 'v1', version: 1, status: 'draft', approvedBy: null, approvedAt: null, effectiveFrom: null, createdAt: '2026-11-10T09:00:00Z' }] },
   ],

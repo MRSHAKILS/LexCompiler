@@ -390,4 +390,46 @@ CREATE INDEX shares_workspace ON shares(workspace_id, created_at);
 CREATE INDEX share_views_share ON share_views(share_id, at);
 `,
   },
+  {
+    id: 8,
+    name: 'regulation feed, coming-up findings, scheduled jobs',
+    sql: `
+-- Items from the Federal Register and EUR-Lex, stored once per item by the daily feed job.
+CREATE TABLE feed_items (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  document_number TEXT NOT NULL,
+  title TEXT NOT NULL,
+  publication_date TEXT,
+  agency TEXT,
+  excerpt TEXT NOT NULL,
+  url TEXT,
+  kind TEXT NOT NULL DEFAULT 'TEXT' CHECK (kind IN ('TEXT','CHANGE_NOTICE')),
+  illustrative INTEGER NOT NULL DEFAULT 0,
+  first_seen_at TEXT NOT NULL
+);
+CREATE INDEX feed_items_seen ON feed_items(first_seen_at);
+-- A document made from a feed item ("Draft rule change"), so the draft links to its source.
+ALTER TABLE documents ADD COLUMN feed_item_id TEXT REFERENCES feed_items(id);
+ALTER TABLE documents ADD COLUMN source_url TEXT;
+
+-- What a rule version that is approved but not yet in effect would find on each repository's
+-- default branch ("Coming up"), computed nightly and after such a version is approved.
+CREATE TABLE coming_up (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  version_id TEXT NOT NULL REFERENCES rule_versions(id) ON DELETE CASCADE,
+  commit_sha TEXT NOT NULL,
+  computed_at TEXT NOT NULL,
+  findings_json TEXT NOT NULL,
+  PRIMARY KEY (repo_id, version_id)
+);
+
+-- When each scheduled job last ran, so a restart doesn't skip or repeat a day.
+CREATE TABLE scheduler_runs (
+  name TEXT PRIMARY KEY,
+  last_run_at TEXT NOT NULL
+);
+`,
+  },
 ];

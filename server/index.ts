@@ -5,7 +5,7 @@ import { verifyTimestamp } from './enterprise/timestamp.js';
 import { OidcProvider, oidcConfigFromEnv } from './auth/oidc.js';
 import { getDb } from './db/index.js';
 import { createAuthenticator, createProductRouter } from './product/router.js';
-import { databaseSessionStore, ProductStore } from './product/store.js';
+import { databaseSessionStore, ProductStore, type Repo } from './product/store.js';
 import { lexcompilerVersion } from './util/versions.js';
 import { GitHubApp, githubUrls } from './github/client.js';
 import { loadGitHubAppCredentials } from './github/credentials.js';
@@ -46,6 +46,7 @@ import { createWorkspaceMcpRouter } from './mcp/workspaceServer.js';
 import { EvidenceLog } from './evidence/log.js';
 import { EvidenceRecorder } from './evidence/records.js';
 import { createPublicEvidenceRouter } from './evidence/share.js';
+import { refreshRegulatoryFeed, runDueJobs } from './product/feed.js';
 import { readTarballSources } from './github/tarball.js';
 import { loadActiveClauseState, saveActiveClauseState } from './state.js';
 import {
@@ -142,6 +143,13 @@ const jobQueue = new JobQueue(
 // The webhook needs the raw body to check GitHub's signature, so it is registered before
 // express.json() and the /api guard (GitHub sends no browser headers).
 app.post('/api/github/webhooks', express.raw({ type: () => true, limit: '25mb' }), createWebhookHandler({ store: productStore, getApp: getGitHubApp, queue: jobQueue, relayReencoded: process.env.LEXCOMPILER_GITHUB_WEBHOOK_RELAY === 'smee' }));
+/** A repository's files at a commit: the local folder, or GitHub's archive with the installation token. */
+const readRepoFiles = async (repo: Repo, sha: string) => {
+  if (repo.source === 'local' && repo.localPath) return readRepositoryFilesAt(repo.localPath);
+  const gh = getGitHubApp();
+  if (!gh || repo.installationId === null) throw new Error('The GitHub App is not configured on this server, so the default branch cannot be read.');
+  return (await readTarballSources(await gh.downloadTarball(repo.installationId, repo.fullName, sha))).files;
+};
 // Share links and public keys for auditors (Phase 5): no account, so outside the /api guard.
 app.use(createPublicEvidenceRouter({ store: productStore, log: evidenceLog, keysFor, publicUrl }));
 // The workspace MCP endpoint for coding assistants (Phase 4a). It authenticates with personal
@@ -151,12 +159,7 @@ app.use(
   createWorkspaceMcpRouter({
     store: productStore,
     security: securityConfig,
-    readRepoFiles: async (repo, sha) => {
-      if (repo.source === 'local' && repo.localPath) return readRepositoryFilesAt(repo.localPath);
-      const gh = getGitHubApp();
-      if (!gh || repo.installationId === null) throw new Error('The GitHub App is not configured on this server, so the default branch cannot be read.');
-      return (await readTarballSources(await gh.downloadTarball(repo.installationId, repo.fullName, sha))).files;
-    },
+    readRepoFiles,
   })
 );
 app.use(express.json({ limit: '5mb' }));
@@ -180,6 +183,8 @@ app.use(
     mcpUrl: `${publicUrl}/mcp`,
     evidence,
     publicUrl,
+    readRepoFiles,
+    refreshFeed: () => refreshRegulatoryFeed(productStore),
   })
 );
 // Expires exceptions whose date has passed. Scans already ignore them; this keeps the inbox and
@@ -189,6 +194,24 @@ const expireAndRecord = async () => {
 };
 void expireAndRecord().catch((err) => console.error(`[evidence] ${err instanceof Error ? err.message : String(err)}`));
 setInterval(() => void expireAndRecord().catch((err) => console.error(`[evidence] ${err instanceof Error ? err.message : String(err)}`)), 60 * 60 * 1000).unref();
+// Daily jobs (Phase 6): the regulation feed, and a scan of every repository's default branch
+// (GitHub repositories through the job queue). Checked hourly; each runs once a day, across restarts.
+// LEXCOMPILER_SCHEDULER=off turns them off.
+if (process.env.LEXCOMPILER_SCHEDULER !== 'off') {
+  const tick = () =>
+    runDueJobs({
+      store: productStore,
+      evidence,
+      enqueueGithubScan: (repo, dedupeKey) =>
+        repo.githubRepoId !== null && repo.installationId !== null
+          ? enqueueScan({ queue: jobQueue }, { githubRepoId: repo.githubRepoId, installationId: repo.installationId, kind: 'push', trigger: 'scheduled' }, dedupeKey)
+          : null,
+    })
+      .then((done) => done.forEach((d) => console.log(`[scheduler] ${d}`)))
+      .catch((err) => console.error(`[scheduler] ${err instanceof Error ? err.message : String(err)}`));
+  setTimeout(tick, 60 * 1000).unref();
+  setInterval(tick, 60 * 60 * 1000).unref();
+}
 app.use('/api', createGitHubApiRouter(getGitHubApp));
 
 /**
