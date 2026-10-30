@@ -9,6 +9,7 @@ import { tokensMatch, type Authenticator } from '../security.js';
 import type { EvidenceRecorder } from '../evidence/records.js';
 import type { TargetRepoFile } from '../../shared/types.js';
 import type { CrewRun, CrewRunStore } from '../agents/crew.js';
+import { watchRegulationFeed } from './regulationWatch.js';
 import { scanLocalRepo, storeComingUp } from './repoScan.js';
 import type { RuleCategory } from '../../shared/types.js';
 import { compileClause, isRuleCategory, libraryTemplates, RULE_CATEGORIES } from './clauses.js';
@@ -678,6 +679,17 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
   );
   /** Federal Register and EUR-Lex items, newest first, with the document this workspace made from each. */
   r.get('/workspaces/:workspaceId/feed', need('view'), (req, res) => res.json(store.listFeedItems(wid(req), Number(req.query.limit) || 100)));
+  /**
+   * Regulation watch now: the rules each recent feed item may affect, and (with the workspace's AI on)
+   * a short summary from the item's own text. Five items per call; it never drafts or approves.
+   */
+  r.post(
+    '/workspaces/:workspaceId/feed/watch',
+    need('editRules'),
+    handle(async (req, res) => {
+      res.json(await watchRegulationFeed({ store, ai }, wid(req), { limit: 5 }));
+    })
+  );
   r.post(
     '/workspaces/:workspaceId/feed/refresh',
     need('editRules'),

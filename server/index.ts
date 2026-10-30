@@ -282,6 +282,8 @@ if (process.env.LEXCOMPILER_SCHEDULER !== 'off') {
       backup: process.env.LEXCOMPILER_BACKUP_DIR ? { dataDir: dataDir(), backupDir: path.resolve(process.env.LEXCOMPILER_BACKUP_DIR) } : undefined,
       // LEXCOMPILER_TSA_URL: an RFC 3161 Time-Stamp Authority vouches daily for each workspace's newest evidence header.
       timestamps: process.env.LEXCOMPILER_TSA_URL ? { tsaUrl: process.env.LEXCOMPILER_TSA_URL } : undefined,
+      // Regulation watch after the feed refresh, in workspaces whose AI is on.
+      ai: getAiGateway(),
       enqueueGithubScan: (repo, dedupeKey) =>
         repo.githubRepoId !== null && repo.installationId !== null
           ? enqueueScan({ queue: jobQueue }, { githubRepoId: repo.githubRepoId, installationId: repo.installationId, kind: 'push', trigger: 'scheduled' }, dedupeKey)

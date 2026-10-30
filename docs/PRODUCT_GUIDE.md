@@ -1041,7 +1041,7 @@ The run's gate is NOTHING_TO_FIX, PATCH_VERIFIED, PATCH_BLOCKED or INCOMPLETE (a
 - **In Python:** `python -m lexcompiler_agents crew` runs the six framework agents in order, each given the previous agent's report as context. The gate comes from the remediation tool's own result. The run is sent to `POST /api/agents/crew/runs/import` (operator only), which fills in each agent's tokens from `ai_calls`. `--no-store` only prints it.
 
 **In the product,** keep two agents that do real work:
-- **Regulation watch** (Phase 6) reads new Federal Register and EUR-Lex items, summarizes them, finds the rules they may affect with RAG, and puts drafts in Legal's inbox. It has no tool that approves.
+- **Regulation watch** (Phase 6) reads new Federal Register and EUR-Lex items, summarizes them, and finds the rules they may affect. Built (#29) with the rule match by category rather than RAG, shown on each feed item ("May affect R-3"); Legal drafts a rule change with a click. It has no tool that drafts or approves on its own.
 - **Fix agent** (Phase 4) writes patches when no template applies, inside the Z3 gate.
 
 The other steps stay plain pipelines, and the screens call them that.

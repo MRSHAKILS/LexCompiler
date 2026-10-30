@@ -127,6 +127,17 @@ export interface FeedItem {
   firstSeenAt: string;
   /** The document this workspace made from the item, if any. */
   documentId?: string | null;
+  /** Regulation watch's note for this workspace, if it ran. */
+  watch?: FeedNote | null;
+}
+
+/** Regulation watch on one feed item, per workspace (server/product/regulationWatch.ts). */
+export interface FeedNote {
+  category: string | null;
+  affectedRuleKeys: string[];
+  summary: string | null;
+  model: string | null;
+  updatedAt: string;
 }
 
 /** What an approved, not-yet-effective version finds on a repository's default branch. */
@@ -1363,7 +1374,35 @@ export class ProductStore {
          FROM feed_items f ORDER BY COALESCE(f.publication_date, f.first_seen_at) DESC, f.id LIMIT ?`
       )
       .all(workspaceId, Math.min(Math.max(limit, 1), 500)) as Row[];
-    return rows.map((r) => this.feedItemFrom(r));
+    const notes = this.feedNotes(workspaceId);
+    return rows.map((r) => ({ ...this.feedItemFrom(r), watch: notes.get(String(r.id)) ?? null }));
+  }
+
+  /** Regulation watch notes of a workspace, by feed item id. */
+  feedNotes(workspaceId: string): Map<string, FeedNote> {
+    const rows = this.db.prepare('SELECT * FROM feed_item_notes WHERE workspace_id = ?').all(workspaceId) as Row[];
+    return new Map(rows.map((r) => [String(r.feed_item_id), this.feedNoteFrom(r)]));
+  }
+
+  private feedNoteFrom(r: Row): FeedNote {
+    return {
+      category: str(r.category),
+      affectedRuleKeys: JSON.parse(String(r.affected_rule_keys_json)) as string[],
+      summary: str(r.summary),
+      model: str(r.model),
+      updatedAt: String(r.updated_at),
+    };
+  }
+
+  /** Stores (or updates) regulation watch's note; a later summary keeps the earlier rule match's row. */
+  noteFeedItem(workspaceId: string, feedItemId: string, note: { category: string | null; affectedRuleKeys: string[]; summary?: string; model?: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO feed_item_notes (workspace_id, feed_item_id, category, affected_rule_keys_json, summary, model, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (workspace_id, feed_item_id) DO UPDATE SET category = excluded.category, affected_rule_keys_json = excluded.affected_rule_keys_json,
+           summary = COALESCE(excluded.summary, feed_item_notes.summary), model = COALESCE(excluded.model, feed_item_notes.model), updated_at = excluded.updated_at`
+      )
+      .run(workspaceId, feedItemId, note.category, JSON.stringify(note.affectedRuleKeys), note.summary ?? null, note.model ?? null, nowIso());
   }
 
   getFeedItem(workspaceId: string, id: string): FeedItem | undefined {
