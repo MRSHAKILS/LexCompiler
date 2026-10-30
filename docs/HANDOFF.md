@@ -223,7 +223,15 @@ Server: `main` at 89aacc6 to ab79e2d, `LEXCOMPILER_DATA_DIR=data/live`, port 300
 | Legal approves (reason, until 30 Nov) | Check reran: **success**, "No new findings · 6 already on main", "1 finding waived until 30 Nov 2026" |
 | Expiry (admin action, then a push) | Next check **failure**, "1 new finding (R-1)" |
 
-Not covered live: AI explanations and AI fixes (no cloud model chosen), the Phase 3 rescan after approval, Phase 6's "Coming up" warning on a real PR.
+Later on October 30, with FinHealth AI's AI on cloud (`deepseek-chat`, 1,182 tokens in all):
+
+| Step | Result |
+|---|---|
+| Phase 3: Legal approves a rule (R-3 v2, same text, effective 1 January 2027) | Rescan of `main` queued (`trigger: rule_approved`), done in 4 s; check run on 858dc92: "6 findings on main (baseline for pull requests) · R-3 v2 will fail from 1 January 2027" |
+| Phase 6: "Coming up" on a real PR (PR #5, the triage threshold lowered to 0.6) | **failure**, "1 new finding (R-3)"; the summary's "Coming up" section: "R-3 v2 takes effect on 1 January 2027: 1 finding here will fail from then"; the template suggestion comment on line 22 |
+| AI explanation (second commit on PR #5, threshold 0.55) | "AI explanations" in the check's details: three sentences citing `rule:R-3`, the code chunk and the finding; one `explanation` call (677 in, 183 out) |
+
+The first commit got no explanation: the live settings had `LEXCOMPILER_AGENT_FIX_*` and `…_DRAFTING_*` but nothing for the `explanation` task and no `LEXCOMPILER_LLM_*`, so the call was refused before reaching a model, with no log line. Set `LEXCOMPILER_AGENT_EXPLANATION_*` (or `LEXCOMPILER_LLM_*`) along with the others. Not covered live: a model-written fix on a PR (PR #5's finding had a template fix, so none was asked for). PRs #3, #4 and #5 are closed; R-3 v2 stays approved in the live workspace for 2027.
 
 - **PR #15.** GitHub shows it as merged, but a force push to `main` at 12:40 UTC on October 28 removed it. Missing from `main`: `docs/WHITEPAPER.md`, `docs/SUBMISSION_GUIDE_425PTS.md`, 4 screenshots in `docs/assets/`, and a change to `server/compiler/legalCompiler.ts` that now conflicts. It is still on the local branch `feat/bangla-localization-and-docs`.
 - **Old branches.** 9 local branches whose GitHub copies are gone, plus `revert-26-claude/compassionate-hypatia-3mjhsk` on GitHub. All are fully in `main` except the PR #15 branch.
