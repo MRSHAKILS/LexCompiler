@@ -193,12 +193,25 @@ After creating the app:
 
 ### 3.4 Sign-in for Legal and engineering
 
-PR #28 supports any OIDC provider. Running Keycloak locally in Docker is the quickest way to test:
+PR #28 supports any OIDC provider. Running Keycloak locally in Docker is the quickest way to test. With Docker running, one command does all of the steps below (Keycloak 26.4.0, safe to repeat):
+
+```bash
+npm run setup:keycloak
+```
+
+It creates the `lexcompiler` realm, the `lexcompiler-web` client (redirects to `localhost:3001` and `:3002`, S256 PKCE, a `roles` claim, the client id as the access token's audience), the `lexcompiler-admin` role, and the people `arif@finhealth.test` (admin) and `nusrat@finhealth.test`. The generated passwords and client secret go to `<data dir>/keycloak/` (`credentials.json` and `oidc.env`), which is git-ignored. Then:
+
+```bash
+npm run seed:demo -- --owner-email arif@finhealth.test --legal-email nusrat@finhealth.test
+node --env-file=data/keycloak/oidc.env --import tsx server/index.ts
+```
+
+By hand instead:
 
 ```bash
 docker run -d --name lexc-keycloak -p 8080:8080 \
   -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD='change-me' \
-  quay.io/keycloak/keycloak:latest start-dev
+  quay.io/keycloak/keycloak:26.4.0 start-dev
 ```
 
 At http://localhost:8080 (log in as `admin`):
@@ -206,7 +219,7 @@ At http://localhost:8080 (log in as `admin`):
 2. Create an OpenID Connect client called `lexcompiler-web`. Turn on client authentication, set the redirect URI to `http://localhost:3001/api/auth/callback`, then copy the client secret.
 3. Create users `nusrat` and `arif`, each with an email and a password that isn't marked temporary.
 
-Pin a Keycloak version once this works. Auth0 or Microsoft Entra ID would also work.
+Keep the realm's role mapper on the claim `roles` (or set `LEXCOMPILER_OIDC_ROLES_CLAIM`). Auth0 or Microsoft Entra ID would also work.
 
 ### 3.5 Who plays whom
 

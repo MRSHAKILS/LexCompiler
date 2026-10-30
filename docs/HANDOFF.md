@@ -154,7 +154,7 @@ Dates are from the schedule in the product guide, section 7.
 
 1. **Owner decisions** (blocking AI drafting):
    - Pick the cloud model provider, put its key in `.env`, and run `npm run eval:extract -- --model cloud`.
-   - Decide whether to restore PR #15's files (below).
+   - ~~Decide whether to restore PR #15's files~~ The owner doesn't need them (October 30).
 2. ~~**Finish 2a.**~~ Done: `dataset.bn.json` and `dataset.finhealth.json`. The collection-model miss (q11, fh02) is fixed: BM25 stems words and splits identifiers, and a question with no category evidence no longer gets the retention clause's graph seeds and HyDE text. Both models are now in the top 5, at ranks 3 and 4.
 3. ~~**Phase 3, the lawyer's workspace.**~~ Done (#6). Left for later: the library screen (templates are served by `GET /api/library/templates` but have no screen yet), similar-rule links (guide 5.4 item 6), an LLM rephrasing of the plain reading. The evidence record on approval is written since #9.
 4. **Phase 4.** Exceptions are done (#7). Still to do:
@@ -170,10 +170,14 @@ Dates are from the schedule in the product guide, section 7.
    - `verify.mjs` can't see records removed from before the first or after the last header of a period. Cross-check the numbers with the check runs on GitHub.
 7. **Phase 6.** Done (#10). Per-tenant settings inside code (a TTL per tenant) are a later analyzer feature; until then the fix is the strictest value.
 8. **Phase 7.** Ready to deploy (#11). Still to do, with the owner:
-   - Pick the tunnel or a VPS and a domain; follow `docs/DEPLOY.md`, including its checklist.
+   - The owner runs it on their own PC for now (Cloudflare quick tunnel); the VPS comes last. Then follow `docs/DEPLOY.md`, including its checklist.
    - Build the Docker image once (`docker compose -f deploy/docker-compose.prod.yml … up -d --build`) and run the checklist against it.
    - Point the GitHub App's webhook and the Keycloak redirect at the public URL.
    Then the freeze from Dec 20 to 25.
+
+## Sign-in on this machine (October 30)
+
+`npm run setup:keycloak` started Keycloak 26.4.0 in Docker (container `lexc-keycloak`, port 8080) and set up the realm for `data/live`; its passwords and client secret are in `data/live/keycloak/` (git-ignored). Arif and Nusrat were invited with `seed:demo`. The live server on port 3002 runs with `--env-file=data/live/keycloak/oidc.env` and `LEXCOMPILER_OIDC_REDIRECT_URI=http://localhost:3002/api/auth/callback`. Checked by signing in through Keycloak's login form: `/api/auth/me` shows arif as global admin and nusrat as a member, and `/api/workspaces` gives nusrat the `legal` role in FinHealth AI.
 
 ## Open questions for the owner
 
