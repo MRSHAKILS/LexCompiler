@@ -41,7 +41,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | 0–2 | Done, tested live on GitHub |
 | 2a AI foundation | Done. RAG eval now has a Bangla set and a set for the test repo (see Evals) |
 | 3 Lawyer's workspace | Done and tested locally (`/legal`). The GitHub part of the guide's test needs this machine's App credentials (see Open questions) |
-| 4 Fixes and exceptions | Done and tested against a fake GitHub: exceptions (#7), fix PRs and suggested changes (#12). The live test on finhealth-core-platform needs the App credentials |
+| 4 Fixes and exceptions | Done; tested against a fake GitHub and live on GitHub (October 30, see "Live GitHub run"): scenes 3 and 4, suggestions and expiry |
 | 4a MCP for coding assistants | Done; tested in-process and live over HTTP (guide 5.9 results). Claude Code connects but its CLI here isn't signed in; Cursor and VS Code not tried; OAuth not started |
 | 5 Evidence and auditor | Done and tested (the pack verifies; the three tamper cases are caught), with daily RFC 3161 timestamps since #13 and one signing key per workspace since #14 |
 | 6 Contract and regulation changes | Done and tested (scenes 5 and 6 through the API on the fixture, and the PR warning against a fake GitHub). The live GitHub run needs the App credentials. "Open fix PR" (scene 5 step 4) works since #12 |
@@ -177,7 +177,24 @@ Dates are from the schedule in the product guide, section 7.
 
 ## Open questions for the owner
 
-- **GitHub App credentials on the Windows machine.** `data/github-app.json` (the "LexCompiler d16d" App) and the smee channel are on the machine that ran Phases 0–2, not on this one. Without them, the GitHub halves of the Phase 3 and Phase 4 tests (rescan of `main` after approval; "Request exception" on finhealth-core-platform PR #1) can't run here. Copy `data/github-app.json` over, or register a new App at `/github/register`.
+- ~~GitHub App credentials on the Windows machine~~ Solved differently: this machine has its own App, "LexCompiler 1305" (`lexcompiler-1305`, owned by MRSHAKILS), installed on the fork **MRSHAKILS/finhealth-core-platform** (MRSHAKILS can't install apps on shahriar-ahmed-seam's repo). Its credentials are in `data/live/github-app.json` (git-ignored), with the server's data in `data/live`. Webhooks come through a Cloudflare quick tunnel, whose URL changes when `cloudflared` restarts: update the App's webhook URL then (App settings → Webhook URL), or use a named tunnel or the VPS (`docs/DEPLOY.md`). The App needs **Contents: Read and write** for fix PRs (#18; Apps registered from now on ask for it).
+
+## Live GitHub run (October 30, MRSHAKILS/finhealth-core-platform)
+
+Server: `main` at 89aacc6 to ab79e2d, `LEXCOMPILER_DATA_DIR=data/live`, port 3002, webhooks through the tunnel, workspace "FinHealth AI" with R-1 to R-4 approved (`seed:demo --activate-builtins`).
+
+| Step | Result |
+|---|---|
+| Install and link | `installation.created`; the repo is linked to FinHealth AI; `main` (858dc92) scanned on connect |
+| Scene 3: Open fix PR | PR #3 opened by `app/lexcompiler-1305`: one commit, 5 files, R-1 to R-4; its check **success**, "All 4 rules pass". Before #18 it failed with 403 (the App had Contents: read) |
+| Gate refusal | With the loan endpoint on `main`, "Open fix PR" answers 409: "No verified fix … R-1 is not proven after the patch" |
+| PR from `feat/loan-applications` (PR #1, later #4) | **failure**, "1 new finding (R-1)", failure annotation at `api/loan_applications.py:20`, the 6 `main` findings as warnings; summary names the evidence record and header hash, matching the signed log |
+| PR before the redaction commit (PR #2) | **failure**, "2 new findings (R-1, R-2)"; `lexcompiler-1305[bot]` review comment on line 21 with the `redact_pii(...)` suggestion |
+| Scene 4: Request exception (PR #4) | `check_run.requested_action` received; request R-1 at line 20 by `github:MRSHAKILS`; bot comment "Exception requested by @MRSHAKILS — waiting for Legal" |
+| Legal approves (reason, until 30 Nov) | Check reran: **success**, "No new findings · 6 already on main", "1 finding waived until 30 Nov 2026" |
+| Expiry (admin action, then a push) | Next check **failure**, "1 new finding (R-1)" |
+
+Not covered live: AI explanations and AI fixes (no cloud model chosen), the Phase 3 rescan after approval, Phase 6's "Coming up" warning on a real PR.
 
 - **PR #15.** GitHub shows it as merged, but a force push to `main` at 12:40 UTC on October 28 removed it. Missing from `main`: `docs/WHITEPAPER.md`, `docs/SUBMISSION_GUIDE_425PTS.md`, 4 screenshots in `docs/assets/`, and a change to `server/compiler/legalCompiler.ts` that now conflicts. It is still on the local branch `feat/bangla-localization-and-docs`.
 - **Old branches.** 9 local branches whose GitHub copies are gone, plus `revert-26-claude/compassionate-hypatia-3mjhsk` on GitHub. All are fully in `main` except the PR #15 branch.
