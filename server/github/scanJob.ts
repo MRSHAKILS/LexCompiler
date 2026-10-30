@@ -201,7 +201,10 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
       // Suggested changes (Phase 4, item 2): after the check is final, and never failing it.
       if (p.kind === 'pull_request' && p.prNumber) {
         try {
-          await postSuggestions({ store: deps.store, app }, { repo, prNumber: p.prNumber, headSha, files: head.files, findings, rules, globs, explanations });
+          await postSuggestions(
+            { store: deps.store, app },
+            { repo, prNumber: p.prNumber, headSha, files: head.files, findings, rules, globs, explanations, ai: deps.ai ? { gateway: deps.ai, workspaceId: repo.workspaceId } : undefined }
+          );
         } catch (err) {
           console.warn(`[github] suggestions on ${repo.fullName}#${p.prNumber} failed: ${err instanceof Error ? err.message : String(err)}`);
         }
