@@ -1042,7 +1042,7 @@ The run's gate is NOTHING_TO_FIX, PATCH_VERIFIED, PATCH_BLOCKED or INCOMPLETE (a
 
 **In the product,** keep two agents that do real work:
 - **Regulation watch** (Phase 6) reads new Federal Register and EUR-Lex items, summarizes them, and finds the rules they may affect. Built (#29) with the rule match by category rather than RAG, shown on each feed item ("May affect R-3"); Legal drafts a rule change with a click. It has no tool that drafts or approves on its own.
-- **Fix agent** (Phase 4) writes patches when no template applies, inside the Z3 gate.
+- **Fix agent** (Phase 4) writes patches when no template applies, inside the Z3 gate. Built (#30) in the crew on workspace repositories: after a blocked template patch, verified model fixes are listed as suggestions; they parse and pass Z3 and the rescan, but may call helpers that don't exist, so they are reviewed, never committed. `{"allRules": true}` (the panel's "Check every rule in effect") runs the crew on every rule rather than those the feed touches.
 
 The other steps stay plain pipelines, and the screens call them that.
 

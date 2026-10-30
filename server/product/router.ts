@@ -68,7 +68,7 @@ export interface ProductRouterOptions {
   openFixPr?: (repo: Repo, requestedBy: string) => Promise<{ created: boolean }>;
   /** The agent crew on a workspace repository (server/agents/workspaceCrew.ts). */
   crew?: {
-    run: (repo: Repo, opts: { useModels: boolean; openPullRequest: boolean; requestedBy: string; triggeredBy: string | null }) => Promise<CrewRun>;
+    run: (repo: Repo, opts: { useModels: boolean; openPullRequest: boolean; requestedBy: string; triggeredBy: string | null; allRules?: boolean }) => Promise<CrewRun>;
     runs: CrewRunStore;
   };
 }
@@ -848,6 +848,8 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
       const run = await options.crew.run(repo, {
         useModels,
         openPullRequest: req.body?.openPullRequest === true,
+        // Every rule in effect, not only those today's feed touches.
+        allRules: req.body?.allRules === true,
         requestedBy: user.email ?? user.name ?? user.oidcSub,
         triggeredBy: user.email ?? user.oidcSub,
       });

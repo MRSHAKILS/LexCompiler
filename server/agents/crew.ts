@@ -191,6 +191,8 @@ export async function runCrew(
     target?: CrewTarget;
     /** Opens a pull request once the patch passes the Z3 gate (the product's fix-PR path, which proves every rule again). */
     openPullRequest?: () => Promise<CrewPullRequest>;
+    /** Check every active rule, not only those the feed touches (the scanner still reports its matches). */
+    allRules?: boolean;
   } = {}
 ): Promise<CrewRun> {
   const useModels = opts.useModels ?? false;
@@ -221,10 +223,11 @@ ${i.excerpt || ''}`) }));
         const relevant = items.filter((i) => i.category && categories.has(i.category)).slice(0, MAX_FEED_ITEMS);
         const touched = clauses.filter((c) => relevant.some((i) => i.category === c.category));
         // With no matching item the crew still checks every active rule.
-        const selected = touched.length ? touched : clauses;
+        const selected = touched.length && !opts.allRules ? touched : clauses;
+        const reason = opts.allRules ? 'every active rule was asked for' : touched.length ? 'feed items match these rules' : 'no feed item matches a rule; checking all active rules';
         return {
-          handoff: { feedItems: relevant, clauseIds: selected.map((c) => c.id), reason: touched.length ? 'feed items match these rules' : 'no feed item matches a rule; checking all active rules' },
-          summary: `Read ${items.length} feed items; ${relevant.length} match the categories of ${touched.length} active rule(s).${touched.length ? '' : ' Checking all active rules.'}`,
+          handoff: { feedItems: relevant, clauseIds: selected.map((c) => c.id), reason },
+          summary: `Read ${items.length} feed items; ${relevant.length} match the categories of ${touched.length} active rule(s).${selected.length === clauses.length && touched.length < clauses.length ? ' Checking all active rules.' : ''}`,
         };
       },
     }),

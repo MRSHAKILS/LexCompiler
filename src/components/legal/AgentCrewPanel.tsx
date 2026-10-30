@@ -53,6 +53,7 @@ const commit = (sha?: string) => (!sha ? '' : sha === 'working-tree' ? 'working 
 function RunDetails({ run }: { run: CrewRun }) {
   const pr = run.steps[5]?.handoff.pullRequest as { prNumber: number; url: string; created: boolean } | undefined;
   const prError = run.steps[5]?.handoff.pullRequestError as string | undefined;
+  const modelFixes = (run.steps[5]?.handoff.modelFixes as Array<{ ruleKey: string; path: string; startLine: number; endLine: number; body: string }> | undefined) ?? [];
   return (
     <div className="space-y-1">
       <ol className="space-y-1 text-xs">
@@ -75,6 +76,20 @@ function RunDetails({ run }: { run: CrewRun }) {
         </p>
       )}
       {prError && <p className="text-xs text-amber-200">No pull request: {prError}</p>}
+      {modelFixes.length > 0 && (
+        <div aria-label="Fix agent suggestions" role="region" className="space-y-1">
+          <p className="text-xs text-zinc-300">Fix agent: model-written fixes that parse and that Z3 confirms. Review them; nothing was committed.</p>
+          {modelFixes.map((f) => (
+            <details key={`${f.path}:${f.startLine}`} className="text-xs">
+              <summary className="cursor-pointer text-sky-300">
+                {f.ruleKey} at {f.path}:{f.startLine}
+                {f.endLine > f.startLine ? `–${f.endLine}` : ''}
+              </summary>
+              <pre className="whitespace-pre-wrap font-mono text-zinc-300 bg-[#0B101B] rounded p-2">{f.body}</pre>
+            </details>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -84,6 +99,7 @@ export function AgentCrewPanel({ base, canRun }: { base: string; canRun: boolean
   const [runs, setRuns] = useState<CrewRunSummary[]>([]);
   const [open, setOpen] = useState<Record<string, CrewRun>>({});
   const [withPr, setWithPr] = useState<Record<string, boolean>>({});
+  const [allRules, setAllRules] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -100,7 +116,7 @@ export function AgentCrewPanel({ base, canRun }: { base: string; canRun: boolean
     setBusy(repo.id);
     setError(null);
     try {
-      const run = await api<CrewRun>(`${base}/repos/${repo.id}/crew-runs`, { openPullRequest: repo.source === 'github' && Boolean(withPr[repo.id]) });
+      const run = await api<CrewRun>(`${base}/repos/${repo.id}/crew-runs`, { openPullRequest: repo.source === 'github' && Boolean(withPr[repo.id]), allRules });
       setOpen((o) => ({ ...o, [run.id]: run }));
       await refresh();
       // Shown at once, even if the list was read before the run was stored.
@@ -136,6 +152,12 @@ export function AgentCrewPanel({ base, canRun }: { base: string; canRun: boolean
         </p>
       )}
 
+      {canRun && (
+        <label className="flex items-center gap-1 text-xs text-zinc-300">
+          <input type="checkbox" checked={allRules} onChange={(e) => setAllRules(e.target.checked)} />
+          Check every rule in effect, not only those today&apos;s feed touches
+        </label>
+      )}
       {canRun && (
         <ul className="space-y-1">
           {repos.map((r) => (
