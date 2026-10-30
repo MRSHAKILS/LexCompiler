@@ -517,4 +517,25 @@ CREATE TABLE oauth_refresh_tokens (
 CREATE INDEX oauth_refresh_code ON oauth_refresh_tokens(code_sha256);
 `,
   },
+  {
+    id: 12,
+    name: 'Agent crew runs',
+    sql: `
+-- One row per chained run of the six agents (server/agents/crew.ts), from the server or the Python crew.
+CREATE TABLE agent_crew_runs (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  use_models INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  gate TEXT NOT NULL,
+  total_tokens INTEGER NOT NULL,
+  latency_ms INTEGER NOT NULL,
+  triggered_by TEXT,
+  run_json TEXT NOT NULL
+);
+CREATE INDEX agent_crew_runs_started ON agent_crew_runs(started_at);
+`,
+  },
 ];
