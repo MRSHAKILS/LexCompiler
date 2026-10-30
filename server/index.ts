@@ -1149,6 +1149,16 @@ app.post('/api/llm/multi-model-pipeline', async (req, res) => {
       task: 'legal-attestation',
     });
 
+    // 4. A local reasoning model (deepseek-r1:1.5b) as an advisory critic. It thinks before it
+    // answers, so it gets room for the reasoning; Z3 still decides, so its verdict is only shown.
+    const reasoningLlmRes = await runRealLlmInference({
+      model: process.env.LEXCOMPILER_REASONING_MODEL || 'deepseek-r1:1.5b',
+      prompt: `Rule: "${legalText}"\nCode:\n${snippet}\nDoes the code violate the rule? Think briefly, then end with one line: VERDICT: VIOLATION or VERDICT: COMPLIANT.`,
+      maxTokens: 1200,
+      timeoutMs: 90_000,
+      task: 'reasoning-critic',
+    });
+
     res.json({
       executedAt: new Date().toISOString(),
       neuralEmbedding: {
@@ -1161,6 +1171,7 @@ app.post('/api/llm/multi-model-pipeline', async (req, res) => {
       },
       codeSpecialistLlm: codeLlmRes,
       generalCounselLlm: legalLlmRes,
+      reasoningCriticLlm: { ...reasoningLlmRes, responseText: reasoningLlmRes.responseText.replace(/<think>[\s\S]*?<\/think>/, '').trim() },
     });
   } catch (err) {
     sendError(res, err);
