@@ -1210,6 +1210,7 @@ claude mcp add --transport http lexcompiler http://localhost:3001/mcp \
 
 - Claude Desktop runs on macOS, Windows and, as a beta, on Ubuntu 22.04 or later and Debian 12 or later ([install steps](https://code.claude.com/docs/en/desktop-linux)). This machine runs Ubuntu 24.04, so you can test it here.
 - Custom connectors (Settings → Connectors) need a public HTTPS server that uses OAuth or no authentication, so they work only after Phase 7 and OAuth.
+  - LexCompiler serves OAuth since #17: on the public HTTPS URL, add `https://<domain>/mcp` as a custom connector; Claude Desktop discovers the sign-in from `/.well-known/oauth-protected-resource`, registers itself, and opens the consent page, where you pick the workspace.
 - Until then, bridge with `mcp-remote` in `claude_desktop_config.json`. Open it with Settings → Developer → Edit Config, which creates the file if it's missing. On macOS it's in `~/Library/Application Support/Claude/`, and on Windows in `%APPDATA%\Claude\`.
 
 ```json

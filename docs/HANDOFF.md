@@ -34,6 +34,7 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | MRSHAKILS/LexCompiler #14 | One evidence signing key per workspace (`data/workspace-keys/`), published per workspace, backed up |
 | MRSHAKILS/LexCompiler #15 | AI explanations on pull requests (guide 5.5 item 1), after the check, citing only retrieved text |
 | MRSHAKILS/LexCompiler #16 | Model-written fix suggestions (5.5 item 2), kept only after parse, Z3 and rescan checks, cloud mode only |
+| MRSHAKILS/LexCompiler #17 | OAuth for the MCP endpoint: metadata (RFC 9728, 8414), dynamic registration (RFC 7591), PKCE authorization code, rotating refresh tokens |
 
 | Phase | Status |
 |---|---|
@@ -161,7 +162,7 @@ Dates are from the schedule in the product guide, section 7.
    - ~~Guide items 1–2~~ done (#12): `POST /api/workspaces/<id>/repos/<repoId>/fix-pr` ("Open fix PR" on `/legal`) and suggestions after each PR check (`server/github/fixes.ts`). The old demo endpoint `/api/remediation/open-github-pr` still uses a personal token; the workspace path uses the installation token.
 5. **Phase 4a.** Done (#8). Still to do:
    - Sign in to the Claude Code CLI and finish its row in the 5.9 results. Run the client test in Cursor and VS Code (GUI; the configurations are on `/settings`), and in Kiro, Codex, Antigravity and Claude Desktop where they're installed.
-   - OAuth (`/.well-known/oauth-protected-resource`, RFC 8414 metadata, dynamic client registration), which Claude Desktop's custom connectors need. Until then Claude Desktop goes through `mcp-remote`.
+   - ~~OAuth~~ done (#17, `server/mcp/oauth.ts`): `/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `POST /oauth/register` (public clients; redirect URIs https or localhost, matched exactly), `/oauth/authorize` (dashboard sign-in, a consent page to pick one of your workspaces; S256 PKCE required), `POST /oauth/token` (one-hour access tokens, which are personal access tokens named "OAuth: <client>"; 30-day refresh tokens that rotate; a reused code revokes what it issued). `/mcp`'s 401 names the resource metadata. Needs OIDC sign-in (or the loopback admin) and a public HTTPS URL for Claude Desktop's custom connectors; not tried with a real client yet.
 6. **Phase 5.** Done (#9). Still to do:
    - The guide's Phase 5 test on GitHub (step 5: the hash in PR #1's check run). It needs the App credentials on this machine; the fake-GitHub test checks the same thing.
    - ~~RFC 3161 timestamps~~ done (#13): with `LEXCOMPILER_TSA_URL`, a daily job has the TSA vouch for each workspace's newest header (`evidence_timestamps`, migration 10). Share pages list them; packs carry `timestamps/<seq>.tsr` and `<seq>.header` (check with `openssl ts -verify`), and `verify.mjs` checks the stamped header is the one in the chain. Checked against https://freetsa.org/tsr: a token was issued, verifies over the data, and is rejected for other data (the tests use a fake TSA).
