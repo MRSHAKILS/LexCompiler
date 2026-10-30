@@ -1,7 +1,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { CREW, CrewRunStore, importedRun, runCrew, validateImportedRun, type CallTool } from './agents/crew.js';
+import { CREW, CrewRunStore, importedRun, runCrew, scopedCallTool, validateImportedRun, type CallTool } from './agents/crew.js';
 import type { LlmConfig } from './agents/llmClient.js';
 import { getInitialClauses } from './compiler/legalCompiler.js';
 import { openDatabase } from './db/index.js';
@@ -123,6 +123,57 @@ describe('agent crew', () => {
       expect(run.steps[4]).toMatchObject({ status: 'COMPLETED', execution: 'LLM_AGENT', modelError: expect.any(String) });
       expect(run.steps[4].handoff.unsat).toHaveLength(1);
       expect(run.steps[0].execution).toBe('DIRECT_TOOL_CALL');
+    });
+  });
+
+  describe('rule path scopes', () => {
+    const files = ['api/intake.py', 'workers/cache.py', 'workers/purge.py', 'schema/pii.sql'].map((path) => ({ path, language: 'python', content: '' }) as never);
+    const [r1, r2] = [{ ...retention, id: 'R-1' }, { ...retention, id: 'R-2' }];
+    const globs = new Map([['R-2', ['workers/**']]]);
+    function base(outputs: Record<string, (clauseIds: string[]) => Record<string, unknown>>) {
+      const calls: Array<{ tool: string; clauseIds: string[]; paths: string[] }> = [];
+      const call: CallTool = async (_server, tool, _args, cls, fs) => {
+        calls.push({ tool, clauseIds: cls.map((c) => c.id), paths: (fs ?? []).map((x) => x.path) });
+        return outputs[tool](cls.map((c) => c.id));
+      };
+      return { call, calls };
+    }
+
+    it('runs each group of rules on its own paths and merges the results', async () => {
+      const b = base({
+        scan_polyglot_repository_ast: (ids) => ({ filesScanned: ids.includes('R-2') ? 2 : 4, structuralQueryMatches: Object.fromEntries(ids.map((id) => [id, [{ filePath: 'x', line: 1 }]])) }),
+        prove_repository_compliance_z3: (ids) => ({
+          verdicts: ids.map((clauseId) => ({ clauseId, status: 'UNSAT_VIOLATION', unsatCore: [], offendingLocations: [{ filePath: 'workers/cache.py', line: 3 }, { filePath: 'api/intake.py', line: 9 }] })),
+        }),
+      });
+      const call = scopedCallTool(b.call, globs);
+      const scan = await call('s', 'scan_polyglot_repository_ast', {}, [r1, r2], files);
+      expect(b.calls).toEqual([
+        { tool: 'scan_polyglot_repository_ast', clauseIds: ['R-1'], paths: files.map((x: { path: string }) => x.path) },
+        { tool: 'scan_polyglot_repository_ast', clauseIds: ['R-2'], paths: ['workers/cache.py', 'workers/purge.py'] },
+      ]);
+      expect(Object.keys(scan.structuralQueryMatches as object)).toEqual(['R-1', 'R-2']);
+      expect(scan.filesScanned).toBe(6);
+
+      const proof = await call('s', 'prove_repository_compliance_z3', {}, [r1, r2], files);
+      const verdicts = proof.verdicts as Array<{ clauseId: string; offendingLocations: Array<{ filePath: string }> }>;
+      // Outside its paths a scoped rule reports nothing.
+      expect(verdicts.find((v) => v.clauseId === 'R-1')!.offendingLocations.map((l) => l.filePath)).toEqual(['workers/cache.py', 'api/intake.py']);
+      expect(verdicts.find((v) => v.clauseId === 'R-2')!.offendingLocations.map((l) => l.filePath)).toEqual(['workers/cache.py']);
+    });
+
+    it('blocks a patch when two groups patch the same file', async () => {
+      const b = base({ synthesize_and_verify_remediation_pr: () => ({ status: 'READY_TO_MERGE', postPatchZ3Status: 'SAT_COMPLIANT', filePatches: [{ filePath: 'workers/cache.py' }] }) });
+      const out = await scopedCallTool(b.call, globs)('s', 'synthesize_and_verify_remediation_pr', {}, [r1, r2], files);
+      expect(out).toMatchObject({ status: 'BLOCKED_UNRESOLVED', postPatchZ3Status: 'UNSAT_VIOLATION', validationErrors: [expect.stringMatching(/workers\/cache\.py/)] });
+    });
+
+    it('makes one call when every rule applies everywhere, and leaves other tools alone', async () => {
+      const b = base({ scan_polyglot_repository_ast: () => ({}), fetch_live_regulatory_feed: () => ({ items: [] }) });
+      const call = scopedCallTool(b.call, new Map());
+      await call('s', 'scan_polyglot_repository_ast', {}, [r1, r2], files);
+      await scopedCallTool(b.call, globs)('s', 'fetch_live_regulatory_feed', {}, [r1, r2], files);
+      expect(b.calls.map((c) => c.clauseIds)).toEqual([['R-1', 'R-2'], ['R-1', 'R-2']]);
     });
   });
 

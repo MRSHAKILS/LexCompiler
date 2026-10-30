@@ -5,6 +5,7 @@ import { runAgent } from './agentRuntime.js';
 import { llmConfigFor, type LlmConfig } from './llmClient.js';
 import { executeMcpTool } from '../mcp/mcpSuite.js';
 import { inferRuleCategoryWithEvidence } from '../compiler/legalCompiler.js';
+import { globMatch } from '../product/scanner.js';
 import type { LegalClause, LiveRegulatoryFeedItem, TargetRepoFile } from '../../shared/types.js';
 
 /**
@@ -100,6 +101,73 @@ export const CREW: Agent[] = [
 ];
 
 const MAX_FEED_ITEMS = 5;
+
+/** Tools that read the repository; with path scopes they run once per group of rules sharing the same paths. */
+const REPOSITORY_TOOLS = new Set(['scan_polyglot_repository_ast', 'hybrid_contextual_graph_rag_query', 'prove_repository_compliance_z3', 'synthesize_and_verify_remediation_pr']);
+
+/**
+ * Rule path scopes (product guide, Phase 6), as scanFilesScoped applies them: rules are grouped by
+ * their globs, and each group's tools read only the files those globs match. The groups' results
+ * are merged into one, so the rest of the crew doesn't change.
+ */
+export function scopedCallTool(base: CallTool, globsByRule: Map<string, string[]>): CallTool {
+  return async (server, tool, args, clauses, files) => {
+    if (!REPOSITORY_TOOLS.has(tool) || !files) return base(server, tool, args, clauses, files);
+    const groups = new Map<string, { globs: string[]; clauses: LegalClause[] }>();
+    for (const c of clauses) {
+      const g = [...new Set(globsByRule.get(c.id) ?? ['**'])].sort();
+      const group = groups.get(g.join('\n')) ?? { globs: g, clauses: [] };
+      group.clauses.push(c);
+      groups.set(g.join('\n'), group);
+    }
+    if (groups.size === 1 && groups.has('**')) return base(server, tool, args, clauses, files);
+    const inScope = (globs: string[], path: string) => globs.includes('**') || globs.some((g) => globMatch(g, path));
+    const results = await Promise.all(
+      [...groups.values()].map(async (g) => ({ globs: g.globs, out: await base(server, tool, args, g.clauses, files.filter((f) => inScope(g.globs, f.path))) }))
+    );
+    return mergeScoped(tool, results, inScope);
+  };
+}
+
+function mergeScoped(tool: string, results: Array<{ globs: string[]; out: Record<string, unknown> }>, inScope: (globs: string[], path: string) => boolean): Record<string, unknown> {
+  const outs = results.map((r) => r.out);
+  switch (tool) {
+    case 'scan_polyglot_repository_ast':
+      return {
+        ...outs[0],
+        structuralQueryMatches: Object.assign({}, ...outs.map((o) => o.structuralQueryMatches || {})),
+        filesScanned: outs.reduce((n, o) => n + Number(o.filesScanned || 0), 0),
+      };
+    case 'hybrid_contextual_graph_rag_query':
+      return { ...outs[0], retrievedChunks: outs.flatMap((o) => (o.retrievedChunks as unknown[] | undefined) || []) };
+    case 'prove_repository_compliance_z3':
+      return {
+        ...outs[0],
+        verdicts: results.flatMap(({ globs, out }) =>
+          ((out.verdicts as Array<{ offendingLocations: Array<{ filePath: string }> }> | undefined) || []).map((v) => ({
+            ...v,
+            offendingLocations: v.offendingLocations.filter((l) => inScope(globs, l.filePath)),
+          }))
+        ),
+      };
+    default: {
+      // Remediation: one patch per group; two groups patching the same file can't be combined safely.
+      const patched = outs.filter((o) => Array.isArray(o.filePatches));
+      if (patched.length === 0) return outs[0];
+      const filePatches = patched.flatMap((o) => o.filePatches as Array<{ filePath: string }>);
+      const paths = filePatches.map((p) => p.filePath);
+      const overlap = paths.filter((p, i) => paths.indexOf(p) !== i);
+      const proven = patched.every((o) => o.postPatchZ3Status === 'SAT_COMPLIANT') && overlap.length === 0;
+      return {
+        ...patched[0],
+        filePatches,
+        postPatchZ3Status: proven ? 'SAT_COMPLIANT' : 'UNSAT_VIOLATION',
+        status: proven ? patched[0].status : 'BLOCKED_UNRESOLVED',
+        ...(overlap.length ? { validationErrors: [`rules with different paths both patch ${[...new Set(overlap)].join(', ')}`] } : {}),
+      };
+    }
+  }
+}
 const MAX_LOCATIONS = 10;
 
 interface StepWork {
@@ -118,6 +186,8 @@ export async function runCrew(
     llmFor?: (agentId: string) => LlmConfig | null;
     /** The repository the tools read (default: the bundled target repository). */
     files?: TargetRepoFile[];
+    /** Path globs per rule id (a rule scoped to counterparties); rules without an entry apply everywhere. */
+    globs?: Map<string, string[]>;
     target?: CrewTarget;
     /** Opens a pull request once the patch passes the Z3 gate (the product's fix-PR path, which proves every rule again). */
     openPullRequest?: () => Promise<CrewPullRequest>;
@@ -125,7 +195,9 @@ export async function runCrew(
 ): Promise<CrewRun> {
   const useModels = opts.useModels ?? false;
   const files = opts.files;
-  const callTool: CallTool = (server, tool, args, cls) => (opts.callTool ?? executeMcpTool)(server, tool, args, cls, files);
+  const base = opts.callTool ?? executeMcpTool;
+  const scoped = opts.globs ? scopedCallTool(base, opts.globs) : base;
+  const callTool: CallTool = (server, tool, args, cls) => scoped(server, tool, args, cls, files);
   const llmFor = opts.llmFor ?? ((id: string) => llmConfigFor(id));
   const startedAt = new Date().toISOString();
   const t0 = performance.now();

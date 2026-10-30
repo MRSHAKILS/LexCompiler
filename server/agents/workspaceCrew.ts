@@ -5,7 +5,7 @@ import { runCrew, type CrewPullRequest, type CrewRun, type CrewRunStore } from '
 
 /**
  * The crew on a workspace's repository (HANDOFF, agent crew item 4): the rules in effect for that
- * repository, the files of its default branch, and, when asked, a real pull request for a patch
+ * repository (each on its scope's paths), the files of its default branch, and, when asked, a real pull request for a patch
  * that passed the Z3 gate (item 3), opened through the product's fix-PR path.
  */
 export interface WorkspaceCrewDeps {
@@ -26,7 +26,7 @@ export async function runWorkspaceCrew(
   if (!repo.workspaceId) throw new StoreError('the repository is not linked to a workspace', 409);
   if (opts.openPullRequest && repo.source !== 'github') throw new StoreError('pull requests are opened on GitHub repositories; apply the patch to a local folder by hand', 409);
   if (opts.openPullRequest && !deps.openFixPr) throw new StoreError('the GitHub App is not configured on this server', 503);
-  const { rules } = scopedRules(deps.store, repo, deps.store.rulesInEffect(repo.workspaceId));
+  const { rules, globs } = scopedRules(deps.store, repo, deps.store.rulesInEffect(repo.workspaceId));
   if (rules.length === 0) throw new StoreError(`no approved rule is in effect for ${repo.fullName}`, 409);
   const { commitSha, files } = await deps.readHead(repo);
   const run = await (deps.runCrew ?? runCrew)(
@@ -34,6 +34,8 @@ export async function runWorkspaceCrew(
     {
       useModels: opts.useModels,
       files,
+      // Each rule is checked only on its scope's paths in this repository (counterparty paths).
+      globs,
       triggeredBy: opts.triggeredBy,
       target: { workspaceId: repo.workspaceId, repoId: repo.id, repoFullName: repo.fullName, commitSha },
       openPullRequest: opts.openPullRequest && deps.openFixPr ? () => deps.openFixPr!(repo, opts.requestedBy) : undefined,
