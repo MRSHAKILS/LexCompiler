@@ -541,6 +541,8 @@ Then:
 
 ### Phase 4. Fixes and exceptions (3–4 days) · scenes 3 and 4
 
+Tested live on October 30 on MRSHAKILS/finhealth-core-platform (results in `docs/HANDOFF.md`, "Live GitHub run"). The App needs **Contents: Read and write** for fix PRs.
+
 **Build**
 
 1. **Fix PRs for `main`.**
