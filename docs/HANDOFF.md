@@ -191,7 +191,7 @@ Dates are from the schedule in the product guide, section 7.
 **Credit.** The DeepSeek balance is about $0.85 (October 30). Keep agent runs to single small tests.
 
 **Next, in order:**
-1. Chain the crew: horizon scanner → deontic extractor → AST mapper → graph RAG → Z3 critic → remediation, each passing its output to the next; store the run.
+1. ~~Chain the crew~~ done: `server/agents/crew.ts` (`POST /api/agents/crew/runs`, stored in `agent_crew_runs`) and `python -m lexcompiler_agents crew` (stored through `/runs/import`). Guide 5.7 has the handoffs. A live server run (no models, real feed): 13 feed items, 1 matching rule, 3 locations, 1 UNSAT, a 1-file patch, SAT_COMPLIANT. The Python crew with models hasn't run live yet: it needs Hermes on a bigger local model first (next item).
 2. Hermes on a bigger local model (`qwen2.5-coder:7b`, or `3b`).
 3. Remediation opens a real pull request (the App here has Contents: write since #18), only when post-patch Z3 is SAT_COMPLIANT.
 4. Point the agents at a workspace's repository and rules instead of the bundled fixture.
