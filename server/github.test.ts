@@ -133,6 +133,8 @@ async function startFakeGitHub(publicKeyPem: string) {
   const commits: Array<Record<string, unknown>> = [];
   const refs = new Map<string, string>();
   const pulls: Array<Record<string, unknown>> = [];
+  /** An App registered with Contents: read only (before fix PRs existed). */
+  const flags = { readOnlyContents: false };
   const appKey = await importSPKI(publicKeyPem, 'RS256');
   const server = http.createServer((req, res) => {
     let raw = '';
@@ -188,6 +190,7 @@ async function startFakeGitHub(publicKeyPem: string) {
           return json(200, { id: reviews.length });
         }
         if (m(/^\/repos\/acme\/core-platform\/git\/blobs$/) && req.method === 'POST') {
+          if (flags.readOnlyContents) return json(403, { message: 'Resource not accessible by integration' });
           const sha = crypto.createHash('sha1').update(String(body.content)).digest('hex');
           blobs.set(sha, String(body.content));
           return json(201, { sha });
@@ -225,7 +228,7 @@ async function startFakeGitHub(publicKeyPem: string) {
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return { server, base, archives, dropTarball, tarballRequests, checkRuns, comments, prFiles, reviews, blobs, trees, commits, refs, pulls };
+  return { server, base, archives, dropTarball, tarballRequests, checkRuns, comments, prFiles, reviews, blobs, trees, commits, refs, pulls, flags };
 }
 
 let fake: Awaited<ReturnType<typeof startFakeGitHub>>;
@@ -568,6 +571,16 @@ describe('GitHub App', { timeout: 120_000 }, () => {
     expect(patch.output.summary).toContain('### Coming up');
     expect(patch.output.summary).toContain(`**${r3.ruleKey} v${version.version}** takes effect on ${date}`);
     expect(patch.output.annotations.filter((a) => a.title.startsWith(`${r3.ruleKey} v${version.version} · from`)).map((a) => [a.path, a.annotation_level])).toContainEqual(['services/ai_credit_triage.ts', 'warning']);
+  });
+
+  it('says which permission to change when the App can only read contents', async () => {
+    fake.flags.readOnlyContents = true;
+    try {
+      await expect(openFixPullRequest({ store, app: getApp() }, store.getRepoByGithubId(REPO_ID)!, 'arif@example.test')).rejects.toThrow(/Contents to "Read and write"/);
+      expect(fake.pulls).toHaveLength(0);
+    } finally {
+      fake.flags.readOnlyContents = false;
+    }
   });
 
   it('scene 3: opens one verified fix pull request for main, as a single commit, once per base commit', async () => {
