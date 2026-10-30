@@ -322,7 +322,9 @@ const browse = (p: string, user = 'arif') => fetch(`${lex}${p}`, { headers: { 'x
 const lastRun = () => fake.checkRuns[fake.checkRuns.length - 1];
 const finalPatch = (run = lastRun()) => run.patches.find((p) => p.status === 'completed') as { conclusion: string; output: { title: string; annotations: Array<{ path: string; start_line: number; annotation_level: string; title: string }> } };
 
-describe('GitHub App', () => {
+// Several cases run full scans; under a busy machine they need more than the default 30 s, and a
+// case that timed out would keep draining the shared job table into the next one.
+describe('GitHub App', { timeout: 120_000 }, () => {
   it('verifies webhook signatures in constant time', () => {
     const body = Buffer.from('{"a":1}');
     const good = `sha256=${crypto.createHmac('sha256', 's').update(body).digest('hex')}`;
@@ -637,13 +639,14 @@ describe('GitHub App', () => {
       const env = { LEXCOMPILER_LLM_PROVIDER: 'openai', LEXCOMPILER_LLM_MODEL: 'fake-cloud', LEXCOMPILER_LLM_BASE_URL: `http://127.0.0.1:${(llm.address() as AddressInfo).port}/v1`, LEXCOMPILER_LLM_API_KEY: 'test' };
       const ai = new AiGateway(store.db, { env });
       ai.setSettings(workspaceId, { mode: 'cloud' }, 'owner');
-      const withAi = new JobQueue(store.db, { scan: createScanJobHandler({ store, getApp, publicUrl: 'http://lexc.test', ai }) }, { maxAttempts: 1 });
+      // The handler runs directly, not through the shared jobs table, so no other queue can pick the job up.
+      const withAi = createScanJobHandler({ store, getApp, publicUrl: 'http://lexc.test', ai });
       fake.prFiles.set(10, [{ filename: 'api/loan_applications.py', patch: `@@ -0,0 +1,${LOANS.split('\n').length - 1} @@\n${LOANS.split('\n').slice(0, -1).map((l) => `+${l}`).join('\n')}` }]);
-      withAi.enqueue('scan', { githubRepoId: REPO_ID, installationId: INSTALLATION, kind: 'pull_request', trigger: 'pull_request', headSha: HEAD1, baseSha: BASE, prNumber: 10 });
-      await withAi.drain();
+      await withAi({ githubRepoId: REPO_ID, installationId: INSTALLATION, kind: 'pull_request', trigger: 'pull_request', headSha: HEAD1, baseSha: BASE, prNumber: 10 }, { jobId: 'ai-test', attempt: 1, maxAttempts: 1 });
 
       // This PR's run (the queue shares the jobs table, so it may also have run an older job).
       const scan = store.listScans(workspaceId).find((x) => x.prNumber === 10)!;
+      expect(scan).toMatchObject({ status: 'completed' });
       const run = fake.checkRuns[scan.checkRunId! - 1];
       // The result is the same as without AI, and it was final before any model ran.
       const completedAt = run.patches.findIndex((p) => p.status === 'completed');

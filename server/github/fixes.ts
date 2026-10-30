@@ -6,6 +6,8 @@ import { synthesizeRemediationPullRequest } from '../remediation/prSynthesizer.j
 import type { RemediationPullRequest, TargetRepoFile } from '../../shared/types.js';
 import { GitHubApiError, type GitHubApp } from './client.js';
 import { readTarballSources } from './tarball.js';
+import { aiSuggestionsFor } from './aiFixes.js';
+import type { AiGateway } from '../ai/gateway.js';
 
 /**
  * Fixes on GitHub (product guide, Phase 4, items 1 and 2), with the installation token:
@@ -237,6 +239,8 @@ export async function postSuggestions(
     globs: Map<string, string[]>;
     /** AI explanations by fingerprint, appended to the comment (5.5). */
     explanations?: Map<string, string>;
+    /** Model-written fixes for findings without a template fix (5.5 item 2; cloud mode only). */
+    ai?: { gateway: AiGateway; workspaceId: string };
   }
 ): Promise<number> {
   const { store, app } = deps;
@@ -249,14 +253,16 @@ export async function postSuggestions(
     changed.push(...batch);
     if (batch.length < 100) break;
   }
-  const suggestions = await suggestionsFor({
-    files: input.files,
-    findings: input.findings,
-    rules: input.rules,
-    globs: input.globs,
-    diffLines: diffLinesByFile(changed),
-    alreadyCommented: store.suggestedFingerprints(repo.id, input.prNumber),
-  });
+  const diff = diffLinesByFile(changed);
+  const alreadyCommented = store.suggestedFingerprints(repo.id, input.prNumber);
+  const suggestions = await suggestionsFor({ files: input.files, findings: input.findings, rules: input.rules, globs: input.globs, diffLines: diff, alreadyCommented });
+  if (input.ai) {
+    const covered = new Set([...alreadyCommented, ...suggestions.map((s) => s.fingerprint)]);
+    const remaining = input.findings.filter((f) => f.state === 'new' && !covered.has(f.fingerprint) && diff.has(f.filePath));
+    suggestions.push(
+      ...(await aiSuggestionsFor({ ai: input.ai.gateway, workspaceId: input.ai.workspaceId, files: input.files, findings: remaining, allFindings: input.findings, rules: input.rules, globs: input.globs, diffLines: diff }))
+    );
+  }
   if (suggestions.length === 0) return 0;
   await app.request(repo.installationId, 'POST', `${route}/pulls/${input.prNumber}/reviews`, {
     commit_id: input.headSha,
