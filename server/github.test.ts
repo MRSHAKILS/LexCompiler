@@ -18,6 +18,7 @@ import { createCommentJobHandler, rerunCheckForException } from './github/except
 import { createGitHubRoutes, type BrowserAuth } from './github/routes.js';
 import { createScanJobHandler } from './github/scanJob.js';
 import { openFixPullRequest } from './github/fixes.js';
+import { AiGateway } from './ai/gateway.js';
 import { scanFiles } from './product/scanner.js';
 import { readTarballSources } from './github/tarball.js';
 import { createWebhookHandler } from './github/webhooks.js';
@@ -616,6 +617,56 @@ describe('GitHub App', () => {
     queue.enqueue('scan', { githubRepoId: REPO_ID, installationId: INSTALLATION, kind: 'pull_request', trigger: 'pull_request', headSha: HEAD1, baseSha: BASE, prNumber: 9 });
     await queue.drain();
     expect(fake.reviews.length).toBe(reviewsBefore + 1);
+  });
+
+  it('adds AI explanations after the check, citing only retrieved text, without changing the result', async () => {
+    // A fake OpenAI-compatible model: cites the first two chunk ids it was given, and one made up.
+    const llm = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        const user = (JSON.parse(raw).messages as Array<{ role: string; content: string }>).find((m) => m.role === 'user')!.content;
+        const ids = [...user.matchAll(/^\[([^\]]+)\]$/gm)].map((m) => m[1]);
+        const answer = { explanation: `The rule forbids this [${ids[0]}]. The code at the cited lines does it anyway [${ids[1]}], see also [made:up].`, citations: [ids[0], ids[1], 'made:up'] };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(answer) }, finish_reason: 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 40 } }));
+      });
+    });
+    await new Promise<void>((r) => llm.listen(0, '127.0.0.1', r));
+    try {
+      const env = { LEXCOMPILER_LLM_PROVIDER: 'openai', LEXCOMPILER_LLM_MODEL: 'fake-cloud', LEXCOMPILER_LLM_BASE_URL: `http://127.0.0.1:${(llm.address() as AddressInfo).port}/v1`, LEXCOMPILER_LLM_API_KEY: 'test' };
+      const ai = new AiGateway(store.db, { env });
+      ai.setSettings(workspaceId, { mode: 'cloud' }, 'owner');
+      const withAi = new JobQueue(store.db, { scan: createScanJobHandler({ store, getApp, publicUrl: 'http://lexc.test', ai }) }, { maxAttempts: 1 });
+      fake.prFiles.set(10, [{ filename: 'api/loan_applications.py', patch: `@@ -0,0 +1,${LOANS.split('\n').length - 1} @@\n${LOANS.split('\n').slice(0, -1).map((l) => `+${l}`).join('\n')}` }]);
+      withAi.enqueue('scan', { githubRepoId: REPO_ID, installationId: INSTALLATION, kind: 'pull_request', trigger: 'pull_request', headSha: HEAD1, baseSha: BASE, prNumber: 10 });
+      await withAi.drain();
+
+      // This PR's run (the queue shares the jobs table, so it may also have run an older job).
+      const scan = store.listScans(workspaceId).find((x) => x.prNumber === 10)!;
+      const run = fake.checkRuns[scan.checkRunId! - 1];
+      // The result is the same as without AI, and it was final before any model ran.
+      const completedAt = run.patches.findIndex((p) => p.status === 'completed');
+      expect(finalPatch(run)).toMatchObject({ conclusion: 'failure', output: { title: '2 new findings (R-1, R-2)' } });
+      const details = run.patches.findIndex((p) => typeof (p.output as { text?: string } | undefined)?.text === 'string');
+      expect(details).toBeGreaterThan(completedAt);
+      const text = (run.patches[details].output as { text: string }).text;
+      expect(text).toContain('## AI explanations');
+      expect(text).toContain('Written by fake-cloud');
+      expect(text).toContain('### R-2 · `api/loan_applications.py:21`');
+      expect(text).toContain('[rule:R-2]');
+      expect(text).not.toContain('made:up');
+      // The suggestion comment carries the explanation too.
+      const comment = (fake.reviews.filter((r) => r.pr === 10).at(-1)!.body.comments as Array<{ body: string }>).find((c) => c.body.startsWith('**R-2**'))!;
+      expect(comment.body).toContain('**AI explanation** (fake-cloud):');
+      // Every call is logged as an explanation, with the prompt's hash only.
+      const calls = ai.listCalls(workspaceId).filter((c) => c.task === 'explanation');
+      expect(calls.length).toBe(2);
+      expect(calls[0]).toMatchObject({ model: 'fake-cloud', outcome: 'ok' });
+      ai.setSettings(workspaceId, { mode: 'off' }, 'owner');
+    } finally {
+      llm.close();
+    }
   });
 
   it('maps scan summaries to check conclusions', () => {

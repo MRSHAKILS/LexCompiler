@@ -46,6 +46,7 @@ import { createWorkspaceMcpRouter } from './mcp/workspaceServer.js';
 import { EvidenceLog } from './evidence/log.js';
 import { EvidenceRecorder } from './evidence/records.js';
 import { workspaceSigners } from './evidence/signer.js';
+import { AiGateway } from './ai/gateway.js';
 import { createPublicEvidenceRouter } from './evidence/share.js';
 import { FixPrError, openFixPullRequest } from './github/fixes.js';
 import { refreshRegulatoryFeed, runDueJobs } from './product/feed.js';
@@ -165,7 +166,7 @@ const keysFor = (workspaceId: string) =>
   evidenceLog.publicKeys(workspaceId, trustedKeys(), new Map(revocations().keys.map((k) => [k.keyId, k.revokedAt])));
 const jobQueue = new JobQueue(
   getDb(),
-  { scan: createScanJobHandler({ store: productStore, getApp: getGitHubApp, publicUrl, evidence }), github_comment: createCommentJobHandler({ getApp: getGitHubApp }) },
+  { scan: createScanJobHandler({ store: productStore, getApp: getGitHubApp, publicUrl, evidence, ai: new AiGateway(getDb()) }), github_comment: createCommentJobHandler({ getApp: getGitHubApp }) },
   { onError: (err, job) => console.error(`[jobs] ${job.kind} ${job.id} attempt ${job.attempt} failed: ${err instanceof Error ? err.message : String(err)}`) }
 );
 // The webhook needs the raw body to check GitHub's signature, so it is registered before

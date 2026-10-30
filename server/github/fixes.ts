@@ -227,7 +227,17 @@ export async function suggestionsFor(input: {
  */
 export async function postSuggestions(
   deps: { store: ProductStore; app: GitHubApp },
-  input: { repo: Repo; prNumber: number; headSha: string; files: TargetRepoFile[]; findings: ClassifiedFinding[]; rules: RuleInEffect[]; globs: Map<string, string[]> }
+  input: {
+    repo: Repo;
+    prNumber: number;
+    headSha: string;
+    files: TargetRepoFile[];
+    findings: ClassifiedFinding[];
+    rules: RuleInEffect[];
+    globs: Map<string, string[]>;
+    /** AI explanations by fingerprint, appended to the comment (5.5). */
+    explanations?: Map<string, string>;
+  }
 ): Promise<number> {
   const { store, app } = deps;
   const { repo } = input;
@@ -254,7 +264,7 @@ export async function postSuggestions(
     body: `LexCompiler suggests ${suggestions.length === 1 ? 'a fix' : `${suggestions.length} fixes`} for new findings. Each one is proven with Z3 before it is offered.`,
     comments: suggestions.map((s) => ({
       path: s.path,
-      body: s.body,
+      body: input.explanations?.has(s.fingerprint) ? `${s.body}\n\n${input.explanations.get(s.fingerprint)}` : s.body,
       side: 'RIGHT',
       line: s.line,
       ...(s.startLine < s.line ? { start_line: s.startLine, start_side: 'RIGHT' } : {}),
