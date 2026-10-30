@@ -22,7 +22,8 @@
     "build:sql-grammar": "tsx server/cli/build-sql-grammar.ts",
     "eval:rag": "tsx server/cli-eval-rag.ts",
     "eval:extract": "tsx server/cli-eval-extract.ts",
-    "seed:demo": "tsx server/cli/seed-demo.ts"
+    "seed:demo": "tsx server/cli/seed-demo.ts",
+    "setup:keycloak": "tsx server/cli/setup-keycloak.ts"
   },
   "dependencies": {
     "@aws-sdk/client-kms": "3.1150.0",
