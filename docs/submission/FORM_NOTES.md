@@ -8,7 +8,7 @@ Fields marked **(you)** need facts only the team has.
 
 - **Project title:** LexCompiler
 - **Tagline:** LexCompiler turns regulations and contracts into formal rules and proves, with the Z3 solver, whether every pull request still obeys them.
-- **YouTube video URL (you):** upload `data/video/lexcompiler-demo.mp4` (2:35, 1080p, English and Bangla voiceover) and paste the link.
+- **YouTube video URL (you):** upload `docs/video/lexcompiler-demo.mp4` (2:35, 1080p, English and Bangla voiceover) and paste the link.
 - **GitHub repository URL:** https://github.com/MRSHAKILS/LexCompiler (public; upstream: https://github.com/shahriar-ahmed-seam/LexCompiler)
 - **Live demo URL (you):** the Cloudflare tunnel URL of the running server, or the deployed URL.
 - **Figma / design link:** https://www.figma.com/design/8i5PbZ7o0PaigcqKQXlEWf/Untitled (the overview diagram: drag `docs/submission/lexcompiler-architecture.svg` into the file for editable layers). Rename the file "LexCompiler Architecture" in Figma and set sharing to "Anyone with the link can view".
@@ -142,7 +142,7 @@ We did not fine-tune model weights. Instead we adapted the models in four ways:
 - **AI-DLC:** Cursor Rules. Also spec-first with AGENTS.md and the product guide.
 - **Frontend AI tools (you):** only the tools the team really used.
 - **MCP built (6):** `lex-statute-ingest-mcp`, `lex-deontic-compiler-mcp`, `lex-polyglot-ast-mcp`, `lex-z3-prover-mcp`, `lex-hybrid-rag-mcp`, `lex-remediation-pr-mcp`, plus a workspace MCP server for coding assistants, with OAuth.
-- **MCP used:** PostgreSQL / pgvector MCP and a filesystem sandbox MCP (online in the dashboard), plus Neo4j Cypher and DuckDB MCP configurations, and the CloudCamp knowledge-base MCP.
+- **MCP used:** PostgreSQL / pgvector MCP and a filesystem sandbox MCP (online in the dashboard), plus Neo4j Cypher and DuckDB MCP configurations.
 - **MCP transports and hosts:**
   - transports: stdio (`server/mcp/stdio-server.ts`) and streamable HTTP;
   - clients: the server's own agents, external hosts through `mcp-servers.json`, and coding assistants (Claude Code, Cursor) through the workspace MCP server with OAuth;

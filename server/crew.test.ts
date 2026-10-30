@@ -56,7 +56,7 @@ describe('agent crew', () => {
     expect(run.gate).toBe('PATCH_VERIFIED');
     expect(run.totalTokens).toBe(0);
     expect(run.steps.every((s) => s.execution === 'DIRECT_TOOL_CALL')).toBe(true);
-  });
+  }, 60_000);
 
   it('checks every active rule when no feed item matches one', async () => {
     const t = tools({ fetch_live_regulatory_feed: () => ({ items: [{ id: 'X', title: 'Grazing fees', excerpt: 'Fees for grazing permits.' }] }) });

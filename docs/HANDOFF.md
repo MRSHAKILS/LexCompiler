@@ -4,6 +4,27 @@ Written October 29, 2026, after PR #36. Judging is on **December 26, 2026**.
 
 This file says where the work stands, how to run it, and what to do next. The full plan is `docs/PRODUCT_GUIDE.md`: section 4 has the build phases, section 5 covers AI, RAG and MCP, and section 7 has the schedule to judging.
 
+## Submission handover (October 31, 2026)
+
+The CloudCamp BD submission is due **October 31, 11:59 PM GMT+6**, and a teammate is taking over. **Follow `docs/submission/TEAMMATE_CHECKLIST.md`:** it lists what is left, in order, what to check, and which private files must come from Shakil.
+
+Done:
+- the demo video (`docs/video/lexcompiler-demo.mp4`);
+- the text for every form field (`docs/submission/FORM_NOTES.md`);
+- the overview diagram (`docs/submission/lexcompiler-architecture.svg`);
+- a fourth local model (DeepSeek-R1);
+- the live GitHub checks.
+
+Left:
+- decide whether the "one prompt only" rule applies to your track;
+- upload the video to YouTube;
+- put the diagram in the Figma file and share it;
+- fill in the team details;
+- choose the live demo URL;
+- submit.
+
+The two repositories conflict in 15 files, because both built the same phases separately: see `docs/submission/MERGE_CONFLICTS.md`. Combining them is a decision for both authors, after the submission.
+
 ## Working rules
 
 - Every change goes branch → pull request with a detailed description → CI green → merge. Don't push to `main` directly.
@@ -34,6 +55,11 @@ This file says where the work stands, how to run it, and what to do next. The fu
 | MRSHAKILS/LexCompiler #14 | One evidence signing key per workspace (`data/workspace-keys/`), published per workspace, backed up |
 | MRSHAKILS/LexCompiler #15 | AI explanations on pull requests (guide 5.5 item 1), after the check, citing only retrieved text |
 | MRSHAKILS/LexCompiler #16 | Model-written fix suggestions (5.5 item 2), kept only after parse, Z3 and rescan checks, cloud mode only |
+| MRSHAKILS/LexCompiler #31 | HANDOFF: the last live GitHub checks (approval rescan, "Coming up" on a PR, AI explanations) |
+| MRSHAKILS/LexCompiler #32 | README: both authors, and the features added since its last update |
+| MRSHAKILS/LexCompiler #33 | `npm run voiceover`: the video's narration with ElevenLabs (`server/cli/voiceover.ts`) |
+| MRSHAKILS/LexCompiler #34 | DeepSeek-R1 as a local reasoning critic (Pass 4, advisory), the narration, the form notes |
+| MRSHAKILS/LexCompiler #35 | The overview diagram (problem, workflow, architecture), shown at the top of the README |
 | MRSHAKILS/LexCompiler #17 | OAuth for the MCP endpoint: metadata (RFC 9728, 8414), dynamic registration (RFC 7591), PKCE authorization code, rotating refresh tokens |
 
 | Phase | Status |
