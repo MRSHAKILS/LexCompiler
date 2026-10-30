@@ -146,7 +146,8 @@ export function createGitHubRoutes(deps: GitHubRouteDeps) {
       setup_url: `${publicUrl}/github/setup`,
       setup_on_update: true,
       public: false,
-      default_permissions: { checks: 'write', contents: 'read', pull_requests: 'write', metadata: 'read' },
+      // Contents: write lets "Open fix PR" create its commit and branch (Git Data API).
+      default_permissions: { checks: 'write', contents: 'write', pull_requests: 'write', metadata: 'read' },
       default_events: ['pull_request', 'push', 'check_run', 'check_suite'],
     };
     sendPage(
@@ -154,7 +155,7 @@ export function createGitHubRoutes(deps: GitHubRouteDeps) {
       200,
       'Register the LexCompiler GitHub App',
       `<p>GitHub will create a private app owned by ${org ? `the organization <b>${esc(org)}</b>` : 'your GitHub account'} with these settings. You can change the name on the next page.</p>
-<table><tr><th>Permissions</th><td>Checks: write · Pull requests: write · Contents: read · Metadata: read</td></tr>
+<table><tr><th>Permissions</th><td>Checks: write · Pull requests: write · Contents: read and write (fix pull requests) · Metadata: read</td></tr>
 <tr><th>Events</th><td>Pull request · Push · Check run · Check suite (installation events are always sent)</td></tr>
 <tr><th>Webhook URL</th><td><code>${esc(deps.webhookUrl)}</code></td></tr>
 <tr><th>Back to</th><td><code>${esc(publicUrl)}</code></td></tr></table>

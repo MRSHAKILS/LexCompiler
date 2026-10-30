@@ -74,7 +74,16 @@ export async function openFixPullRequest(deps: { store: ProductStore; app: GitHu
   const base = await app.request<{ sha: string; tree: { sha: string } }>(inst, 'GET', `${route}/git/commits/${head.sha}`);
   const tree = [];
   for (const p of bundle.filePatches) {
-    const blob = await app.request<{ sha: string }>(inst, 'POST', `${route}/git/blobs`, { content: p.patchedContent, encoding: 'utf-8' });
+    let blob: { sha: string };
+    try {
+      blob = await app.request<{ sha: string }>(inst, 'POST', `${route}/git/blobs`, { content: p.patchedContent, encoding: 'utf-8' });
+    } catch (err) {
+      // Apps registered before fix PRs existed have Contents: read only.
+      if (err instanceof GitHubApiError && err.status === 403) {
+        throw new FixPrError("The GitHub App can't write to this repository. In the App's settings on GitHub, set Permissions → Repository → Contents to \"Read and write\", then accept the new permission on the installation.", 403);
+      }
+      throw err;
+    }
     tree.push({ path: p.filePath, mode: '100644', type: 'blob', sha: blob.sha });
   }
   const newTree = await app.request<{ sha: string }>(inst, 'POST', `${route}/git/trees`, { base_tree: base.tree.sha, tree });
