@@ -5,7 +5,7 @@ import { runAgent } from './agentRuntime.js';
 import { llmConfigFor, type LlmConfig } from './llmClient.js';
 import { executeMcpTool } from '../mcp/mcpSuite.js';
 import { inferRuleCategoryWithEvidence } from '../compiler/legalCompiler.js';
-import type { LegalClause, LiveRegulatoryFeedItem } from '../../shared/types.js';
+import type { LegalClause, LiveRegulatoryFeedItem, TargetRepoFile } from '../../shared/types.js';
 
 /**
  * The agent crew of AGENTS.md §2, chained: each agent receives what the previous one found.
@@ -18,7 +18,22 @@ import type { LegalClause, LiveRegulatoryFeedItem } from '../../shared/types.js'
  * direct tool call and costs nothing.
  */
 
-export type CallTool = (serverId: string, tool: string, args: Record<string, unknown>, clauses: LegalClause[]) => Promise<Record<string, unknown>>;
+export type CallTool = (serverId: string, tool: string, args: Record<string, unknown>, clauses: LegalClause[], files?: TargetRepoFile[]) => Promise<Record<string, unknown>>;
+
+/** The workspace repository a run checked (absent for runs on the bundled target repository). */
+export interface CrewTarget {
+  workspaceId: string;
+  repoId: string;
+  repoFullName: string;
+  commitSha: string;
+}
+
+/** A pull request opened for the run's verified patch. */
+export interface CrewPullRequest {
+  created: boolean;
+  prNumber: number;
+  url: string;
+}
 
 export interface CrewStep {
   stepNumber: number;
@@ -63,6 +78,7 @@ export interface CrewRun {
   totalTokens: number;
   latencyMs: number;
   triggeredBy: string | null;
+  target?: CrewTarget;
   steps: CrewStep[];
 }
 
@@ -95,10 +111,21 @@ interface StepWork {
 
 export async function runCrew(
   clauses: LegalClause[],
-  opts: { useModels?: boolean; callTool?: CallTool; triggeredBy?: string | null; llmFor?: (agentId: string) => LlmConfig | null } = {}
+  opts: {
+    useModels?: boolean;
+    callTool?: CallTool;
+    triggeredBy?: string | null;
+    llmFor?: (agentId: string) => LlmConfig | null;
+    /** The repository the tools read (default: the bundled target repository). */
+    files?: TargetRepoFile[];
+    target?: CrewTarget;
+    /** Opens a pull request once the patch passes the Z3 gate (the product's fix-PR path, which proves every rule again). */
+    openPullRequest?: () => Promise<CrewPullRequest>;
+  } = {}
 ): Promise<CrewRun> {
   const useModels = opts.useModels ?? false;
-  const callTool = opts.callTool ?? executeMcpTool;
+  const files = opts.files;
+  const callTool: CallTool = (server, tool, args, cls) => (opts.callTool ?? executeMcpTool)(server, tool, args, cls, files);
   const llmFor = opts.llmFor ?? ((id: string) => llmConfigFor(id));
   const startedAt = new Date().toISOString();
   const t0 = performance.now();
@@ -204,10 +231,23 @@ ${i.excerpt || ''}`) }));
           const out = await callTool(agent(5).mcpServer, agent(5).tool, { branchPrefix: 'lexcompiler/crew' }, toFix);
           const files = ((out.filePatches as Array<{ filePath: string }> | undefined) || []).map((p) => p.filePath);
           const verified = out.postPatchZ3Status === 'SAT_COMPLIANT';
+          const handoff: Record<string, unknown> = { status: out.status, postPatchZ3Status: out.postPatchZ3Status ?? null, branchName: out.branchName ?? null, files, gatePassed: verified, clauseIds: toFix.map((c) => c.id) };
+          let pr = '';
+          // Only a patch that passed the gate becomes a pull request (AGENTS.md §3).
+          if (verified && opts.openPullRequest) {
+            try {
+              const opened = await opts.openPullRequest();
+              handoff.pullRequest = opened;
+              pr = ` ${opened.created ? 'Opened' : 'Already open:'} pull request #${opened.prNumber}.`;
+            } catch (err) {
+              handoff.pullRequestError = err instanceof Error ? err.message : String(err);
+              pr = ` No pull request: ${String(handoff.pullRequestError)}`;
+            }
+          }
           return {
-            handoff: { status: out.status, postPatchZ3Status: out.postPatchZ3Status ?? null, branchName: out.branchName ?? null, files, gatePassed: verified, clauseIds: toFix.map((c) => c.id) },
+            handoff,
             summary: files.length
-              ? `Patched ${files.length} file(s) for ${toFix.length} rule(s); post-patch Z3 ${String(out.postPatchZ3Status)}${verified ? ', so the patch passes the gate' : ', so the gate blocks it'}.`
+              ? `Patched ${files.length} file(s) for ${toFix.length} rule(s); post-patch Z3 ${String(out.postPatchZ3Status)}${verified ? ', so the patch passes the gate' : ', so the gate blocks it'}.${pr}`
               : `No patch could be synthesized (${String(out.status)}).`,
           };
         },
@@ -246,6 +286,7 @@ ${i.excerpt || ''}`) }));
             ].join('\n\n'),
             mcpServerId: a.mcpServer,
             clauses: i === 0 ? clauses : crewClauses,
+            files,
             llm,
             maxTurns: 4,
           });
@@ -277,6 +318,7 @@ ${i.excerpt || ''}`) }));
     totalTokens: steps.reduce((n, s) => n + s.tokens, 0),
     latencyMs: Math.round(performance.now() - t0),
     triggeredBy: opts.triggeredBy ?? null,
+    ...(opts.target ? { target: opts.target } : {}),
     steps,
   };
 }
@@ -288,20 +330,21 @@ export class CrewRunStore {
   save(run: CrewRun): void {
     this.db
       .prepare(
-        `INSERT INTO agent_crew_runs (id, source, started_at, finished_at, use_models, status, gate, total_tokens, latency_ms, triggered_by, run_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO agent_crew_runs (id, source, started_at, finished_at, use_models, status, gate, total_tokens, latency_ms, triggered_by, run_json, workspace_id, repo_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(run.id, run.source, run.startedAt, run.finishedAt, run.useModels ? 1 : 0, run.status, run.gate, run.totalTokens, run.latencyMs, run.triggeredBy, JSON.stringify(run));
+      .run(run.id, run.source, run.startedAt, run.finishedAt, run.useModels ? 1 : 0, run.status, run.gate, run.totalTokens, run.latencyMs, run.triggeredBy, JSON.stringify(run), run.target?.workspaceId ?? null, run.target?.repoId ?? null);
   }
 
-  get(id: string): CrewRun | null {
-    const row = this.db.prepare('SELECT run_json FROM agent_crew_runs WHERE id = ?').get(id) as { run_json: string } | undefined;
+  /** A run by id: with a workspace id, only that workspace's runs; with null, only runs on the bundled repository. */
+  get(id: string, workspaceId: string | null): CrewRun | null {
+    const row = this.db.prepare('SELECT run_json FROM agent_crew_runs WHERE id = ? AND workspace_id IS ?').get(id, workspaceId) as { run_json: string } | undefined;
     return row ? (JSON.parse(row.run_json) as CrewRun) : null;
   }
 
-  /** Newest first, without the steps. */
-  list(limit = 20): Array<Omit<CrewRun, 'steps'> & { stepStatuses: string[] }> {
-    const rows = this.db.prepare('SELECT run_json FROM agent_crew_runs ORDER BY started_at DESC LIMIT ?').all(limit) as Array<{ run_json: string }>;
+  /** Newest first, without the steps; a workspace's runs, or (null) the runs on the bundled repository. */
+  list(workspaceId: string | null, limit = 20): Array<Omit<CrewRun, 'steps'> & { stepStatuses: string[] }> {
+    const rows = this.db.prepare('SELECT run_json FROM agent_crew_runs WHERE workspace_id IS ? ORDER BY started_at DESC LIMIT ?').all(workspaceId, limit) as Array<{ run_json: string }>;
     return rows.map((r) => {
       const { steps, ...rest } = JSON.parse(r.run_json) as CrewRun;
       return { ...rest, stepStatuses: steps.map((s) => s.status) };

@@ -1037,6 +1037,7 @@ cd agents && ../.venv-agents/bin/python -m lexcompiler_agents agent-z3-formal-cr
 The run's gate is NOTHING_TO_FIX, PATCH_VERIFIED, PATCH_BLOCKED or INCOMPLETE (a step failed; the chain stops there). What passes between agents comes from tool results only, never from model text, so a model's mistake can't travel down the chain.
 
 - **On the server:** `POST /api/agents/crew/runs` runs it. Every step is a direct tool call and costs nothing; `{"useModels": true}` (operator only) also lets each agent's model read what it received and report, within the agents' daily budget. `GET /api/agents/crew/runs` and `/runs/<id>` read stored runs (migration 12, `agent_crew_runs`).
+- **On a workspace repository:** `POST /api/workspaces/<id>/repos/<repoId>/crew-runs` runs the crew on the default branch's files with the rules in effect for that repository. `{"openPullRequest": true}` opens a fix pull request for a patch that passed the gate, through the same path as "Open fix PR". Members see their workspace's runs at `GET /api/workspaces/<id>/crew-runs`.
 - **In Python:** `python -m lexcompiler_agents crew` runs the six framework agents in order, each given the previous agent's report as context. The gate comes from the remediation tool's own result. The run is sent to `POST /api/agents/crew/runs/import` (operator only), which fills in each agent's tokens from `ai_calls`. `--no-store` only prints it.
 
 **In the product,** keep two agents that do real work:
