@@ -206,7 +206,7 @@ Dates are from the schedule in the product guide, section 7.
 
 ## Open questions for the owner
 
-- ~~GitHub App credentials on the Windows machine~~ Solved differently: this machine has its own App, "LexCompiler 1305" (`lexcompiler-1305`, owned by MRSHAKILS), installed on the fork **MRSHAKILS/finhealth-core-platform** (MRSHAKILS can't install apps on shahriar-ahmed-seam's repo). Its credentials are in `data/live/github-app.json` (git-ignored), with the server's data in `data/live`. Webhooks come through a Cloudflare quick tunnel, whose URL changes when `cloudflared` restarts: update the App's webhook URL then (App settings → Webhook URL), or use a named tunnel or the VPS (`docs/DEPLOY.md`). The App needs **Contents: Read and write** for fix PRs (#18; Apps registered from now on ask for it).
+- ~~GitHub App credentials on the Windows machine~~ Solved differently: this machine has its own App, "LexCompiler 1305" (`lexcompiler-1305`, owned by MRSHAKILS), installed on the fork **MRSHAKILS/finhealth-core-platform** (MRSHAKILS can't install apps on shahriar-ahmed-seam's repo). Its credentials are in `data/live/github-app.json` (git-ignored), with the server's data in `data/live`. Webhooks come through a Cloudflare quick tunnel, whose URL changes when `cloudflared` restarts: update the App's webhook URL then (App settings → Webhook URL), or start the server with `LEXCOMPILER_GITHUB_SYNC_WEBHOOK=1` and it points the App's webhook at `LEXCOMPILER_GITHUB_WEBHOOK_URL` itself (`GitHubApp.syncWebhookUrl`, as the app); or use a named tunnel or the VPS (`docs/DEPLOY.md`). The App needs **Contents: Read and write** for fix PRs (#18; Apps registered from now on ask for it).
 
 ## Live GitHub run (October 30, MRSHAKILS/finhealth-core-platform)
 
