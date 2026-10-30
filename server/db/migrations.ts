@@ -548,4 +548,21 @@ ALTER TABLE agent_crew_runs ADD COLUMN repo_id TEXT;
 CREATE INDEX agent_crew_runs_workspace ON agent_crew_runs(workspace_id, started_at);
 `,
   },
+  {
+    id: 14,
+    name: 'Regulation watch notes on feed items',
+    sql: `
+-- Per workspace: the rules a feed item may affect (no model) and its summary (the workspace's model).
+CREATE TABLE feed_item_notes (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  feed_item_id TEXT NOT NULL REFERENCES feed_items(id) ON DELETE CASCADE,
+  category TEXT,
+  affected_rule_keys_json TEXT NOT NULL,
+  summary TEXT,
+  model TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, feed_item_id)
+);
+`,
+  },
 ];

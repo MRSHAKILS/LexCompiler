@@ -3,6 +3,8 @@ import { backupDataDir } from '../db/backup.js';
 import type { LiveRegulatoryFeedItem } from '../../shared/types.js';
 import { runNightlyScans, type NightlyDeps } from './repoScan.js';
 import type { ProductStore } from './store.js';
+import type { AiGateway } from '../ai/gateway.js';
+import { watchRegulationFeed } from './regulationWatch.js';
 
 /**
  * The daily jobs of Phase 6: store new Federal Register and EUR-Lex items, and scan every
@@ -40,6 +42,8 @@ export async function runDueJobs(
     backup?: { dataDir: string; backupDir: string; keep?: number };
     /** RFC 3161 Time-Stamp Authority for the newest evidence header of each workspace (LEXCOMPILER_TSA_URL). */
     timestamps?: { tsaUrl: string; fetchImpl?: typeof fetch };
+    /** Regulation watch after the feed refresh, in workspaces whose AI is on. */
+    ai?: AiGateway;
   },
   now: Date = new Date()
 ): Promise<string[]> {
@@ -64,6 +68,18 @@ export async function runDueJobs(
   }
   if (deps.store.claimScheduledRun('regulatory-feed', DAY, now)) {
     done.push(`feed: ${await refreshRegulatoryFeed(deps.store, deps.fetchFeed)} new items`);
+    if (deps.ai) {
+      let summarized = 0;
+      for (const ws of deps.store.listWorkspaces()) {
+        if (deps.ai.settings(ws.id).mode === 'off') continue;
+        try {
+          summarized += (await watchRegulationFeed({ store: deps.store, ai: deps.ai }, ws.id)).summarized;
+        } catch (err) {
+          console.error(`[regulation watch] ${ws.name}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      done.push(`regulation watch: ${summarized} summaries`);
+    }
   }
   if (deps.store.claimScheduledRun('nightly-scans', DAY, now)) {
     const r = await runNightlyScans(deps, now);

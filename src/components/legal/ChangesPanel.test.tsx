@@ -31,7 +31,7 @@ function stubApi(extra: Record<string, unknown> = {}) {
       ],
     },
     [`${BASE}/feed`]: [
-      { id: 'FEDERAL_REGISTER:2026-21001', source: 'FEDERAL_REGISTER', documentNumber: '2026-21001', title: 'Health data retention', publicationDate: '2026-10-28', excerpt: 'Must purge within 24 hours.', url: 'https://www.federalregister.gov/d/2026-21001', kind: 'TEXT', illustrative: false, documentId: null },
+      { id: 'FEDERAL_REGISTER:2026-21001', source: 'FEDERAL_REGISTER', documentNumber: '2026-21001', title: 'Health data retention', publicationDate: '2026-10-28', excerpt: 'Must purge within 24 hours.', url: 'https://www.federalregister.gov/d/2026-21001', kind: 'TEXT', illustrative: false, documentId: null, watch: { affectedRuleKeys: ['R-1'], summary: 'Health data must be purged within 24 hours.', model: 'deepseek-chat' } },
       { id: 'EUR_LEX:32026R0999', source: 'EUR_LEX', documentNumber: '32026R0999', title: 'Corrigendum', publicationDate: '2026-10-27', excerpt: 'Amends Article 14.', url: null, kind: 'CHANGE_NOTICE', illustrative: false, documentId: null },
     ],
     [`${BASE}/repos`]: [{ id: 'repo-1', fullName: 'acme/core-platform', source: 'github' }],
@@ -39,6 +39,7 @@ function stubApi(extra: Record<string, unknown> = {}) {
     [`${BASE}/counterparties`]: [{ id: 'cp-1', name: 'Nodi Microfinance', scope: [{ repoId: 'repo-1', pathGlob: 'workers/**' }] }],
     [`${BASE}/feed/FEDERAL_REGISTER%3A2026-21001/draft`]: { rule: { key: 'R-5' }, version: { version: 1 } },
     [`${BASE}/counterparties/cp-1/scope`]: { id: 'cp-1', name: 'Nodi Microfinance', scope: [] },
+    [`${BASE}/feed/watch`]: { noted: 1, summarized: 0, refused: 'ai_off', errors: [] },
     ...extra,
   };
   vi.stubGlobal(
@@ -90,6 +91,26 @@ describe('ChangesPanel', () => {
     fireEvent.change(paths, { target: { value: 'other/repo: **' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save paths for Nodi Microfinance' }));
     expect(screen.getByText(/write "repository: path glob"/)).toBeTruthy();
+  });
+});
+
+describe('Regulation watch', () => {
+  it('shows the summary and the rules an item may affect, and runs the watch for Legal', async () => {
+    const calls = stubApi();
+    render(<ChangesPanel base={BASE} canEdit onChanged={async () => undefined} />);
+    const item = await screen.findByRole('listitem', { name: 'Feed item 2026-21001' });
+    expect(item.textContent).toContain('Regulation watch: Health data must be purged within 24 hours.');
+    expect(item.textContent).toContain('May affect R-1.');
+    fireEvent.click(screen.getByRole('button', { name: 'Run regulation watch' }));
+    expect((await screen.findByRole('status')).textContent).toBe('Regulation watch checked 1 new item and summarized 0. AI is off for this workspace, so no summaries were written.');
+    expect(calls.some((c) => c.url === `${BASE}/feed/watch`)).toBe(true);
+  });
+
+  it('is not offered to roles that cannot edit rules', async () => {
+    stubApi();
+    render(<ChangesPanel base={BASE} canEdit={false} onChanged={async () => undefined} />);
+    await screen.findByRole('listitem', { name: 'Feed item 2026-21001' });
+    expect(screen.queryByRole('button', { name: 'Run regulation watch' })).toBeNull();
   });
 });
 

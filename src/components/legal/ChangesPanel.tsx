@@ -27,6 +27,8 @@ interface FeedItem {
   kind: 'TEXT' | 'CHANGE_NOTICE';
   illustrative: boolean;
   documentId?: string | null;
+  /** Regulation watch: the rules the item may affect, and a summary when the workspace's AI is on. */
+  watch?: { affectedRuleKeys: string[]; summary: string | null; model: string | null } | null;
 }
 interface Repo {
   id: string;
@@ -128,6 +130,13 @@ export function ChangesPanel({ base, canEdit, canOpenFixes = false, onChanged }:
       const r = await api<{ created: boolean; prNumber: number; url: string; files: string[] }>(`${base}/repos/${repo.id}/fix-pr`, {});
       setFixPr({ repo: repo.fullName, prNumber: r.prNumber, url: r.url, created: r.created });
     });
+  const watchFeed = () =>
+    run(async () => {
+      const r = await api<{ noted: number; summarized: number; refused?: string; errors: string[] }>(`${base}/feed/watch`, {});
+      await refresh();
+      const why = r.refused === 'ai_off' ? ' AI is off for this workspace, so no summaries were written.' : r.refused === 'budget' ? " Today's AI budget is used up." : r.refused === 'no_model' ? ' No model is configured on this server.' : '';
+      setMessage({ kind: r.errors.length ? 'error' : 'ok', text: `Regulation watch checked ${r.noted} new item${r.noted === 1 ? '' : 's'} and summarized ${r.summarized}.${why}${r.errors.length ? ` ${r.errors.join('; ')}` : ''}` });
+    });
   const saveScope = (cp: Counterparty, scope: Array<{ repoId: string; pathGlob: string }>) =>
     run(async () => {
       await api(`${base}/counterparties/${cp.id}/scope`, { scope });
@@ -213,6 +222,11 @@ export function ChangesPanel({ base, canEdit, canOpenFixes = false, onChanged }:
         <h3 id="feed-heading" className="text-sm font-semibold">
           Regulation feed
         </h3>
+        {canEdit && feed.length > 0 && (
+          <button type="button" disabled={busy} onClick={() => void watchFeed()} className="rounded bg-zinc-700 hover:bg-zinc-800 text-white px-2 py-0.5 text-xs disabled:opacity-50">
+            Run regulation watch
+          </button>
+        )}
         {feed.length === 0 && <p className="text-sm text-zinc-400">No items yet. The feed is fetched once a day.</p>}
         <ul className="space-y-2">
           {feed.slice(0, 20).map((item) => (
@@ -229,6 +243,12 @@ export function ChangesPanel({ base, canEdit, canOpenFixes = false, onChanged }:
                 {item.illustrative && <span className="text-xs text-amber-300"> (illustrative text)</span>}
               </p>
               <p className="text-xs text-zinc-300 line-clamp-3">{item.excerpt}</p>
+              {item.watch && (item.watch.summary || item.watch.affectedRuleKeys.length > 0) && (
+                <p className="text-xs text-sky-200">
+                  {item.watch.summary && <span>Regulation watch: {item.watch.summary} </span>}
+                  {item.watch.affectedRuleKeys.length > 0 && <span className="font-semibold">May affect {item.watch.affectedRuleKeys.join(', ')}.</span>}
+                </p>
+              )}
               {item.kind === 'CHANGE_NOTICE' ? (
                 <p className="text-xs text-zinc-400">Change notice: open the amended act and upload its new text.</p>
               ) : item.documentId ? (
