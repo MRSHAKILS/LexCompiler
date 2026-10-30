@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactElement } from 're
 import { FileText, Scale, Upload } from 'lucide-react';
 import { SharesPanel } from './SharesPanel';
 import { ChangesPanel } from './ChangesPanel';
+import { AgentCrewPanel } from './AgentCrewPanel';
 import { EffectiveDateControl, RescopeControl } from './RuleControls';
 
 /**
@@ -724,6 +725,8 @@ export function LegalWorkspace() {
               onChanged={refresh}
             />
           )}
+
+          {workspaceId && <AgentCrewPanel key={`crew-${workspaceId}`} base={base} canRun={Boolean(ws && ['owner', 'legal', 'engineer', 'admin'].includes(ws.role))} />}
         </section>
       </div>
     </div>

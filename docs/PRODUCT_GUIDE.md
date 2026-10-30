@@ -1046,6 +1046,8 @@ The run's gate is NOTHING_TO_FIX, PATCH_VERIFIED, PATCH_BLOCKED or INCOMPLETE (a
 
 The other steps stay plain pipelines, and the screens call them that.
 
+**On the workspace screen** (`/legal`, "Agent crew"): a button per repository runs the crew without models; on a GitHub repository a checkbox asks for a fix pull request when Z3 proves the patch. Recent runs show the repository and commit, the gate (Nothing to fix, Patch proven by Z3, Patch not proven, A step failed) and, opened, each agent's step and the pull request.
+
 ### 5.8 MCP
 
 #### Today: six demo servers
