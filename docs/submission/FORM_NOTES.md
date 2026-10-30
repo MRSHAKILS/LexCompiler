@@ -11,7 +11,7 @@ Fields marked **(you)** need facts only the team has.
 - **YouTube video URL (you):** upload `data/video/lexcompiler-demo.mp4` (2:35, 1080p, English and Bangla voiceover) and paste the link.
 - **GitHub repository URL:** https://github.com/MRSHAKILS/LexCompiler (public; upstream: https://github.com/shahriar-ahmed-seam/LexCompiler)
 - **Live demo URL (you):** the Cloudflare tunnel URL of the running server, or the deployed URL.
-- **Figma / design link (you):** the architecture diagram in Figma.
+- **Figma / design link:** https://www.figma.com/design/8i5PbZ7o0PaigcqKQXlEWf/Untitled (the overview diagram: drag `docs/submission/lexcompiler-architecture.svg` into the file for editable layers). Rename the file "LexCompiler Architecture" in Figma and set sharing to "Anyone with the link can view".
 - **Other links (3):**
   1. https://github.com/MRSHAKILS/finhealth-core-platform/runs/124146138632: a real LexCompiler check on a pull request, with Z3's counterexample, the "Coming up" warning and the AI explanation.
   2. https://github.com/MRSHAKILS/LexCompiler/blob/main/docs/PRODUCT_GUIDE.md: the product guide.

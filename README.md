@@ -4,6 +4,8 @@
 
 `Domain: JusticeSphere AI / ComplianceOS / GovernanceIQ` | `Engine: Microsoft Z3 (z3-solver) + OPA Rego + Polyglot AST` | `Protocol: MCP JSON-RPC 2.0 (2025-03-26)`
 
+![LexCompiler: the problem, the workflow and the architecture](docs/submission/lexcompiler-architecture.png)
+
 ---
 
 ## Abstract
