@@ -66,7 +66,7 @@ describe('AgentCrewPanel', () => {
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Open a fix pull request if Z3 proves the patch' }));
     fireEvent.click(screen.getByRole('button', { name: 'Run the agents on acme/core' }));
     await waitFor(() => expect(calls.some((c) => c.url === `${BASE}/repos/repo-1/crew-runs`)).toBe(true));
-    expect(calls.find((c) => c.url === `${BASE}/repos/repo-1/crew-runs`)!.body).toEqual({ openPullRequest: true });
+    expect(calls.find((c) => c.url === `${BASE}/repos/repo-1/crew-runs`)!.body).toEqual({ openPullRequest: true, allRules: false });
 
     const step1 = await screen.findByRole('listitem', { name: 'Step 1: Regulatory horizon scanner' });
     expect(step1.textContent).toContain('(CrewAI)');
@@ -80,10 +80,11 @@ describe('AgentCrewPanel', () => {
     const calls = stubApi();
     render(<AgentCrewPanel base={BASE} canRun />);
     await screen.findByRole('button', { name: 'Run the agents on acme/local' });
-    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.getAllByRole('checkbox', { name: /pull request/ })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Check every rule in effect/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Run the agents on acme/local' }));
     await waitFor(() => expect(calls.some((c) => c.url === `${BASE}/repos/repo-2/crew-runs`)).toBe(true));
-    expect(calls.find((c) => c.url === `${BASE}/repos/repo-2/crew-runs`)!.body).toEqual({ openPullRequest: false });
+    expect(calls.find((c) => c.url === `${BASE}/repos/repo-2/crew-runs`)!.body).toEqual({ openPullRequest: false, allRules: true });
   });
 
   it('lists recent runs with the gate, and opens one to read its steps', async () => {
@@ -96,6 +97,19 @@ describe('AgentCrewPanel', () => {
     fireEvent.click(within(item).getByRole('button', { name: 'Show the steps of the run on acme/core at 858dc92' }));
     expect((await screen.findByRole('listitem', { name: 'Step 6: Remediation and PR gate' })).textContent).toContain('the gate blocks it');
     expect(screen.queryByRole('link', { name: /pull request/ })).toBeNull();
+  });
+
+  it("lists the fix agent's suggestions for a run the gate blocked", async () => {
+    const blocked = run('blocked-run', { gate: 'PATCH_BLOCKED' });
+    (blocked.steps as Array<Record<string, unknown>>)[5] = { ...blocked.steps[5], handoff: { modelFixes: [{ ruleKey: 'R-2', path: 'api/loans.py', startLine: 9, endLine: 9, body: 'R-2 · redact before logging' }] } };
+    stubApi([{ ...blocked, steps: undefined }]);
+    render(<AgentCrewPanel base={BASE} canRun={false} />);
+    const item = await screen.findByRole('listitem', { name: 'Crew run on acme/core at 858dc92' });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(blocked), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    fireEvent.click(within(item).getByRole('button', { name: 'Show the steps of the run on acme/core at 858dc92' }));
+    const region = await screen.findByRole('region', { name: 'Fix agent suggestions' });
+    expect(region.textContent).toContain('nothing was committed');
+    expect(region.textContent).toContain('R-2 at api/loans.py:9');
   });
 
   it('shows why a run was refused', async () => {

@@ -259,7 +259,7 @@ app.use(
     openFixPr,
     crew: {
       runs: crewRuns,
-      run: (repo, opts) => runWorkspaceCrew({ store: productStore, runs: crewRuns, readHead: readRepoHead, openFixPr: getGitHubApp() ? openFixPr : undefined }, repo, opts),
+      run: (repo, opts) => runWorkspaceCrew({ store: productStore, runs: crewRuns, readHead: readRepoHead, openFixPr: getGitHubApp() ? openFixPr : undefined, ai: getAiGateway() }, repo, opts),
     },
   })
 );

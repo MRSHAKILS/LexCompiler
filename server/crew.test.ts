@@ -65,6 +65,12 @@ describe('agent crew', () => {
     expect(run.steps[0].handoff.reason).toMatch(/checking all active rules/);
   }, 60_000);
 
+  it('checks every active rule when asked, even with a matching feed item', async () => {
+    const run = await runCrew(clauses, { callTool: tools().call, allRules: true });
+    expect(run.steps[0].handoff).toMatchObject({ clauseIds: clauses.map((c) => c.id), reason: 'every active rule was asked for' });
+    expect(run.steps[0].summary).toMatch(/1 active rule\(s\)\. Checking all active rules\.$/);
+  }, 60_000);
+
   it('skips remediation when Z3 refutes nothing', async () => {
     const t = tools({ prove_repository_compliance_z3: () => ({ verdicts: [{ clauseId: retention.id, citation: retention.citation, status: 'SAT_COMPLIANT', unsatCore: [], offendingLocations: [] }] }) });
     const run = await runCrew(clauses, { callTool: t.call });
