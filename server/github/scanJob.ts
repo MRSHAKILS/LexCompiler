@@ -10,6 +10,8 @@ import { CHECK_NAME, checkConclusion, chunk, renderCheckOutput, type CheckKind }
 import { GitHubApiError, type GitHubApp } from './client.js';
 import { REQUEST_EXCEPTION_ACTION, waiverLine } from './exceptions.js';
 import { postSuggestions } from './fixes.js';
+import { explainFindings, renderExplanations } from './explanations.js';
+import type { AiGateway } from '../ai/gateway.js';
 import { readTarballSources } from './tarball.js';
 
 export interface ScanJobPayload {
@@ -31,6 +33,8 @@ export interface ScanJobDeps {
   publicUrl: string;
   /** Signs a record of each completed scan; its header hash goes into the check run. */
   evidence?: EvidenceRecorder;
+  /** Model calls for AI explanations, after the check is final, when the workspace has AI on (5.5). */
+  ai?: AiGateway;
 }
 
 interface CommitScan {
@@ -181,10 +185,23 @@ export function createScanJobHandler(deps: ScanJobDeps): JobHandler {
       for (const batch of rest) {
         await app.request(installationId, 'PATCH', `${route}/check-runs/${run.id}`, { output: { title: output.title, summary: output.summary, annotations: batch } });
       }
+      // AI explanations (5.5): the result above is final; they only add details to the run.
+      let explanations = new Map<string, string>();
+      if (p.kind === 'pull_request' && deps.ai && summary.newCount > 0) {
+        try {
+          const ex = await explainFindings(deps.ai, { workspaceId: repo.workspaceId, findings, rules, files: head.files });
+          if (ex.length > 0) {
+            await app.request(installationId, 'PATCH', `${route}/check-runs/${run.id}`, { output: { title: output.title, summary: output.summary, text: renderExplanations(ex) } });
+            explanations = new Map(ex.map((e) => [e.fingerprint, `**AI explanation** (${e.model}): ${e.text}`]));
+          }
+        } catch (err) {
+          console.warn(`[github] AI explanations on ${repo.fullName} failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       // Suggested changes (Phase 4, item 2): after the check is final, and never failing it.
       if (p.kind === 'pull_request' && p.prNumber) {
         try {
-          await postSuggestions({ store: deps.store, app }, { repo, prNumber: p.prNumber, headSha, files: head.files, findings, rules, globs });
+          await postSuggestions({ store: deps.store, app }, { repo, prNumber: p.prNumber, headSha, files: head.files, findings, rules, globs, explanations });
         } catch (err) {
           console.warn(`[github] suggestions on ${repo.fullName}#${p.prNumber} failed: ${err instanceof Error ? err.message : String(err)}`);
         }

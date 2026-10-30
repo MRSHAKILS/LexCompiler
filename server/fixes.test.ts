@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { changedHunks, diffLinesByFile } from './github/fixes.js';
+import { keepRetrievedCitations } from './github/explanations.js';
 
 describe('suggested changes: diff arithmetic', () => {
   it('reads the new-side lines of each hunk in a pull request patch', () => {
@@ -16,5 +17,16 @@ describe('suggested changes: diff arithmetic', () => {
       { start: 2, end: 2, replacement: [] },
       { start: 4, end: 4, replacement: ['D'] },
     ]);
+  });
+});
+
+describe('AI explanations: citations', () => {
+  it('keeps only retrieved chunk ids, in the list and in the text', () => {
+    const ids = new Set(['rule:R-2', 'code:api/x.py:15-27']);
+    expect(keepRetrievedCitations('Logs must be redacted [rule:R-2]. Line 21 is not [code:api/x.py:15-27] [made:up].', ['rule:R-2', 'made:up'], ids)).toEqual({
+      text: 'Logs must be redacted [rule:R-2]. Line 21 is not [code:api/x.py:15-27].',
+      citations: ['rule:R-2'],
+    });
+    expect(keepRetrievedCitations('Nothing retrieved [other].', ['other'], ids).citations).toEqual([]);
   });
 });
