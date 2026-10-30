@@ -132,10 +132,10 @@ describe('agent crew', () => {
     const run = await runCrew(clauses, { callTool: tools().call });
     store.save(run);
     store.save({ ...run, id: 'later', startedAt: new Date(Date.now() + 1000).toISOString() });
-    expect(store.get(run.id)?.steps).toHaveLength(6);
-    expect(store.list().map((r) => r.id)).toEqual(['later', run.id]);
-    expect(store.list()[0].stepStatuses).toEqual(run.steps.map((s) => s.status));
-    expect(store.get('nope')).toBeNull();
+    expect(store.get(run.id, null)?.steps).toHaveLength(6);
+    expect(store.list(null).map((r) => r.id)).toEqual(['later', run.id]);
+    expect(store.list(null)[0].stepStatuses).toEqual(run.steps.map((s) => s.status));
+    expect(store.get('nope', null)).toBeNull();
   });
 
   it('stores a Python crew run with each agent\u2019s tokens from the call log', () => {

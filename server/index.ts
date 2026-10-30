@@ -49,6 +49,8 @@ import { EvidenceRecorder } from './evidence/records.js';
 import { workspaceSigners } from './evidence/signer.js';
 import { AiGateway, getAiGateway } from './ai/gateway.js';
 import { createAgentRouter } from './agents/routes.js';
+import { CrewRunStore } from './agents/crew.js';
+import { runWorkspaceCrew } from './agents/workspaceCrew.js';
 import { createPublicEvidenceRouter } from './evidence/share.js';
 import { FixPrError, openFixPullRequest } from './github/fixes.js';
 import { refreshRegulatoryFeed, runDueJobs } from './product/feed.js';
@@ -175,6 +177,26 @@ const jobQueue = new JobQueue(
 // express.json() and the /api guard (GitHub sends no browser headers).
 app.post('/api/github/webhooks', express.raw({ type: () => true, limit: '25mb' }), createWebhookHandler({ store: productStore, getApp: getGitHubApp, queue: jobQueue, relayReencoded: process.env.LEXCOMPILER_GITHUB_WEBHOOK_RELAY === 'smee' }));
 /** A repository's files at a commit: the local folder, or GitHub's archive with the installation token. */
+const openFixPr = async (repo: Repo, requestedBy: string) => {
+  const gh = getGitHubApp();
+  if (!gh) throw new StoreError('the GitHub App is not configured on this server', 503);
+  try {
+    return await openFixPullRequest({ store: productStore, app: gh }, repo, requestedBy);
+  } catch (err) {
+    // A fix that didn't pass the Z3 gate (or nothing to fix) is a 409 for the caller.
+    if (err instanceof FixPrError) throw new StoreError(err.message, err.status);
+    throw err;
+  }
+};
+const crewRuns = new CrewRunStore(getDb());
+/** The default branch's head and files, for the agent crew on a workspace repository. */
+const readRepoHead = async (repo: Repo) => {
+  if (repo.source === 'local' && repo.localPath) return { commitSha: 'working-tree', files: readRepositoryFilesAt(repo.localPath) };
+  const gh = getGitHubApp();
+  if (!gh || repo.installationId === null) throw new StoreError('The GitHub App is not configured on this server, so the default branch cannot be read.', 503);
+  const head = await gh.request<{ sha: string }>(repo.installationId, 'GET', `/repos/${repo.fullName}/commits/${encodeURIComponent(repo.defaultBranch)}`);
+  return { commitSha: head.sha, files: await readRepoFiles(repo, head.sha) };
+};
 const readRepoFiles = async (repo: Repo, sha: string) => {
   if (repo.source === 'local' && repo.localPath) return readRepositoryFilesAt(repo.localPath);
   const gh = getGitHubApp();
@@ -224,16 +246,10 @@ app.use(
     publicUrl,
     readRepoFiles,
     refreshFeed: () => refreshRegulatoryFeed(productStore),
-    openFixPr: async (repo, requestedBy) => {
-      const gh = getGitHubApp();
-      if (!gh) throw new StoreError('the GitHub App is not configured on this server', 503);
-      try {
-        return await openFixPullRequest({ store: productStore, app: gh }, repo, requestedBy);
-      } catch (err) {
-        // A fix that didn't pass the Z3 gate (or nothing to fix) is a 409 for the caller.
-        if (err instanceof FixPrError) throw new StoreError(err.message, err.status);
-        throw err;
-      }
+    openFixPr,
+    crew: {
+      runs: crewRuns,
+      run: (repo, opts) => runWorkspaceCrew({ store: productStore, runs: crewRuns, readHead: readRepoHead, openFixPr: getGitHubApp() ? openFixPr : undefined }, repo, opts),
     },
   })
 );
@@ -458,7 +474,7 @@ app.post('/api/mcp/:serverId/rpc', async (req, res) => {
 });
 
 // The agent crew: the model route for the Python agents, and chained crew runs (server/agents/routes.ts).
-app.use(createAgentRouter({ db: getDb(), gateway: getAiGateway, clauses: () => activeClauses }));
+app.use(createAgentRouter({ db: getDb(), gateway: getAiGateway, clauses: () => activeClauses, runs: crewRuns }));
 
 /** UI helper: runs tools/call and returns the full request/response trace. */
 app.post('/api/mcp/:serverId/invoke', async (req, res) => {

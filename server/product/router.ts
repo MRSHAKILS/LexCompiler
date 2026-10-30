@@ -8,6 +8,7 @@ import { OidcProvider, type Principal } from '../auth/oidc.js';
 import { tokensMatch, type Authenticator } from '../security.js';
 import type { EvidenceRecorder } from '../evidence/records.js';
 import type { TargetRepoFile } from '../../shared/types.js';
+import type { CrewRun, CrewRunStore } from '../agents/crew.js';
 import { scanLocalRepo, storeComingUp } from './repoScan.js';
 import type { RuleCategory } from '../../shared/types.js';
 import { compileClause, isRuleCategory, libraryTemplates, RULE_CATEGORIES } from './clauses.js';
@@ -64,6 +65,11 @@ export interface ProductRouterOptions {
   refreshFeed?: () => Promise<number>;
   /** Opens a verified fix pull request for a GitHub repository's default branch (Phase 4). */
   openFixPr?: (repo: Repo, requestedBy: string) => Promise<{ created: boolean }>;
+  /** The agent crew on a workspace repository (server/agents/workspaceCrew.ts). */
+  crew?: {
+    run: (repo: Repo, opts: { useModels: boolean; openPullRequest: boolean; requestedBy: string; triggeredBy: string | null }) => Promise<CrewRun>;
+    runs: CrewRunStore;
+  };
 }
 
 const EXCEPTION_STATUSES: ExceptionStatus[] = ['requested', 'approved', 'rejected', 'expired', 'revoked'];
@@ -812,6 +818,40 @@ export function createProductRouter(store: ProductStore, oidc: OidcProvider | nu
     if (!repo || repo.workspaceId !== wid(req)) return void res.status(404).json({ error: 'repository not found' });
     res.json(store.listFixPrs(repo.id));
   });
+  /**
+   * Runs the six agents on the repository's default branch with the rules in effect. With
+   * "openPullRequest", a patch that passes the Z3 gate becomes a fix pull request; with
+   * "useModels" (server operator only, it spends the agents' budget) each agent's model reports too.
+   */
+  r.post(
+    '/workspaces/:workspaceId/repos/:repoId/crew-runs',
+    need('runScans'),
+    handle(async (req, res) => {
+      const repo = store.getRepo(String(req.params.repoId));
+      if (!repo || repo.workspaceId !== wid(req)) throw new StoreError('repository not found', 404);
+      if (!options.crew) throw new StoreError('the agent crew is not available on this server', 503);
+      const useModels = req.body?.useModels === true;
+      if (useModels && principalOf(res)?.globalRole !== 'admin') throw new StoreError('running the crew with models is for the server operator', 403);
+      const user = userOf(res);
+      const run = await options.crew.run(repo, {
+        useModels,
+        openPullRequest: req.body?.openPullRequest === true,
+        requestedBy: user.email ?? user.name ?? user.oidcSub,
+        triggeredBy: user.email ?? user.oidcSub,
+      });
+      res.status(201).json(run);
+    })
+  );
+  r.get('/workspaces/:workspaceId/crew-runs', need('view'), (req, res) => {
+    if (!options.crew) return void res.json({ runs: [] });
+    res.json({ runs: options.crew.runs.list(wid(req)) });
+  });
+  r.get('/workspaces/:workspaceId/crew-runs/:runId', need('view'), (req, res) => {
+    const run = options.crew?.runs.get(String(req.params.runId), wid(req));
+    if (!run) return void res.status(404).json({ error: 'crew run not found' });
+    res.json(run);
+  });
+
   /** Scans a local repository with the rules in effect. GitHub repositories are scanned by the app. */
   r.post(
     '/workspaces/:workspaceId/repos/:repoId/scan',
