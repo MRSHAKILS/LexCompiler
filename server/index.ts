@@ -162,6 +162,16 @@ try {
   console.error(`[github] ${err instanceof Error ? err.message : String(err)}`);
 }
 const getGitHubApp = () => githubApp;
+// A quick tunnel gets a new URL on every start. With LEXCOMPILER_GITHUB_SYNC_WEBHOOK=1 the server
+// points the App's webhook at LEXCOMPILER_GITHUB_WEBHOOK_URL itself, instead of someone editing
+// the App's settings on GitHub. Off by default: one App may serve several servers.
+if (githubApp && process.env.LEXCOMPILER_GITHUB_SYNC_WEBHOOK === '1' && process.env.LEXCOMPILER_GITHUB_WEBHOOK_URL) {
+  const hookUrl = process.env.LEXCOMPILER_GITHUB_WEBHOOK_URL;
+  githubApp
+    .syncWebhookUrl(hookUrl)
+    .then((previous) => console.log(previous === null ? `[github] The App's webhook already points at ${hookUrl}` : `[github] Pointed the App's webhook at ${hookUrl} (was ${previous || 'unset'})`))
+    .catch((err) => console.error(`[github] Could not update the App's webhook URL: ${err instanceof Error ? err.message : String(err)}`));
+}
 // The signed evidence log (Phase 5): the server's attestation key (local file, Cloud KMS or AWS KMS).
 // Local signing: one Ed25519 key per workspace in data/workspace-keys; KMS: the server's KMS key.
 const evidenceLog = new EvidenceLog(getDb(), workspaceSigners(dataDir()));
