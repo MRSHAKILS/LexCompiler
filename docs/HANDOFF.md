@@ -175,6 +175,29 @@ Dates are from the schedule in the product guide, section 7.
    - Point the GitHub App's webhook and the Keycloak redirect at the public URL.
    Then the freeze from Dec 20 to 25.
 
+## The agent crew (ported from upstream PR #40)
+
+`AGENTS.md` §2 lists six agents, each in its own framework with its own MCP server. The Python code is in `agents/lexcompiler_agents/`; the MCP servers are in `server/mcp/mcpSuite.ts` (`/api/mcp/<server>/rpc`). The agent work from shahriar-ahmed-seam/LexCompiler PR #40 was ported here on October 30; that repository's PRs #37–#39 (its own demo web app, password sign-in, evidence log and workspace MCP) were not, since this fork built those separately.
+
+**How a run works.** `python -m lexcompiler_agents <agent-id>` lists the tools of the agent's MCP server and lets the framework's agent call them. The model call goes to the server's **agent route**, `POST /api/agents/llm/v1/chat/completions` (`relayAgentChat` in `server/ai/gateway.ts`). The route:
+- takes the agent id as `model` and uses that agent's `LEXCOMPILER_AGENT_<ID>_*` model;
+- keeps the provider key on the server;
+- enforces `LEXCOMPILER_AGENT_MAX_DAILY_TOKENS` (default 100,000 cloud tokens per UTC day, all agents together; 429 past it) and logs each call in `ai_calls`;
+- accepts only a global admin (the operator token, or loopback without sign-in); signed-in members get 403;
+- rewrites JSON-schema output for DeepSeek.
+
+`/api/ai-heavy/overview` no longer runs agent models on page load; `?agentModels=1` opts in.
+
+**Credit.** The DeepSeek balance is about $0.85 (October 30). Keep agent runs to single small tests.
+
+**Next, in order:**
+1. Chain the crew: horizon scanner → deontic extractor → AST mapper → graph RAG → Z3 critic → remediation, each passing its output to the next; store the run.
+2. Hermes on a bigger local model (`qwen2.5-coder:7b`, or `3b`).
+3. Remediation opens a real pull request (the App here has Contents: write since #18), only when post-patch Z3 is SAT_COMPLIANT.
+4. Point the agents at a workspace's repository and rules instead of the bundled fixture.
+5. Tests for the agent route (403, the budget's 429, `relayBody`).
+6. Put the agents into the product screens: the horizon scanner as regulation watch (Phase 6), remediation as the fix agent (Phase 4).
+
 ## Sign-in on this machine (October 30)
 
 `npm run setup:keycloak` started Keycloak 26.4.0 in Docker (container `lexc-keycloak`, port 8080) and set up the realm for `data/live`; its passwords and client secret are in `data/live/keycloak/` (git-ignored). Arif and Nusrat were invited with `seed:demo`. The live server on port 3002 runs with `--env-file=data/live/keycloak/oidc.env` and `LEXCOMPILER_OIDC_REDIRECT_URI=http://localhost:3002/api/auth/callback`. Checked by signing in through Keycloak's login form: `/api/auth/me` shows arif as global admin and nusrat as a member, and `/api/workspaces` gives nusrat the `legal` role in FinHealth AI.
