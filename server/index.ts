@@ -43,6 +43,7 @@ import {
 } from './compiler/legalCompiler.js';
 import { getMcpServersCatalog, handleMcpMessage, invokeMcpTool } from './mcp/mcpSuite.js';
 import { createWorkspaceMcpRouter } from './mcp/workspaceServer.js';
+import { createOAuthRouter } from './mcp/oauth.js';
 import { EvidenceLog } from './evidence/log.js';
 import { EvidenceRecorder } from './evidence/records.js';
 import { workspaceSigners } from './evidence/signer.js';
@@ -189,10 +190,18 @@ app.use(
     store: productStore,
     security: securityConfig,
     readRepoFiles,
+    resourceMetadataUrl: `${publicUrl}/.well-known/oauth-protected-resource`,
   })
 );
 app.use(express.json({ limit: '5mb' }));
 const oidcProvider = oidcConfig ? new OidcProvider(oidcConfig, databaseSessionStore(productStore)) : null;
+// OAuth for the MCP endpoint (Phase 4a): metadata, client registration, consent and tokens,
+// with the dashboard's sign-in. Outside the /api guard.
+app.use(['/oauth', '/.well-known/oauth-protected-resource', '/.well-known/oauth-authorization-server'], rateLimit({ name: 'oauth', windowMs: 60_000, max: limits.oauth ?? 60 }));
+{
+  const browserAuth = createBrowserAuth(oidcProvider);
+  app.use(createOAuthRouter({ store: productStore, db: getDb(), publicUrl, principal: (req) => browserAuth.principal(req), loginUrl: browserAuth.loginUrl }));
+}
 // Expired sessions are also dropped when read; this keeps the table small.
 productStore.purgeExpiredSessions();
 setInterval(() => productStore.purgeExpiredSessions(), 60 * 60 * 1000).unref();

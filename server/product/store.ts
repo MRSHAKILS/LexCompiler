@@ -1544,6 +1544,23 @@ export class ProductStore {
     return { token, record: this.tokenFrom(this.db.prepare('SELECT * FROM api_tokens WHERE id = ?').get(id) as Row) };
   }
 
+  /** A token that lasts `ttlMs` (OAuth access tokens: one hour). */
+  createShortLivedApiToken(workspaceId: string, userId: string, name: string, ttlMs: number): { token: string; record: ApiTokenRecord } {
+    if (!this.roleOf(workspaceId, userId)) throw new StoreError('workspace not found', 404);
+    const token = API_TOKEN_PREFIX + crypto.randomBytes(32).toString('base64url');
+    const id = newId();
+    const now = new Date();
+    this.db
+      .prepare('INSERT INTO api_tokens (id, workspace_id, user_id, name, token_sha256, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(id, workspaceId, userId, name.slice(0, 100), sha256Hex(token), now.toISOString(), new Date(now.getTime() + ttlMs).toISOString());
+    return { token, record: this.tokenFrom(this.db.prepare('SELECT * FROM api_tokens WHERE id = ?').get(id) as Row) };
+  }
+
+  /** Revokes a token by id, whoever owns it (OAuth rotation and code reuse). */
+  revokeApiTokenById(tokenId: string): void {
+    this.db.prepare('UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?').run(nowIso(), tokenId);
+  }
+
   /** A user's tokens in a workspace, newest first. */
   listApiTokens(workspaceId: string, userId: string): ApiTokenRecord[] {
     return (this.db.prepare('SELECT * FROM api_tokens WHERE workspace_id = ? AND user_id = ? ORDER BY created_at DESC').all(workspaceId, userId) as Row[]).map((r) => this.tokenFrom(r));

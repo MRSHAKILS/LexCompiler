@@ -43,6 +43,8 @@ export const WORKSPACE_MCP_INSTRUCTIONS = [
 
 export interface WorkspaceMcpOptions {
   store: ProductStore;
+  /** OAuth protected-resource metadata (RFC 9728), named in 401 answers so clients can sign in. */
+  resourceMetadataUrl?: string;
   security: ServerSecurityConfig;
   readRepoFiles: ReadRepoFiles;
   /** Calls per token per minute (default 60). */
@@ -104,7 +106,7 @@ export function createWorkspaceMcpRouter(options: WorkspaceMcpOptions) {
     }
     const principal = options.store.tokenPrincipal(bearer(req));
     if (!principal) {
-      res.setHeader('WWW-Authenticate', 'Bearer realm="LexCompiler", error="invalid_token"');
+      res.setHeader('WWW-Authenticate', `Bearer realm="LexCompiler", error="invalid_token"${options.resourceMetadataUrl ? `, resource_metadata="${options.resourceMetadataUrl}"` : ''}`);
       res.status(401).json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'A valid LexCompiler token is required (Authorization: Bearer lexc_pat_…). It may be missing, revoked or expired.' } });
       return;
     }

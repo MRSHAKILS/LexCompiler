@@ -480,4 +480,41 @@ CREATE TABLE evidence_timestamps (
 );
 `,
   },
+  {
+    id: 11,
+    name: 'OAuth for the MCP endpoint',
+    sql: `
+-- Clients registered dynamically (RFC 7591). Public clients: no secret, PKCE required.
+CREATE TABLE oauth_clients (
+  client_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  redirect_uris_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+-- Authorization codes (10 minutes, one use). Only the code's SHA-256 is stored.
+CREATE TABLE oauth_codes (
+  code_sha256 TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  redirect_uri TEXT NOT NULL,
+  code_challenge TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT
+);
+-- Refresh tokens (rotated on use). The access token is an api_tokens row that lasts an hour.
+CREATE TABLE oauth_refresh_tokens (
+  token_sha256 TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  code_sha256 TEXT NOT NULL,
+  access_token_id TEXT REFERENCES api_tokens(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+CREATE INDEX oauth_refresh_code ON oauth_refresh_tokens(code_sha256);
+`,
+  },
 ];
