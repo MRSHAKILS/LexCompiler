@@ -195,7 +195,7 @@ Dates are from the schedule in the product guide, section 7.
 2. Hermes on a bigger local model (`qwen2.5-coder:7b`, or `3b`).
 3. Remediation opens a real pull request (the App here has Contents: write since #18), only when post-patch Z3 is SAT_COMPLIANT.
 4. Point the agents at a workspace's repository and rules instead of the bundled fixture.
-5. Tests for the agent route (403, the budget's 429, `relayBody`).
+5. ~~Tests for the agent route~~ done: `server/agentRoutes.test.ts` (403 for members and anonymous callers; relayed fields, the 4,096-token cap and the call log; 400/404 refusals; 429 past the daily budget, with local models not counted; `relayBody` for DeepSeek with and without tools; the crew run, import and list routes). The endpoints moved to `server/agents/routes.ts`.
 6. Put the agents into the product screens: the horizon scanner as regulation watch (Phase 6), remediation as the fix agent (Phase 4).
 
 ## Sign-in on this machine (October 30)
